@@ -1253,7 +1253,13 @@ impl crate::coordinator::Coordinator {
         }
         let guard = self.emoji_dict.read().unwrap_or_else(|e| e.into_inner());
         let list = guard.as_ref()?.lookup(text)?;
-        let picked: Vec<&str> = list.split_whitespace().take(max_per_word).collect();
+        // 与追加档同一套去重（剥 U+FE0F，保留先到者），否则注释里同一符号出两次。
+        let mut seen = std::collections::HashSet::new();
+        let picked: Vec<&str> = list
+            .split_whitespace()
+            .filter(|e| seen.insert(crate::handle_candidate::emoji_dedup_key(e)))
+            .take(max_per_word)
+            .collect();
         if picked.is_empty() {
             None
         } else {

@@ -317,6 +317,15 @@ fn sole_non_emoji(candidates: &[Candidate]) -> Option<&Candidate> {
 
 /// 规划 emoji 插入：返回 `(宿主下标, 该宿主要插入的 emoji)`，**不修改**候选列表。
 ///
+/// emoji 去重键：剥掉 U+FE0F（变体选择符 16，要求 emoji 呈现）。
+///
+/// 上游表里过半符号带尾随 FE0F（`✅️` 而非 `✅`），同一个符号两种写法按字符串比是两条，
+/// 会挤占 `max_per_word` 配额（`奖项` → `🏅️ 🏅 🎖️`）。只用来比，**不改写**输出：FE0F 决定
+/// 彩色 emoji 还是黑白文本字形，谁先到用谁（见 `docs/design/text-mapping-tables.md` §2.3）。
+pub(crate) fn emoji_dedup_key(s: &str) -> String {
+    s.replace('\u{FE0F}', "")
+}
+
 /// # 为什么抽成纯函数
 ///
 /// [`Coordinator::apply_emoji_suggestions`] 的其余部分要真实的 `Coordinator`（配置 + mmap
@@ -330,7 +339,8 @@ fn sole_non_emoji(candidates: &[Candidate]) -> Option<&Candidate> {
 /// - `exact_only` 时跳过前缀补全与子短语：那些候选本身就是「猜」出来的，再挂 emoji 只会
 ///   放大噪音；
 /// - 去重集合**起手装入全部既有候选文本**：词库里本来就收了那个 emoji 时不再重复给一条，
-///   多个宿主命中同一个 emoji 时也只给一条。
+///   多个宿主命中同一个 emoji 时也只给一条。去重按 [`emoji_dedup_key`]（剥掉 U+FE0F）比，
+///   保留先到者的原形。
 fn plan_emoji_insertions(
     candidates: &[Candidate],
     exact_only: bool,
@@ -339,8 +349,10 @@ fn plan_emoji_insertions(
     min_chars: usize,
     lookup: impl Fn(&str) -> Option<String>,
 ) -> Vec<(usize, Vec<String>)> {
-    let mut seen: std::collections::HashSet<String> =
-        candidates.iter().map(|c| c.text.clone()).collect();
+    let mut seen: std::collections::HashSet<String> = candidates
+        .iter()
+        .map(|c| emoji_dedup_key(&c.text))
+        .collect();
     let mut picks: Vec<(usize, Vec<String>)> = Vec::new();
     for (i, c) in candidates.iter().enumerate().take(max_hosts) {
         if c.is_emoji_suggestion || c.text.chars().count() < min_chars {
@@ -357,7 +369,7 @@ fn plan_emoji_insertions(
             if picked.len() >= max_per_word {
                 break;
             }
-            if seen.insert(e.to_string()) {
+            if seen.insert(emoji_dedup_key(e)) {
                 picked.push(e.to_string());
             }
         }
@@ -5461,6 +5473,25 @@ mod plan_emoji_tests {
             vec!["😊".to_string(), "🙂".to_string(), "😁".to_string()],
             "已在候选里的 😄 应被跳过"
         );
+    }
+
+    /// 同一符号带 / 不带 U+FE0F 只算一个：表内重复只留先到者的原形，已有候选也挡得住。
+    /// 回归：上游表开分类后「奖项」出 `🏅️ 🏅 🎖️`，三个配额两个是同一枚奖牌。
+    #[test]
+    fn dedups_variation_selector_forms() {
+        let fe0f = |t: &str| match t {
+            "奖项" => Some("🏅\u{FE0F} 🏅 🎖\u{FE0F} 🥇".to_string()),
+            "打勾" => Some("✅\u{FE0F} ✔\u{FE0F}".to_string()),
+            _ => None,
+        };
+        let got = plan_emoji_insertions(&[c("奖项")], true, 1, 3, 2, fe0f);
+        assert_eq!(
+            got[0].1,
+            ["🏅\u{FE0F}", "🎖\u{FE0F}", "🥇"],
+            "裸 🏅 是前一条的另一种写法，跳过；保留先到的带 FE0F 形态"
+        );
+        let got = plan_emoji_insertions(&[c("打勾"), c("✅")], true, 1, 3, 2, fe0f);
+        assert_eq!(got[0].1, ["✔\u{FE0F}"], "候选里已有 ✅，表里的 ✅️ 不再给");
     }
 
     /// 两个宿主命中同一个 emoji 时只给一条。
