@@ -310,7 +310,12 @@ pub fn dict_tag(lowercase_code: bool) -> &'static str {
 
 /// 注释库缓存的 tag。同理独立于词库解析：注释库用的是 `wind-reverse` 里那份精简解析器
 /// （只取 text/comment/code 三列），与 `codetable` 的 rime 解析各自演进。
-pub const COMMENT_TAG: &str = "comment/v1";
+///
+/// 历史：
+/// - v1 = 初始
+/// - v2 = 无 `...` 的裸表按 OpenCC 约定读（丢重复键的值首项、跳过 `---` 行）；同一份裸表
+///   解析结果变了，旧缓存须作废
+pub const COMMENT_TAG: &str = "comment/v2";
 
 /// emoji 扩展表缓存的 tag（`.wemj`，见 [`crate::emojidict`]）。
 ///

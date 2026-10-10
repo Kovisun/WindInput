@@ -434,14 +434,20 @@ fn parse_comment_dict(path: &std::path::Path) -> std::io::Result<Vec<(String, St
     let normalized = wind_utils::text::normalize_input(&content);
     let content: &str = &normalized;
     // 正文起点：首个独占一行的 `...` 之后。无该行 → 整个文件都是正文（容许无 YAML 头的裸表）。
-    let (header, body) = match content.find("\n...") {
+    // `bare`：连 `...` 都没有的裸表。OpenCC 文本词典（rime-frost 的 `chinese_english.txt` 等）
+    // 就是这种形态，按 [`opencc_comment`] 的约定读；有 `...` 的是 rime 词库形态，不动。
+    let (header, body, bare) = match content.find("\n...") {
         Some(i) if content[i + 1..].starts_with("...") => {
             let rest = &content[i + 4..];
             let body = rest.strip_prefix("\r").unwrap_or(rest);
-            (&content[..i], body.strip_prefix('\n').unwrap_or(body))
+            (
+                &content[..i],
+                body.strip_prefix('\n').unwrap_or(body),
+                false,
+            )
         }
-        _ if content.starts_with("...") => (&content[..0], &content[3..]),
-        _ => (&content[..0], content),
+        _ if content.starts_with("...") => (&content[..0], &content[3..], false),
+        _ => (&content[..0], content, true),
     };
     let Some((text_col, comment_col, code_col)) = comment_columns(header) else {
         tracing::warn!(
@@ -466,7 +472,13 @@ fn parse_comment_dict(path: &std::path::Path) -> std::io::Result<Vec<(String, St
             continue;
         }
         let text = parts[text_col];
-        let comment = parts[comment_col];
+        let mut comment = parts[comment_col];
+        if bare {
+            let Some(c) = opencc_comment(text, comment) else {
+                continue;
+            };
+            comment = c;
+        }
         if text.is_empty() || comment.is_empty() {
             continue;
         }
@@ -474,6 +486,28 @@ fn parse_comment_dict(path: &std::path::Path) -> std::io::Result<Vec<(String, St
         out.push((text.to_string(), comment.to_string(), code.to_string()));
     }
     Ok(out)
+}
+
+/// 裸表（无 YAML 头）按 OpenCC 文本词典的约定取注释；返回 `None` 表示这行不是词条。
+///
+/// OpenCC 文本词典（`键<Tab>值1 值2 …`）只是 OpenCC 项目的约定，没有规范；rime 生态在它上面
+/// 又叠了两条约定，这里都要认，用户从那边拿来的表才能直接放：
+/// - **值的首项重复键本身**（`好\t好 good well`）：rime simplifier 用转换结果替换原候选，要保住
+///   原词就得把它写成首项。作注释时它是噪音（显示成「好 good well」），丢掉。不带这一项的表
+///   原样保留。同 `wind_dict::emojidict::parse_upstream`。
+/// - **`---` 开头的行是注释**：OpenCC 文本词典没有注释语法，rime-frost 借「键不可重复」写成
+///   `----------格式为：…\t----------…`。
+fn opencc_comment<'a>(text: &str, value: &'a str) -> Option<&'a str> {
+    if text.starts_with("---") {
+        return None;
+    }
+    let v = value.trim_start();
+    match v.strip_prefix(text) {
+        Some(rest) if rest.is_empty() || rest.starts_with(char::is_whitespace) => {
+            Some(rest.trim_start())
+        }
+        _ => Some(value),
+    }
 }
 
 /// 精确查不到时依次重试的大小写变形（全小写 → 首字母大写 → 全大写，去掉与原文相同者）。
@@ -2050,6 +2084,35 @@ mod tests {
     fn parse_accepts_headerless_tsv() {
         let rows = parse_str("苹果\tapple\n");
         assert_eq!(rows, vec![("苹果".into(), "apple".into(), String::new())]);
+    }
+
+    /// 裸表按 OpenCC 约定读：丢掉重复键本身的值首项、跳过 `---` 注释行；首项不是键本身的
+    /// 原样保留（「好人」不是「好」的重复）；只剩键本身的行没有注释，跳过。
+    #[test]
+    fn parse_reads_bare_opencc_tables() {
+        let rows = parse_str(
+            "----------格式为：输入内容\t----------格式为：输入内容 \n\
+             好\t好 good well\n\
+             好人\tgood person\n\
+             好\t好人 的首项不是键\n\
+             空\t空\n",
+        );
+        let got: Vec<(&str, &str)> = rows.iter().map(|r| (r.0.as_str(), r.1.as_str())).collect();
+        assert_eq!(
+            got,
+            [
+                ("好", "good well"),
+                ("好人", "good person"),
+                ("好", "好人 的首项不是键"),
+            ]
+        );
+    }
+
+    /// 有 `...` 的 rime 形态不套 OpenCC 约定：注释本来就可能以词本身开头。
+    #[test]
+    fn parse_keeps_rime_form_comment_verbatim() {
+        let rows = parse_str("...\n好\t好 good\n");
+        assert_eq!(rows[0].1, "好 good");
     }
 
     /// 注释内容含空格/标点原样保留（只按 `\t` 切列，不 trim 内容）。
