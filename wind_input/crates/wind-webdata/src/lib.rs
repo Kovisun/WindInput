@@ -845,7 +845,8 @@ pub trait WebDataRpc: WebDataHost {
         Ok(json!(items))
     }
 
-    /// 注释词库的**可选来源**：自动派生项 + `schemas/comments/` 下扫到的文件。
+    /// 注释词库的**可选来源**：自动派生项 + `schemas/comments/` 下扫到的文件（`.dict.yaml` 与
+    /// OpenCC 文本词典 `.txt`）。
     ///
     /// 设置页据此把「填路径」换成「挑一个」——路径要相对 `schemas/`、分隔符怎么写、文件到底
     /// 放没放对，这三件事以前全靠用户自己对，错了的表现是「配了没反应」（core 只 warn 一行）。
@@ -880,6 +881,20 @@ pub trait WebDataRpc: WebDataHost {
                 "hasComment": wind_reverse::declares_comment_column(&abs),
             })
         })
+        .chain(
+            // OpenCC 文本词典（`词<Tab>值…`，rime 生态常见 `.txt`）：没有 YAML 头就没有 columns
+            // 可判，按约定恒为「词 → 注释」两列，故 `hasComment` 直接给 true（解析见
+            // `wind_reverse::parse_comment_dict` 的裸表分支）。
+            wind_config::Config::list_schema_resource_dir(data_dir.as_deref(), "comments", ".txt")
+                .into_iter()
+                .map(|(rel, abs)| {
+                    json!({
+                        "path": rel,
+                        "label": dict_yaml_name(&abs),
+                        "hasComment": true,
+                    })
+                }),
+        )
         .collect();
         Ok(json!({ "auto": auto, "files": files }))
     }
