@@ -312,11 +312,22 @@ impl ImeController for CoordIme {
             // 数据类开关（emoji / 附加模块 / 注释词库）要报错给调用方：id 写错时静默无反应，
             // 写短语的人无从排查。其余 target 维持原样。
             if is_feature_target(target) {
-                return c.cmd_toggle_feature(target);
+                return c.cmd_set_feature(target, None);
             }
             c.cmd_ime_toggle(target);
         }
         Ok(())
+    }
+    fn set(&self, target: &str, on: bool) -> anyhow::Result<()> {
+        let Some(c) = self.0.upgrade() else {
+            return Ok(());
+        };
+        if !is_feature_target(target) {
+            anyhow::bail!(
+                "ime.set 只支持数据开关（emoji / emoji:<模块id> / dict:<注释库id>），收到 {target:?}"
+            );
+        }
+        c.cmd_set_feature(target, Some(on))
     }
     fn open_setting(&self, page: &str, args: &str) -> anyhow::Result<()> {
         if let Some(c) = self.0.upgrade() {
@@ -606,33 +617,43 @@ pub(crate) fn is_feature_target(target: &str) -> bool {
     target == "emoji" || target.starts_with("emoji:") || target.starts_with("dict:")
 }
 
-/// 翻转注释词库 `id` 的开关，返回新的 `[[ui.comment_dicts]]` 数组与翻转后的状态。
+/// 把注释词库 `id` 设为 `want`（`None` = 取反）。返回新的 `[[ui.comment_dicts]]` 数组与新状态；
+/// 已是目标状态时返回 `None`（不写盘）。
 ///
-/// - 列表里已有该 id 的条目（手工挂的库，或自动来源的引用空壳）：就地翻转 `enabled`。
-/// - 没有、但它是自动来源（词库自带 comment 列，出厂开）：追加一条只含 `id/auto/enabled`
-///   的引用空壳（同设置端写法），值为关。
+/// - 列表里已有该 id 的条目（手工挂的库，或自动来源的引用空壳）：就地改 `enabled`。
+/// - 没有、但它是自动来源（词库自带 comment 列，未登记时是开着的）：要关就追加一条只含
+///   `id/auto/enabled` 的引用空壳（同设置端写法）；要开则本来就开着，不动。
 /// - 都不是：报错（id 写错）。
 ///
 /// 纯函数，单测钉住；写盘与重载在调用方。
-pub(crate) fn toggle_comment_dict(
+pub(crate) fn set_comment_dict(
     configured: &[wind_config::CommentDictSpec],
     auto_ids: &[String],
     id: &str,
-) -> anyhow::Result<(Vec<wind_config::CommentDictSpec>, bool)> {
+    want: Option<bool>,
+) -> anyhow::Result<Option<(Vec<wind_config::CommentDictSpec>, bool)>> {
     let mut out = configured.to_vec();
     if let Some(spec) = out.iter_mut().find(|s| s.id == id) {
-        spec.enabled = !spec.enabled;
-        let on = spec.enabled;
-        return Ok((out, on));
+        let on = want.unwrap_or(!spec.enabled);
+        if on == spec.enabled {
+            return Ok(None);
+        }
+        spec.enabled = on;
+        return Ok(Some((out, on)));
     }
     if auto_ids.iter().any(|a| a == id) {
+        // 未登记的自动来源恒为开（见 `merge_comment_dicts`）
+        let on = want.unwrap_or(false);
+        if on {
+            return Ok(None);
+        }
         out.push(wind_config::CommentDictSpec {
             id: id.to_string(),
             auto: true,
             enabled: false,
             ..Default::default()
         });
-        return Ok((out, false));
+        return Ok(Some((out, false)));
     }
     anyhow::bail!("没有 id 为 {id:?} 的注释词库（见设置 → 候选标注 → 注释词库）")
 }
@@ -1170,7 +1191,7 @@ mod reap_tests {
 
 #[cfg(test)]
 mod feature_toggle_tests {
-    use super::{is_feature_target, toggle_comment_dict};
+    use super::{is_feature_target, set_comment_dict};
     use wind_config::CommentDictSpec;
 
     fn manual(id: &str, enabled: bool) -> CommentDictSpec {
@@ -1196,27 +1217,53 @@ mod feature_toggle_tests {
     #[test]
     fn flips_existing_entry_in_place() {
         let cfg = [manual("en", true), manual("chaifen", false)];
-        let (list, on) = toggle_comment_dict(&cfg, &[], "chaifen").unwrap();
+        let (list, on) = set_comment_dict(&cfg, &[], "chaifen", None)
+            .unwrap()
+            .unwrap();
         assert!(on);
         assert_eq!(list.len(), 2);
         assert!(list[0].enabled && list[1].enabled);
-        let (list, on) = toggle_comment_dict(&list, &[], "en").unwrap();
+        let (list, on) = set_comment_dict(&list, &[], "en", None).unwrap().unwrap();
         assert!(!on && !list[0].enabled);
     }
 
-    /// 自动来源（出厂开）不在列表里：追加一条关着的引用空壳，不带路径。
+    /// 指定状态：与当前一致时不动作（None）；不一致才改。
+    #[test]
+    fn set_is_noop_when_already_in_state() {
+        let cfg = [manual("en", true)];
+        assert!(
+            set_comment_dict(&cfg, &[], "en", Some(true))
+                .unwrap()
+                .is_none()
+        );
+        let (list, on) = set_comment_dict(&cfg, &[], "en", Some(false))
+            .unwrap()
+            .unwrap();
+        assert!(!on && !list[0].enabled);
+    }
+
+    /// 自动来源（未登记时是开的）不在列表里：要开不动作；要关 / 取反就追加一条关着的引用空壳。
     #[test]
     fn auto_source_gets_a_disabled_shell() {
         let cfg = [manual("en", true)];
         let auto = vec!["auto:pinyin/cn_dicts/corrections.dict.yaml".to_string()];
-        let (list, on) = toggle_comment_dict(&cfg, &auto, &auto[0]).unwrap();
-        assert!(!on);
-        let shell = &list[1];
-        assert!(shell.auto && !shell.enabled && shell.path.is_empty());
+        assert!(
+            set_comment_dict(&cfg, &auto, &auto[0], Some(true))
+                .unwrap()
+                .is_none()
+        );
+        for want in [None, Some(false)] {
+            let (list, on) = set_comment_dict(&cfg, &auto, &auto[0], want)
+                .unwrap()
+                .unwrap();
+            assert!(!on);
+            let shell = &list[1];
+            assert!(shell.auto && !shell.enabled && shell.path.is_empty());
+        }
     }
 
     #[test]
     fn unknown_id_is_an_error() {
-        assert!(toggle_comment_dict(&[manual("en", true)], &[], "nope").is_err());
+        assert!(set_comment_dict(&[manual("en", true)], &[], "nope", Some(true)).is_err());
     }
 }
