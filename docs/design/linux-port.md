@@ -385,6 +385,14 @@ DBus 客户端能直接断言 `ForwardKey` 序列；代价是只作用于当前�
    透传、熔断 3 秒后自愈，不卡死。
 9. **SHM 名被别的用户抢先占用**：名字带 uid 后别人仍可在 `/dev/shm` 建我们的名字（`O_EXCL` 失败），
    服务端建不了段、候选窗不显示；addon 按属主拒收，内容伪造不了。只是拒绝服务，不处理。
+10. **GNOME Wayland 会话下候选窗位置不准（已知限制，不修）**：GNOME 没有 input-method-v2，Wayland 原生应用
+   （如 gedit，`frontend=dbus`）经 DBus 前端报的 `cursorRect` 是**窗口相对坐标**，而 X11 路径把它当屏幕
+   坐标摆，候选窗于是不跟窗口走。2026-10-10 在 Ubuntu 22.04（GNOME Shell 42.9）实测：gedit 报
+   `rect=(344,76 0x18)`，服务端摆到 `(344,96)`。addon 自己换算不了——Wayland 客户端不知道窗口的屏幕位置，
+   GNOME 42 又封了 `Introspect.GetWindows`（AccessDenied）与 `Shell.Eval`。唯一做准的办法是写 GNOME Shell
+   扩展取焦点窗口 frame 再回传（kimpanel 即此思路），成本高且随 GNOME 版本变，暂不做。
+   X11 会话（含 XWayland 应用）正常；Deepin 25 的 treeland 有 input-method-v2，走 popup surface，正常。
+   较新的 GNOME 是否有变化未验证。
 
 ## 8. 安装包：只装 deb 就能用（不再有 `windinput-setup`）
 
