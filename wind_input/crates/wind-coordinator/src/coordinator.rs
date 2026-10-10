@@ -4433,11 +4433,13 @@ impl Coordinator {
         let (enabled, categories, modules) = {
             let rt = self.rt();
             let e = &rt.config.input.emoji;
-            let modules: Vec<&'static str> = wind_config::EMOJI_MODULES
-                .iter()
-                .filter(|m| e.module_enabled(m.id))
-                .map(|m| m.id)
-                .collect();
+            // 列表含用户放进 `emoji/` 的文件：扫目录发生在这里（启动 / 配置重载），
+            // 不在按键路径上。新放的文件要重载配置（或重开设置保存一次）才挂上。
+            let modules: Vec<wind_config::EmojiModuleEntry> =
+                Config::emoji_modules(Config::data_dir().as_deref())
+                    .into_iter()
+                    .filter(|m| e.module_enabled(&m.id))
+                    .collect();
             (e.enabled, e.categories, modules)
         };
         // 值域校验放在去重之前：`scope`/`show_as` 不影响加载、不进变更判据，但配置变更
@@ -4460,7 +4462,11 @@ impl Coordinator {
                 );
             }
         }
-        let spec: EmojiSpec = (enabled, categories, modules.clone());
+        let spec: EmojiSpec = (
+            enabled,
+            categories,
+            modules.iter().map(|m| m.id.clone()).collect(),
+        );
         {
             let cur = self.emoji_spec.lock().unwrap_or_else(|e| e.into_inner());
             if cur.as_ref() == Some(&spec) {
@@ -4511,7 +4517,10 @@ impl Coordinator {
     /// 一张都没加载成返回 `None`（＝功能不可用），**不降级成内存表**——理由见
     /// [`wind_dict::emojidict::load_or_build`]：本功能是纯锦上添花的可选项，而「常驻内存
     /// 随功能数量累积」正是它要避开的东西。
-    fn load_emoji_dict(categories: bool, modules: &[&str]) -> Option<EmojiTables> {
+    fn load_emoji_dict(
+        categories: bool,
+        modules: &[wind_config::EmojiModuleEntry],
+    ) -> Option<EmojiTables> {
         let data_dir = Config::data_dir();
         let dd = data_dir.as_deref();
         let Some(cache_dir) = Config::cache_dir() else {
@@ -4541,7 +4550,7 @@ impl Coordinator {
                         std::slice::from_ref(&norm_path),
                         &cache_of(id),
                         &[],
-                        |s| norm.convert_once(s),
+                        Some(&|s: &str| norm.convert_once(s)),
                     ) {
                         readers.push(r);
                     }
@@ -4550,25 +4559,24 @@ impl Coordinator {
             None => warn!("emoji 繁简归一表不可用，rime-emoji 主表与分类表已跳过"),
         }
 
-        // ── 附加模块（rime-frost，键已是简体，不归一）──
-        for m in wind_config::EMOJI_MODULES
-            .iter()
-            .filter(|m| modules.contains(&m.id))
-        {
-            let Some(src) = Config::resolve_data_file(dd, m.file) else {
-                warn!(
-                    "emoji 模块 {} 的源文件缺失（data/{}），已跳过",
-                    m.id, m.file
-                );
+        // ── 附加模块（rime-frost 与用户放置的 OpenCC 表，键是简体，不归一）──
+        for m in modules {
+            let Some(src) = Config::resolve_data_file(dd, &m.file) else {
+                warn!("emoji 模块 {} 的源文件缺失（{}），已跳过", m.id, m.file);
                 continue;
             };
-            let sections: Vec<String> = m.sections.iter().map(|s| s.to_string()).collect();
+            // 用户模块的缓存名加前缀：用户文件名任意，别和内置模块、主表的缓存撞名。
+            let cache_id = if m.user {
+                format!("user.{}", m.id)
+            } else {
+                m.id.clone()
+            };
             if let Some(r) = wind_dict::emojidict::load_or_build(
                 &[src],
                 &[],
-                &cache_of(m.id),
-                &sections,
-                str::to_string,
+                &cache_of(&cache_id),
+                &m.sections,
+                None,
             ) {
                 readers.push(r);
             }
@@ -17481,7 +17489,7 @@ mod input_diag_tests {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// `sync_emoji_dict` 的变更判据：`(enabled, categories, 开着的附加模块 id)`。
-pub(crate) type EmojiSpec = (bool, bool, Vec<&'static str>);
+pub(crate) type EmojiSpec = (bool, bool, Vec<String>);
 
 /// 已挂载的 emoji 表，按查询合并顺序（见 `Coordinator::load_emoji_dict`）。
 pub(crate) struct EmojiTables(pub(crate) Vec<std::sync::Arc<wind_dict::emojidict::EmojiReader>>);

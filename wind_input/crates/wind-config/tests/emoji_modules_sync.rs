@@ -48,15 +48,43 @@ fn factory_config_lists_every_module_with_its_default() {
     }
 }
 
+/// 模块表整体登记为 Map：键里有用户放置的文件名，不是固定集合；设置端由对话框整体读写。
 #[test]
-fn every_module_key_is_registered_in_config_schema() {
-    for m in EMOJI_MODULES {
-        let key = format!("input.emoji.modules.{}", m.id);
-        assert!(
-            wind_config::config_schema::field(&key).is_some(),
-            "config_schema 没登记 {key}"
-        );
+fn modules_table_is_registered_as_a_map() {
+    let f = wind_config::config_schema::field("input.emoji.modules").expect("config_schema 没登记");
+    assert!(
+        matches!(f.ty, wind_config::config_schema::FieldType::Map(_)),
+        "应登记为 Map"
+    );
+}
+
+/// 用户放进数据根 `emoji/` 的 `*.txt` 自动成为模块（出厂关、排在内置之后、按文件名序）；
+/// 内置表的源文件不算模块；与内置模块撞名的跳过。
+#[test]
+fn user_files_in_emoji_dir_become_modules() {
+    let dir = std::env::temp_dir().join(format!("wind-emoji-mods-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("emoji")).unwrap();
+    for f in [
+        "猫猫.txt",
+        "a_mine.txt",
+        "frost_emoji.txt",
+        "emoji_word.txt",
+        "frost_greek.txt",
+        "notes.md",
+    ] {
+        std::fs::write(dir.join("emoji").join(f), "好\t👌\n").unwrap();
     }
+    let mods = wind_config::Config::emoji_modules(Some(&dir));
+    let _ = std::fs::remove_dir_all(&dir);
+    let builtin: Vec<&str> = EMOJI_MODULES.iter().map(|m| m.id).collect();
+    let ids: Vec<&str> = mods.iter().map(|m| m.id.as_str()).collect();
+    assert_eq!(&ids[..builtin.len()], &builtin[..], "内置在前、注册表序");
+    let user: Vec<&wind_config::EmojiModuleEntry> = mods.iter().filter(|m| m.user).collect();
+    let user_ids: Vec<&str> = user.iter().map(|m| m.id.as_str()).collect();
+    assert_eq!(user_ids, ["a_mine", "猫猫"]);
+    assert!(user.iter().all(|m| !m.default_on && m.sections.is_empty()));
+    assert_eq!(user[0].file, "emoji/a_mine.txt");
 }
 
 /// `FROST_OTHERS_EXCLUDE="a b"`（bash）

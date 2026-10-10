@@ -508,6 +508,7 @@ fn web_data_dispatch<H: WebDataRpc + ?Sized>(
 
         // ── dict.*（用户词库，redb 持久化）────────────────────
         "comment.sources" => h.web_comment_sources(),
+        "emoji.modules" => h.web_emoji_modules(),
         "dict.listPaged" => h.web_dict_list_paged(params),
         "dict.search" => h.web_dict_search(params),
         "dict.add" => h.web_dict_add(params),
@@ -897,6 +898,28 @@ pub trait WebDataRpc: WebDataHost {
         )
         .collect();
         Ok(json!({ "auto": auto, "files": files }))
+    }
+
+    /// emoji 附加模块清单（内置 + 用户放进 `emoji/` 的 OpenCC 表），供设置页对话框列出。
+    ///
+    /// 只给清单与出厂值，不给开关状态：状态在 `input.emoji.modules`，设置端随整份配置已拿到，
+    /// 按 `配置值 ?? defaultOn` 自己算——两处各算一遍的话，未保存的勾选会被这里的旧值盖掉。
+    fn web_emoji_modules(&self) -> anyhow::Result<Value> {
+        let items: Vec<Value> =
+            wind_config::Config::emoji_modules(wind_config::Config::data_dir().as_deref())
+                .into_iter()
+                .map(|m| {
+                    json!({
+                        "id": m.id,
+                        "label": m.label,
+                        "description": m.description,
+                        "file": m.file,
+                        "user": m.user,
+                        "defaultOn": m.default_on,
+                    })
+                })
+                .collect();
+        Ok(json!({ "modules": items, "userDir": wind_config::EMOJI_USER_DIR }))
     }
 
     fn web_dict_list_paged(&self, params: &Value) -> anyhow::Result<Value> {

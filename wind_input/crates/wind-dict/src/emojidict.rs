@@ -313,6 +313,37 @@ pub fn parse_upstream(
     out
 }
 
+/// 一般 OpenCC 文本表（`键<Tab>值1 值2 …`）：键不归一，值首项**等于键时**丢弃（rime 生态
+/// 「首项重复键」的约定，见 `docs/design/opencc-conversions.md` §2），否则全收。
+///
+/// 与 [`parse_upstream`] 的分别只在丢首项的判据：那边的键要归一、归一后与首项不再相等，
+/// 只能按位置丢；这边键不变，按内容判才能同时兼容不带重复首项的用户表。
+pub fn parse_opencc(content: &str) -> Vec<(String, Vec<String>)> {
+    let normalized = wind_utils::text::normalize_input(content);
+    let mut out = Vec::new();
+    for line in normalized.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with("---") {
+            continue;
+        }
+        let Some((key, vals)) = line.split_once('\t') else {
+            continue;
+        };
+        if key.is_empty() {
+            continue;
+        }
+        let mut it = vals.split(' ').filter(|v| !v.is_empty()).peekable();
+        if it.peek() == Some(&key) {
+            it.next();
+        }
+        let vals: Vec<String> = it.map(str::to_string).collect();
+        if !vals.is_empty() {
+            out.push((key.to_string(), vals));
+        }
+    }
+    out
+}
+
 /// 只取 OpenCC 文本表里指定分组的行（rime-frost `others.txt` 那种按分组拼起来的表）。
 ///
 /// 分组标题行形如 `----------偏旁部首\t----------`：OpenCC 文本词典没有注释语法，rime-frost
@@ -362,18 +393,23 @@ pub fn select_sections<'a>(content: &'a str, sections: &[String]) -> std::borrow
 /// （目录只读、磁盘满）就让这个功能不可用并告警，不偷偷占着内存。
 /// - `sections`：只取这些分组（见 [`select_sections`]），空 = 整表。分组决定解析结果却不在
 ///   源文件字节里，故并入指纹 tag——同一份 `others.txt` 拆成多个模块，各模块的缓存互不冒认。
+/// - `normalize`：`Some` = rime-emoji 上游表（键是繁体）：按**位置**丢值首项再归一键，见
+///   [`parse_upstream`]。`None` = 一般 OpenCC 表（rime-frost / 用户放置）：键不归一，值首项
+///   **等于键时**才丢，见 [`parse_opencc`]——用户的表未必遵守「首项重复键」的约定。
 pub fn load_or_build(
     tables: &[std::path::PathBuf],
     fp_extra: &[std::path::PathBuf],
     cache_file: &Path,
     sections: &[String],
-    normalize: impl Fn(&str) -> String,
+    normalize: Option<&dyn Fn(&str) -> String>,
 ) -> Option<std::sync::Arc<EmojiReader>> {
     use crate::{cache_fp, reader_pool};
+    // 解析规则（rime-emoji / OpenCC）同样决定产出，并入 tag。
+    let rule = if normalize.is_some() { "" } else { "~opencc" };
     let tag = if sections.is_empty() {
-        cache_fp::EMOJI_TAG.to_string()
+        format!("{}{rule}", cache_fp::EMOJI_TAG)
     } else {
-        format!("{}#{}", cache_fp::EMOJI_TAG, sections.join("|"))
+        format!("{}{rule}#{}", cache_fp::EMOJI_TAG, sections.join("|"))
     };
     let tag = tag.as_str();
 
@@ -400,7 +436,13 @@ pub fn load_or_build(
             continue; // 分类表可选，缺了不算失败
         }
         match std::fs::read_to_string(t) {
-            Ok(s) => rows.extend(parse_upstream(&select_sections(&s, sections), &normalize)),
+            Ok(s) => {
+                let body = select_sections(&s, sections);
+                rows.extend(match normalize {
+                    Some(n) => parse_upstream(&body, n),
+                    None => parse_opencc(&body),
+                })
+            }
             Err(e) => warn!("读取 emoji 表失败 {}: {}", t.display(), e),
         }
     }
@@ -548,8 +590,7 @@ mod tests {
         let (w, c) = (g.path().join("word.txt"), g.path().join("cat.txt"));
         std::fs::write(&w, "奖项\t奖项 🏅\n").unwrap();
         std::fs::write(&c, "奖项\t奖项 🎖️ 🥇\n").unwrap();
-        let r = load_or_build(&[w, c], &[], &g.path().join("e.wemj"), &[], str::to_string)
-            .expect("应建成");
+        let r = load_or_build(&[w, c], &[], &g.path().join("e.wemj"), &[], None).expect("应建成");
         assert_eq!(
             r.lookup("奖项"),
             Some("🏅 🎖️ 🥇"),
@@ -568,7 +609,7 @@ mod tests {
             &[],
             &g.path().join("e.wemj"),
             &[],
-            str::to_string,
+            None,
         )
         .expect("缺可选表不该失败");
         assert_eq!(r.lookup("好"), Some("🙂"));
@@ -579,9 +620,7 @@ mod tests {
     fn build_returns_none_when_no_source() {
         let g = tempdir::Guard::new("wemj-none");
         let cache = g.path().join("e.wemj");
-        assert!(
-            load_or_build(&[g.path().join("无.txt")], &[], &cache, &[], str::to_string).is_none()
-        );
+        assert!(load_or_build(&[g.path().join("无.txt")], &[], &cache, &[], None).is_none());
         assert!(!cache.exists(), "没建成就不该留下缓存文件");
     }
 
@@ -604,7 +643,7 @@ mod tests {
             std::slice::from_ref(&norm_tbl),
             &cache,
             &[],
-            str::to_string,
+            Some(&|s: &str| s.to_string()),
         )
         .unwrap();
         assert_eq!(r.lookup("個"), Some("👤"));
@@ -612,9 +651,29 @@ mod tests {
 
         // 只改归一表内容（源词表一个字节没动），并换用真的会归一的闭包。
         std::fs::write(&norm_tbl, b"v2").unwrap();
-        let r2 = load_or_build(&[w], &[norm_tbl], &cache, &[], |s| s.replace('個', "个")).unwrap();
+        let r2 = load_or_build(
+            &[w],
+            &[norm_tbl],
+            &cache,
+            &[],
+            Some(&|s: &str| s.replace('個', "个")),
+        )
+        .unwrap();
         assert_eq!(r2.lookup("个"), Some("👤"), "指纹变了 ⇒ 重建 ⇒ 归一生效");
         assert_eq!(r2.lookup("個"), None, "旧键不该还在");
+    }
+
+    /// 一般 OpenCC 表：首项等于键才丢（不带重复首项的用户表全收），`---` 行是注释。
+    #[test]
+    fn parse_opencc_drops_first_only_when_it_is_the_key() {
+        let got = parse_opencc("----------注释\t----------\n好\t好 👌\n猫猫\t🐱 😺\n空\t空\n");
+        assert_eq!(
+            got,
+            vec![
+                ("好".to_string(), vec!["👌".to_string()]),
+                ("猫猫".to_string(), vec!["🐱".to_string(), "😺".to_string()]),
+            ]
+        );
     }
 
     /// 按分组取行：标题行不进结果；`（太短了不启用了）` 这类被注释掉的词条不是标题；
@@ -651,13 +710,13 @@ mod tests {
             &[],
             &cache,
             &["甲组".into()],
-            str::to_string,
+            None,
         )
         .unwrap();
         assert_eq!(a.lookup("甲"), Some("🅰"));
         assert_eq!(a.lookup("乙"), None);
         drop(a);
-        let b = load_or_build(&[src], &[], &cache, &["乙组".into()], str::to_string).unwrap();
+        let b = load_or_build(&[src], &[], &cache, &["乙组".into()], None).unwrap();
         assert_eq!(
             b.lookup("乙"),
             Some("🅱"),
@@ -678,13 +737,13 @@ mod tests {
         let w = g.path().join("word.txt");
         let cache = g.path().join("e.wemj");
         std::fs::write(&w, "好\t好 🙂\n").unwrap();
-        let r = load_or_build(std::slice::from_ref(&w), &[], &cache, &[], str::to_string).unwrap();
+        let r = load_or_build(std::slice::from_ref(&w), &[], &cache, &[], None).unwrap();
         assert_eq!(r.lookup("好"), Some("🙂"));
         drop(r); // 释放 mmap，Windows 上才能覆盖
 
         // 换成一份内容不同的合法缓存（源文件与 .fp 都不动）。
         write_emoji_wemj(&cache, &rows(&[("好", &["🎯"])])).unwrap();
-        let r2 = load_or_build(&[w], &[], &cache, &[], str::to_string).unwrap();
+        let r2 = load_or_build(&[w], &[], &cache, &[], None).unwrap();
         assert_eq!(r2.lookup("好"), Some("🎯"), "走的是缓存，没有重建");
     }
 

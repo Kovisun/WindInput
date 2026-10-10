@@ -510,16 +510,9 @@ static REGISTRY: &[ConfigField] = &[
     f("input.emoji.max_hosts", Int),
     f("input.emoji.min_word_chars", Int),
     f("input.emoji.categories", Bool),
-    // 附加模块（`EMOJI_MODULES`），逐个登记：设置端按键开关，且 `config set` 要认得出来。
-    f("input.emoji.modules.frost_emoji", Bool),
-    f("input.emoji.modules.frost_radicals", Bool),
-    f("input.emoji.modules.frost_greek", Bool),
-    f("input.emoji.modules.frost_misc", Bool),
-    f("input.emoji.modules.frost_keys", Bool),
-    f("input.emoji.modules.frost_diezi", Bool),
-    f("input.emoji.modules.frost_chem", Bool),
-    f("input.emoji.modules.frost_month", Bool),
-    f("input.emoji.modules.frost_sitcom", Bool),
+    // 附加模块开关（id → bool）。键由内置注册表与用户放进 `emoji/` 的文件共同决定，不是
+    // 固定集合，故整体登记为 Map；设置端由对话框整体读写。
+    f("input.emoji.modules", Map(&[])),
     f("input.url.candidate_layout", Enum(LAYOUT_INTENT_VALUES)),
     f("input.email.candidate_layout", Enum(LAYOUT_INTENT_VALUES)),
     f("input.unicode.candidate_layout", Enum(LAYOUT_INTENT_VALUES)),

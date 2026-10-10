@@ -4565,6 +4565,10 @@ pub struct EmojiConfig {
 pub struct EmojiModule {
     /// 配置键 `input.emoji.modules.<id>`，也是缓存文件名。
     pub id: &'static str,
+    /// 设置页显示名。
+    pub label: &'static str,
+    /// 设置页说明（举一个例子，让人知道打什么词会出什么）。
+    pub description: &'static str,
     /// 相对数据根（`data/`）的源文件，OpenCC 文本词典。
     pub file: &'static str,
     /// 只取这些分组（`others.txt` 按分组拼成一份）；空 = 整表。
@@ -4581,59 +4585,145 @@ pub struct EmojiModule {
 pub const EMOJI_MODULES: &[EmojiModule] = &[
     EmojiModule {
         id: "frost_emoji",
+        label: "白霜 Emoji",
+        description: "补充更多词语的 emoji 与符号，如「右箭头」→ ➡️、「勾选」→ ☑️",
         file: "emoji/frost_emoji.txt",
         sections: &[],
         default_on: true,
     },
     EmojiModule {
         id: "frost_radicals",
+        label: "偏旁部首",
+        description: "如「提手旁」→ 扌",
         file: "emoji/frost_others.txt",
         sections: &["偏旁部首"],
         default_on: false,
     },
     EmojiModule {
         id: "frost_greek",
+        label: "希腊字母",
+        description: "如「阿尔法」→ alpha α Α",
         file: "emoji/frost_others.txt",
         sections: &["希腊字母"],
         default_on: false,
     },
     EmojiModule {
         id: "frost_misc",
+        label: "单位与杂项",
+        description: "如「平方米」→ m²",
         file: "emoji/frost_others.txt",
         sections: &["其他"],
         default_on: false,
     },
     EmojiModule {
         id: "frost_keys",
+        label: "键盘符号",
+        description: "如「command」→ ⌘",
         file: "emoji/frost_others.txt",
         sections: &["键盘符号"],
         default_on: false,
     },
     EmojiModule {
         id: "frost_diezi",
+        label: "叠字",
+        description: "如「两个火」→ 炎 炏",
         file: "emoji/frost_others.txt",
         sections: &["二叠字", "三叠字", "四叠字"],
         default_on: false,
     },
     EmojiModule {
         id: "frost_chem",
+        label: "化学式",
+        description: "如「高锰酸钾」→ KMnO₄",
         file: "emoji/frost_others.txt",
         sections: &["化学式"],
         default_on: false,
     },
     EmojiModule {
         id: "frost_month",
+        label: "月份星期英文",
+        description: "如「一月」→ Jan. January",
         file: "emoji/frost_others.txt",
         sections: &["月份星期"],
         default_on: false,
     },
     EmojiModule {
         id: "frost_sitcom",
+        label: "美剧人名",
+        description: "如「谢耳朵」→ Sheldon",
         file: "emoji/frost_others.txt",
         sections: &["生活大爆炸&老友记"],
         default_on: false,
     },
 ];
+
+/// 用户放置 emoji / OpenCC 表的目录（相对数据根，各资源层合并扫描）。
+pub const EMOJI_USER_DIR: &str = "emoji";
+
+/// 数据根 `emoji/` 下属于内置表源文件的文件名，不当作用户模块（它们由主表 / 分类表 /
+/// [`EMOJI_MODULES`] 读取；用户层放同名文件是**覆盖**那张内置表，不是新增模块）。
+const EMOJI_BUILTIN_FILES: &[&str] = &[
+    "emoji_word.txt",
+    "emoji_category.txt",
+    "frost_emoji.txt",
+    "frost_others.txt",
+];
+
+/// 一个可开关的 emoji 附加模块：内置（[`EMOJI_MODULES`]）或用户放进 `emoji/` 的文件。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmojiModuleEntry {
+    pub id: String,
+    pub label: String,
+    pub description: String,
+    /// 相对数据根的源文件。
+    pub file: String,
+    pub sections: Vec<String>,
+    /// 用户放置的文件（`false` = 内置模块）。
+    pub user: bool,
+    pub default_on: bool,
+}
+
+impl Config {
+    /// 全部 emoji 附加模块：内置在前（注册表序），其后是 `emoji/` 目录里用户放置的
+    /// OpenCC 表（`*.txt`，按文件名序；id = 文件名去掉 `.txt`，出厂关）。
+    ///
+    /// 用户文件与内置模块 id 撞名时跳过并告警：同一个开关管两张表，用户分不清。
+    pub fn emoji_modules(data_dir: Option<&Path>) -> Vec<EmojiModuleEntry> {
+        let mut out: Vec<EmojiModuleEntry> = EMOJI_MODULES
+            .iter()
+            .map(|m| EmojiModuleEntry {
+                id: m.id.to_string(),
+                label: m.label.to_string(),
+                description: m.description.to_string(),
+                file: m.file.to_string(),
+                sections: m.sections.iter().map(|s| s.to_string()).collect(),
+                user: false,
+                default_on: m.default_on,
+            })
+            .collect();
+        for (rel, _abs) in Self::list_data_dir(data_dir, EMOJI_USER_DIR, ".txt") {
+            let name = rel.rsplit('/').next().unwrap_or(&rel);
+            if EMOJI_BUILTIN_FILES.contains(&name) {
+                continue;
+            }
+            let id = name.trim_end_matches(".txt").to_string();
+            if out.iter().any(|m| m.id == id) {
+                warn!("emoji 模块文件 {rel} 与内置模块同名，已跳过（请改个文件名）");
+                continue;
+            }
+            out.push(EmojiModuleEntry {
+                label: id.clone(),
+                description: String::new(),
+                id,
+                file: rel,
+                sections: Vec::new(),
+                user: true,
+                default_on: false,
+            });
+        }
+        out
+    }
+}
 
 fn default_emoji_modules() -> BTreeMap<String, bool> {
     EMOJI_MODULES
@@ -4643,7 +4733,7 @@ fn default_emoji_modules() -> BTreeMap<String, bool> {
 }
 
 impl EmojiConfig {
-    /// 模块是否开启：配置里写了按配置，没写按出厂值；不认识的 id 为 false。
+    /// 模块是否开启：配置里写了按配置，没写按出厂值；不认识的 id（含用户放置的文件）为 false。
     pub fn module_enabled(&self, id: &str) -> bool {
         self.modules.get(id).copied().unwrap_or_else(|| {
             EMOJI_MODULES
@@ -9603,6 +9693,35 @@ impl Config {
     /// `compat.toml`（字段级）两处，它们各有专用加载器，不走本函数。
     pub fn resolve_data_file(data_dir: Option<&Path>, rel: &str) -> Option<PathBuf> {
         Self::resolve_overridable(data_dir, None, rel, "data")
+    }
+
+    /// 列出数据根 `<sub>/` 下所有以 `suffix` 结尾的文件，各层合并、靠前的层遮蔽同名者。
+    /// 与 [`Self::resolve_data_file`] 同一层序，差别同 [`Self::list_schema_resource_dir`] 之于
+    /// [`Self::resolve_schema_resource`]：那个回答「这个名字在哪一层」，这个回答「一共有哪些」。
+    pub fn list_data_dir(
+        data_dir: Option<&Path>,
+        sub: &str,
+        suffix: &str,
+    ) -> Vec<(String, PathBuf)> {
+        let mut out: Vec<(String, PathBuf)> = Vec::new();
+        for layer in Self::resource_layers_named_with(data_dir) {
+            let Ok(rd) = std::fs::read_dir(layer.path.join(sub)) else {
+                continue;
+            };
+            for entry in rd.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if !name.ends_with(suffix) || !entry.path().is_file() {
+                    continue;
+                }
+                let rel = format!("{sub}/{name}");
+                if out.iter().any(|(r, _)| *r == rel) {
+                    continue;
+                }
+                out.push((rel, entry.path()));
+            }
+        }
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
     }
 
     /// 把**语法不合法**的配置原件另存一份，返回备份路径。
