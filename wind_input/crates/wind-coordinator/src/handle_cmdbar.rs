@@ -309,6 +309,11 @@ struct CoordIme(Weak<Coordinator>);
 impl ImeController for CoordIme {
     fn toggle(&self, target: &str) -> anyhow::Result<()> {
         if let Some(c) = self.0.upgrade() {
+            // 数据类开关（emoji / 附加模块 / 注释词库）要报错给调用方：id 写错时静默无反应，
+            // 写短语的人无从排查。其余 target 维持原样。
+            if is_feature_target(target) {
+                return c.cmd_toggle_feature(target);
+            }
             c.cmd_ime_toggle(target);
         }
         Ok(())
@@ -594,6 +599,42 @@ pub(crate) fn parse_hex_rgba(s: &str) -> Option<[u8; 4]> {
         b(4)?,
         if hex.len() == 8 { b(6)? } else { 255 },
     ])
+}
+
+/// `ime.toggle` 的数据类开关 target：`emoji`、`emoji:<模块id>`、`dict:<注释库id>`。
+pub(crate) fn is_feature_target(target: &str) -> bool {
+    target == "emoji" || target.starts_with("emoji:") || target.starts_with("dict:")
+}
+
+/// 翻转注释词库 `id` 的开关，返回新的 `[[ui.comment_dicts]]` 数组与翻转后的状态。
+///
+/// - 列表里已有该 id 的条目（手工挂的库，或自动来源的引用空壳）：就地翻转 `enabled`。
+/// - 没有、但它是自动来源（词库自带 comment 列，出厂开）：追加一条只含 `id/auto/enabled`
+///   的引用空壳（同设置端写法），值为关。
+/// - 都不是：报错（id 写错）。
+///
+/// 纯函数，单测钉住；写盘与重载在调用方。
+pub(crate) fn toggle_comment_dict(
+    configured: &[wind_config::CommentDictSpec],
+    auto_ids: &[String],
+    id: &str,
+) -> anyhow::Result<(Vec<wind_config::CommentDictSpec>, bool)> {
+    let mut out = configured.to_vec();
+    if let Some(spec) = out.iter_mut().find(|s| s.id == id) {
+        spec.enabled = !spec.enabled;
+        let on = spec.enabled;
+        return Ok((out, on));
+    }
+    if auto_ids.iter().any(|a| a == id) {
+        out.push(wind_config::CommentDictSpec {
+            id: id.to_string(),
+            auto: true,
+            enabled: false,
+            ..Default::default()
+        });
+        return Ok((out, false));
+    }
+    anyhow::bail!("没有 id 为 {id:?} 的注释词库（见设置 → 候选标注 → 注释词库）")
 }
 
 /// 配置服务：cmdbar `config.get` / `config.set` / `config.toggle`。
@@ -1124,5 +1165,58 @@ mod reap_tests {
             last, None,
             "子进程 {pid} 退出 5 秒后仍挂在本进程名下（状态 {last:?}）"
         );
+    }
+}
+
+#[cfg(test)]
+mod feature_toggle_tests {
+    use super::{is_feature_target, toggle_comment_dict};
+    use wind_config::CommentDictSpec;
+
+    fn manual(id: &str, enabled: bool) -> CommentDictSpec {
+        CommentDictSpec {
+            id: id.into(),
+            path: format!("comments/{id}.txt"),
+            enabled,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn feature_targets_are_recognized() {
+        for t in ["emoji", "emoji:frost_greek", "emoji:猫猫", "dict:en"] {
+            assert!(is_feature_target(t), "{t}");
+        }
+        for t in ["s2t", "cn-en", "emojis", "dictx"] {
+            assert!(!is_feature_target(t), "{t}");
+        }
+    }
+
+    /// 已在列表里的条目就地翻转，顺序与其它条目不动。
+    #[test]
+    fn flips_existing_entry_in_place() {
+        let cfg = [manual("en", true), manual("chaifen", false)];
+        let (list, on) = toggle_comment_dict(&cfg, &[], "chaifen").unwrap();
+        assert!(on);
+        assert_eq!(list.len(), 2);
+        assert!(list[0].enabled && list[1].enabled);
+        let (list, on) = toggle_comment_dict(&list, &[], "en").unwrap();
+        assert!(!on && !list[0].enabled);
+    }
+
+    /// 自动来源（出厂开）不在列表里：追加一条关着的引用空壳，不带路径。
+    #[test]
+    fn auto_source_gets_a_disabled_shell() {
+        let cfg = [manual("en", true)];
+        let auto = vec!["auto:pinyin/cn_dicts/corrections.dict.yaml".to_string()];
+        let (list, on) = toggle_comment_dict(&cfg, &auto, &auto[0]).unwrap();
+        assert!(!on);
+        let shell = &list[1];
+        assert!(shell.auto && !shell.enabled && shell.path.is_empty());
+    }
+
+    #[test]
+    fn unknown_id_is_an_error() {
+        assert!(toggle_comment_dict(&[manual("en", true)], &[], "nope").is_err());
     }
 }

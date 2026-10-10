@@ -6476,6 +6476,52 @@ impl Coordinator {
         let _ = self.push_server.push_commit_to_active(&encoded);
     }
 
+    /// `ime.toggle` 的数据类开关（命令栏 / 短语直通，不进菜单与工具栏）：
+    /// - `emoji`：emoji 候选总开关（`input.emoji.enabled`）；
+    /// - `emoji:<模块id>`：附加模块（`input.emoji.modules.<id>`，含用户放进 `emoji/` 的文件）；
+    /// - `dict:<注释库id>`：注释词库（`[[ui.comment_dicts]]` 的 `enabled`，中英释义、拆分等）。
+    ///
+    /// 写用户配置后热重载（emoji 表 / 注释库按新开关重挂），并弹一条提示告知新状态——命令栏
+    /// 与短语都没有别的反馈渠道，开了没反应和关掉了在界面上无从分辨。
+    pub(crate) fn cmd_toggle_feature(&self, target: &str) -> anyhow::Result<()> {
+        let (name, on) = if target == "emoji" {
+            let on = !self.rt().config.input.emoji.enabled;
+            Config::set_user_value(&["input", "emoji", "enabled"], toml::Value::Boolean(on))?;
+            ("emoji 候选".to_string(), on)
+        } else if let Some(id) = target.strip_prefix("emoji:") {
+            let module = Config::emoji_modules(Config::data_dir().as_deref())
+                .into_iter()
+                .find(|m| m.id == id)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "没有 id 为 {id:?} 的 emoji 模块（见设置 → Emoji/OpenCC → 附加模块）"
+                    )
+                })?;
+            let on = !self.rt().config.input.emoji.module_enabled(id);
+            Config::set_user_value(&["input", "emoji", "modules", id], toml::Value::Boolean(on))?;
+            (format!("emoji 模块「{}」", module.label), on)
+        } else if let Some(id) = target.strip_prefix("dict:") {
+            let configured = self.rt().config.ui.comment_dicts.clone();
+            let auto: Vec<String> = self
+                .auto_comment_sources()
+                .into_iter()
+                .map(|a| a.id)
+                .collect();
+            let (list, on) = crate::handle_cmdbar::toggle_comment_dict(&configured, &auto, id)?;
+            Config::set_user_value(&["ui", "comment_dicts"], toml::Value::try_from(&list)?)?;
+            (format!("注释词库「{id}」"), on)
+        } else {
+            anyhow::bail!("ime.toggle: 不认识的 target {target:?}");
+        };
+        self.reload_user_config();
+        let text = format!("{name}已{}", if on { "开启" } else { "关闭" });
+        if let Err(e) = self.ui_toast(&text, "info", "", "center", 1500) {
+            warn!("ime.toggle 提示弹不出来: {e}");
+        }
+        info!("ime.toggle {target}: {text}");
+        Ok(())
+    }
+
     pub(crate) fn cmd_ime_toggle(&self, target: &str) {
         match target {
             "cn-en" => {
