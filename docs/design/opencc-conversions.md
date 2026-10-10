@@ -72,7 +72,7 @@
 | T0 | emoji FE0F 归一去重（现存缺陷，`text-mapping-tables.md` §2.3） | ✅ `d6752295` |
 | T1 | 注释词库接受 OpenCC 格式（§2 规则）；拆字表两列 `字\t拆分` 本就能读，无需改 | ✅ `1e513e82`；设置页「添加词库…」也列 `.txt` `16e36191` |
 | T2 | `${dict:id}` 按库取注释（多库并排）。**随包注释词库暂不做**（维护者 2026-10-10：版权问题先不集成默认注释包），用户自备的 OpenCC 表经 T1 + 本项即可用 | ✅ `6fed1a8d` |
-| T3 | 追加通路多表框架（一表一缓存、查询期合并），rime-frost `emoji` + `others` 按分组拆成 9 个模块（`[input.emoji.modules]`；白霜 emoji 出厂开、其余关；「著名表演艺术家」构建期剔除、「emoji集合」不收） | ✅ `6309b17e`；设置端 wind-setting、文档站同步 |
+| T3 | 追加通路多表框架（一表一缓存、查询期合并），rime-frost `emoji` + `others` 按分组拆成 9 个模块（`[input.emoji.modules]`；白霜 emoji 出厂开、其余关；「著名表演艺术家」构建期剔除、「emoji集合」不收） | ✅ `6309b17e`；用户目录 `emoji/` 放 OpenCC `.txt` 自动成模块、设置端改对话框（维护者：不定长列表要进对话框）`a0fd05cc` |
 | T4 | emoji / 中英 / 拆分的开关入口（菜单、命令栏、工具栏；rime 用 switches） | T2、T3 |
 
 ## 7 许可
