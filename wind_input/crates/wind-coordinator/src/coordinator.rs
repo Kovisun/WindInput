@@ -6481,19 +6481,21 @@ impl Coordinator {
     /// - `emoji:<模块id>`：附加模块（`input.emoji.modules.<id>`，含用户放进 `emoji/` 的文件）；
     /// - `dict:<注释库id>`：注释词库（`[[ui.comment_dicts]]` 的 `enabled`，中英释义、拆分等）。
     ///
-    /// `want` = 目标状态，`None` = 取反（toggle）。已是目标状态时**什么都不做**（不写盘、
-    /// 不重载、不提示）——`ime.set` 的语义就是「确保是这个状态」。改了则写用户配置后热重载
-    /// （emoji 表 / 注释库按新开关重挂），并弹一条提示告知新状态：命令栏与短语没有别的反馈
-    /// 渠道，开了没反应和关掉了在界面上无从分辨。
+    /// `want` = 目标状态，`None` = 取反（toggle）。已是目标状态时不写盘、不重载——`ime.set`
+    /// 的语义就是「确保是这个状态」——但**照样提示**「…已是开启状态」：一点反应都没有的话，
+    /// 用户分不清是状态本就如此还是命令没被调用（维护者实测反馈）。改了则写用户配置后热重载
+    /// （emoji 表 / 注释库按新开关重挂），提示「…已开启 / 已关闭」：命令栏与短语没有别的
+    /// 反馈渠道，开了没反应和关掉了在界面上无从分辨。
     pub(crate) fn cmd_set_feature(&self, target: &str, want: Option<bool>) -> anyhow::Result<()> {
         let (name, on) = if target == "emoji" {
             let cur = self.rt().config.input.emoji.enabled;
             let on = want.unwrap_or(!cur);
+            let name = "emoji 候选".to_string();
             if on == cur {
-                return Ok(());
+                return self.notify_feature_unchanged(target, &name, on);
             }
             Config::set_user_value(&["input", "emoji", "enabled"], toml::Value::Boolean(on))?;
-            ("emoji 候选".to_string(), on)
+            (name, on)
         } else if let Some(id) = target.strip_prefix("emoji:") {
             let module = Config::emoji_modules(Config::data_dir().as_deref())
                 .into_iter()
@@ -6505,11 +6507,12 @@ impl Coordinator {
                 })?;
             let cur = self.rt().config.input.emoji.module_enabled(id);
             let on = want.unwrap_or(!cur);
+            let name = format!("emoji 模块「{}」", module.label);
             if on == cur {
-                return Ok(());
+                return self.notify_feature_unchanged(target, &name, on);
             }
             Config::set_user_value(&["input", "emoji", "modules", id], toml::Value::Boolean(on))?;
-            (format!("emoji 模块「{}」", module.label), on)
+            (name, on)
         } else if let Some(id) = target.strip_prefix("dict:") {
             let configured = self.rt().config.ui.comment_dicts.clone();
             let auto: Vec<String> = self
@@ -6517,13 +6520,15 @@ impl Coordinator {
                 .into_iter()
                 .map(|a| a.id)
                 .collect();
+            let name = format!("注释词库「{id}」");
             let Some((list, on)) =
                 crate::handle_cmdbar::set_comment_dict(&configured, &auto, id, want)?
             else {
-                return Ok(());
+                // 只有指定了状态才可能「已一致」（取反恒有变化），故 want 必为 Some
+                return self.notify_feature_unchanged(target, &name, want.unwrap_or(true));
             };
             Config::set_user_value(&["ui", "comment_dicts"], toml::Value::try_from(&list)?)?;
-            (format!("注释词库「{id}」"), on)
+            (name, on)
         } else {
             anyhow::bail!("不认识的数据开关 {target:?}");
         };
@@ -6533,6 +6538,16 @@ impl Coordinator {
             warn!("数据开关的提示弹不出来: {e}");
         }
         info!("数据开关 {target}: {text}");
+        Ok(())
+    }
+
+    /// `ime.set` 遇到状态本就一致：不写盘不重载，只提示「…已是开启 / 关闭状态」。
+    fn notify_feature_unchanged(&self, target: &str, name: &str, on: bool) -> anyhow::Result<()> {
+        let text = format!("{name}已是{}状态", if on { "开启" } else { "关闭" });
+        if let Err(e) = self.ui_toast(&text, "info", "", "center", 1500) {
+            warn!("数据开关的提示弹不出来: {e}");
+        }
+        info!("数据开关 {target}: {text}（未改动）");
         Ok(())
     }
 
