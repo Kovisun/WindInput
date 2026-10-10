@@ -1196,7 +1196,13 @@ impl crate::coordinator::Coordinator {
             // 作用域取活跃方案：本入口（cmdbar `dict.rev`）是**低频**路径，就地取一次
             // 比给整条求值链加一个参数划算；且它没有候选身份，也就没有临英那种
             // 「数据归 english 桶」的语境可言。
-            "dict" => reverse.comment_of(text, None, &self.engine_mgr.active_schema_id()),
+            "dict" => {
+                let schema = self.engine_mgr.active_schema_id();
+                match arg {
+                    Some(id) => reverse.comment_of_id(id, text, None, &schema),
+                    None => reverse.comment_of(text, None, &schema),
+                }
+            }
             _ => return reverse_text_var(name, arg, text, reverse),
         })
     }
@@ -1372,7 +1378,11 @@ impl crate::coordinator::Coordinator {
             // （由调用方按 `effective_data_schema` 解析）：注释库是**数据类**资源，
             // 归属与词频/短语同源——临英下要按 `english` 查，而不是主方案。
             // 这与注释**模板**取 active（呈现类）刻意不同，见 `comment_template_for`。
-            "dict" => reverse.comment_of(&c.text, Some(&c.code), dict_schema),
+            // `${dict:id}` 只查那一个库（`${dict}` 只回第一个命中的库，多库并排要靠它）。
+            "dict" => match arg {
+                Some(id) => reverse.comment_of_id(id, &c.text, Some(&c.code), dict_schema),
+                None => reverse.comment_of(&c.text, Some(&c.code), dict_schema),
+            },
             _ => return None,
         })
     }

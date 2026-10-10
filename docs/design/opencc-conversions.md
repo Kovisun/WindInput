@@ -50,7 +50,10 @@
 4. **emoji 的 `${emoji}` 注释档**与 `${dict}` 是两套通路。rime-frost 的 emoji 只走追加，不新增第三套
    注释通路。
 
-拆分（chaifen）与 `${chaizi}` 同理是同一件事的两种实现，取我们的通路，墨奇数据只是换个来源。
+拆分（chaifen）**不走 `${chaizi}`**（2026-10-10 核实后改）：拼音方案的 `${chaizi}` 刻意回落**全局主码表**
+（通常五笔）的字根反查（`EngineManager::chaizi_spec`），挂墨奇拆分就得替换掉它或改这条回落规则。改为
+把拆分也当注释库，用 `${dict:id}` 与中英释义并排（`${dict}` 只回第一个命中的库，单字「好」两者只能
+显示其一）。拆分库只收单字键，正好对应 rime 的 `tips: char`。
 
 ## 5 灵活与性能
 
@@ -68,14 +71,16 @@
 |---|---|---|
 | T0 | emoji FE0F 归一去重（现存缺陷，`text-mapping-tables.md` §2.3） | 无，可单独发 |
 | T1 | 注释词库 + 拆字表接受 OpenCC 格式（§2 规则） | 无 |
-| T2 | 随包 `chinese_english` / `english_chinese` 作注释词库（出厂关）；拼音方案配墨奇拆分作拆字表 | T1；许可核对（§7） |
+| T2 | `${dict:id}` 按库取注释（多库并排）。**随包注释词库暂不做**（维护者 2026-10-10：版权问题先不集成默认注释包），用户自备的 OpenCC 表经 T1 + 本项即可用 | T1 |
 | T3 | 追加通路多表框架，rime-frost `emoji + others` 作第二张表 | T0；`text-mapping-tables.md` P2 |
 | T4 | emoji / 中英 / 拆分的开关入口（菜单、命令栏、工具栏；rime 用 switches） | T2、T3 |
 
 ## 7 许可
 
-rime-frost 为 GPL-3.0，我们已在随包分发其词库，这几张表同等处理。墨奇拆分（`moqi_chaifen`）是否另有
-来源许可，T2 前核对。
+rime-frost 为 GPL-3.0；墨奇拆分源自 `gaboolic/moqima-tables`（MIT）。即便如此，维护者定**暂不随包**注释
+词库（中英 / 英中 / 拆分），待版权梳理后再议；届时登记方式倾向「`schemas/comments/` 目录自动识别、默认关、
+空壳按 id 认领开关」——写进出厂 `config.toml` 的话，用户在设置里改过一次列表就整份固化（数组整体覆盖），
+之后新增的随包词库对他不可见。
 
 ## 8 待定
 

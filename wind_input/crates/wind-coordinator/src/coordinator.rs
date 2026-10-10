@@ -4356,6 +4356,8 @@ impl Coordinator {
             merge_comment_dicts(&rt.config.ui.comment_dicts, &auto)
         };
         let mut paths: Vec<(std::path::PathBuf, Vec<String>)> = Vec::new();
+        // `${dict:id}` 用：每个库被哪些 id 指到（去重合并的那条的 id 也算它的）。
+        let mut ids: Vec<(std::path::PathBuf, Vec<String>)> = Vec::new();
         for eff in specs.iter().filter(|e| e.enabled) {
             // 自动项的路径已经是解析好的绝对路径（检测时就得打开文件），手工项才需要按
             // `schemas/` 逐层解析。两者到这里汇成同一条流水线。
@@ -4373,9 +4375,15 @@ impl Coordinator {
                 // 解析到同一处），只加载一次。重复加载除了浪费解析时间，还会让优先级
                 // 判定变得依赖「第几次出现」——去重后靠前那条恒胜出。
                 Some(p) if paths.iter().any(|(q, _)| *q == p) => {
-                    info!("注释词库重复挂载，已跳过: {} (id={})", p.display(), s.id)
+                    info!("注释词库重复挂载，已跳过: {} (id={})", p.display(), s.id);
+                    if let Some((_, v)) = ids.iter_mut().find(|(q, _)| *q == p) {
+                        v.push(s.id.clone());
+                    }
                 }
-                Some(p) => paths.push((p, s.schemas.clone())),
+                Some(p) => {
+                    ids.push((p.clone(), vec![s.id.clone()]));
+                    paths.push((p, s.schemas.clone()));
+                }
                 // 只 warn 不中断：一个库路径写错不该让其余库一起不加载。
                 None => warn!(
                     "注释词库不存在（用户/安装目录均未找到）: {} (id={})",
@@ -4389,6 +4397,11 @@ impl Coordinator {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         if *cur == paths {
+            // 挂载集合没变，id 仍可能改了（只改 id 不改路径）：只刷新 id，不重挂
+            self.reverse
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .set_comment_ids(&ids);
             return;
         }
         // 注释库缓存与词库 .wdat **同根**：`comment_cache_path` 自己按 schemas 下的目录链分
@@ -4396,10 +4409,11 @@ impl Coordinator {
         // `EngineManager::cache_path` 同构，不再另立一层专用目录。
         // 无缓存目录（便携/测试）时传 None，注释库退化为内存加载，功能不受影响。
         let cache_dir = Config::cache_dir();
-        self.reverse
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .reload_comments(&paths, cache_dir.as_deref());
+        {
+            let mut rl = self.reverse.write().unwrap_or_else(|e| e.into_inner());
+            rl.reload_comments(&paths, cache_dir.as_deref());
+            rl.set_comment_ids(&ids);
+        }
         *cur = paths;
     }
 

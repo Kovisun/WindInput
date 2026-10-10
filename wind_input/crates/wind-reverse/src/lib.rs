@@ -52,6 +52,10 @@ struct CommentSource {
     /// ⇒ ★ 与既有判据同构：**过滤要尽量靠近消费点**。模板里不写 `${dict}` 就根本不调用
     /// `comment_of`（零开销），任何挂载层的过滤都做不到这一点。
     schemas: Vec<String>,
+    /// 指向本库的 `[[ui.comment_dicts]].id`（供 `${dict:id}` 按库取）。一般一个；两条规格
+    /// 解析到同一文件时挂载去重成一个库，两个 id 都认它。由 [`ReverseLookup::set_comment_ids`]
+    /// 在挂载后写入。
+    ids: Vec<String>,
     body: CommentBody,
 }
 
@@ -579,6 +583,7 @@ fn load_comment_source(
         Some(CommentSource {
             src: src.to_path_buf(),
             schemas: schemas.to_vec(),
+            ids: Vec::new(),
             body,
         })
     };
@@ -872,10 +877,40 @@ impl ReverseLookup {
     ///
     /// 全都没命中且词含 ASCII 字母时，再按大小写变形重试一遍（见 [`case_fallbacks`]）。
     pub fn comment_of(&self, text: &str, code: Option<&str>, schema: &str) -> String {
+        self.comment_in(None, text, code, schema)
+    }
+
+    /// 只在 id 为 `id` 的那个注释库里查（`${dict:id}`）；其余同 [`Self::comment_of`]，
+    /// 方案白名单照样生效。
+    ///
+    /// `${dict}` 只回**一条**：按挂载顺序第一个命中的库胜出。中英释义与汉字拆分都挂成注释库
+    /// 时，单字「好」只能显示其一；按库取才能在同一模板里并排写 `${dict:en} ${dict:chaifen}`。
+    /// 不存在的 id 得空串（与查不到同档）。
+    pub fn comment_of_id(&self, id: &str, text: &str, code: Option<&str>, schema: &str) -> String {
+        self.comment_in(Some(id), text, code, schema)
+    }
+
+    /// 写入各库对应的 `[[ui.comment_dicts]].id`（`(源文件路径, ids)`，路径同 `reload_comments`）。
+    /// 与挂载分开：改 id 不改路径时不必重挂 mmap。
+    pub fn set_comment_ids(&mut self, ids: &[(std::path::PathBuf, Vec<String>)]) {
+        for s in &mut self.comments {
+            s.ids = ids
+                .iter()
+                .find(|(p, _)| *p == s.src)
+                .map(|(_, v)| v.clone())
+                .unwrap_or_default();
+        }
+    }
+
+    fn comment_in(&self, id: Option<&str>, text: &str, code: Option<&str>, schema: &str) -> String {
         // ★ 白名单过滤对三遍扫描**统一施加**：漏掉任何一遍，那条路径就会从被排除的库里
         // 取出注释，表现为「限定了方案，可有些词还是显示别的方案的注释」——只在大小写
         // 回退这类少数路径上出现，最难查。
-        let applicable = || self.comments.iter().filter(|s| s.applies_to(schema));
+        let applicable = || {
+            self.comments.iter().filter(|s| {
+                s.applies_to(schema) && id.is_none_or(|id| s.ids.iter().any(|i| i == id))
+            })
+        };
         if let Some(c) = code.filter(|c| !c.is_empty())
             && let Some(hit) = applicable().find_map(|s| s.lookup_by_code(text, c))
         {
@@ -1596,6 +1631,50 @@ mod tests {
         );
 
         drop(rl);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `${dict:id}`：只在该 id 的库里查，不受挂载顺序影响；`${dict}` 仍取第一个命中的库。
+    /// 方案白名单对按库取同样生效；未知 id 得空串；同一文件被两个 id 指到时两个都认。
+    #[test]
+    fn comment_of_id_reads_one_library() {
+        let (dir, mut paths) = write_libs(
+            "byid",
+            &[
+                &[("好", "good well", "")],
+                &[("好", "女子", ""), ("妈", "女马", "")],
+            ],
+        );
+        paths[1].1 = vec!["pinyin".into()];
+        let mut rl = ReverseLookup::default();
+        rl.reload_comments(&paths, None);
+        rl.set_comment_ids(&[
+            (paths[0].0.clone(), vec!["en".into()]),
+            (paths[1].0.clone(), vec!["chaifen".into(), "chai".into()]),
+        ]);
+
+        assert_eq!(
+            rl.comment_of("好", None, "pinyin"),
+            "good well",
+            "不带 id：首个命中"
+        );
+        assert_eq!(rl.comment_of_id("chaifen", "好", None, "pinyin"), "女子");
+        assert_eq!(
+            rl.comment_of_id("chai", "好", None, "pinyin"),
+            "女子",
+            "同库第二个 id"
+        );
+        assert_eq!(
+            rl.comment_of_id("en", "妈", None, "pinyin"),
+            "",
+            "不跨库回落"
+        );
+        assert_eq!(rl.comment_of_id("nope", "好", None, "pinyin"), "");
+        assert_eq!(
+            rl.comment_of_id("chaifen", "好", None, "wubi86"),
+            "",
+            "白名单照样生效"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

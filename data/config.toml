@@ -1357,6 +1357,8 @@ comment_enabled = true
 #   chaizi_all[:分隔符] 拆字字根不限字数，默认空格连接；如 ${chaizi_all:／}（可能很长，慎用于横排）
 #   code_rev_all[:分隔符] 主码表全部码位（我 → q/trn/trnt），默认 / 连接
 #   dict               挂载的注释词库里该词的注释（见下方 [[ui.comment_dicts]]）
+#   dict:<id>          只查 id 为 <id> 的那个注释库（${dict} 只取第一个命中的库；多库并排如
+#                      "${dict:en}{ ${dict:chaifen}}"）
 #
 # 出厂值 ${code_hint|code_rev|shuangpin} 的回退链含义：优先显示引擎产的编码提示，
 # 没有就显示主码表反查编码，再没有（例如没配主码表的用户）就显示双拼编码。
@@ -1383,6 +1385,8 @@ comment_above = false
 # 单独开关和排序。
 auto_comment_dicts = true
 # 注释词库（供 ${dict} 变量查询）不随附任何内容——词典多有版权，由用户自行放置。
+# 除下方 rime 词库形态外，也能直接放 OpenCC 文本词典（`词<Tab>值…`，无 YAML 头）：值首项
+# 重复词本身时自动丢弃，`---` 开头的行视为注释。
 # 需要时在**用户配置**里按下面的形态增补（出厂为空，故此处不预置）：
 #
 #   [[ui.comment_dicts]]
