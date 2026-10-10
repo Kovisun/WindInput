@@ -668,7 +668,7 @@ impl Coordinator {
             max_hosts,
             max_per_word,
             min_chars,
-            |t| dict.lookup(t).map(str::to_string),
+            |t| dict.lookup(t),
         );
         if picks.is_empty() {
             return;

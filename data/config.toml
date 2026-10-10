@@ -1088,6 +1088,19 @@ min_word_chars = 2
 # 是否启用分类词表：「动物」「水果」等分类词会带出整组 emoji，数量受 max_per_word 约束
 categories = false
 
+# 附加模块：来自白霜拼音（rime-frost）的 emoji / 符号表，按模块单独开关。查询时排在上面的
+# 主表（与分类表）之后，同一个词多张表都有时依次拼接，再按 max_per_word 截断。
+[input.emoji.modules]
+frost_emoji = true       # 白霜 emoji（「右箭头」→ ➡️、「勾选」→ ☑️ 等，补主表没有的词）
+frost_radicals = false   # 偏旁部首（「提手旁」→ 扌）
+frost_greek = false      # 希腊字母（「阿尔法」→ alpha α Α）
+frost_misc = false       # 其他：单位上标（「平方米」→ m²）与杂项
+frost_keys = false       # 键盘符号（「command」→ ⌘）
+frost_diezi = false      # 叠字（「两个火」→ 炎 炏）
+frost_chem = false       # 化学式（「高锰酸钾」→ KMnO₄）
+frost_month = false      # 月份星期的英文（「一月」→ Jan. January）
+frost_sitcom = false     # 美剧人名（「谢耳朵」→ Sheldon）
+
 # URL 临时输入模式：正常输入下打出完整前缀（如 http / www.）即进入网址输入模式，
 # 模式内自由输入网址字符（不触发上屏），空格或回车上屏。默认关闭。
 [input.url]

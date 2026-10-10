@@ -313,6 +313,38 @@ pub fn parse_upstream(
     out
 }
 
+/// 只取 OpenCC 文本表里指定分组的行（rime-frost `others.txt` 那种按分组拼起来的表）。
+///
+/// 分组标题行形如 `----------偏旁部首\t----------`：OpenCC 文本词典没有注释语法，rime-frost
+/// 借「键不可重复」把标题写成一条键、值都是破折号的假词条。标题之后到下一个标题之前的行
+/// 归该组；第一个标题之前的行不属于任何组，丢弃。`----------（太短了不启用了）谬\t谬 mu μ`
+/// 这种值不是破折号的行是**被注释掉的词条**，不是标题，也丢弃。
+///
+/// `sections` 为空时原样返回整份内容（不分组的表）。
+pub fn select_sections<'a>(content: &'a str, sections: &[String]) -> std::borrow::Cow<'a, str> {
+    if sections.is_empty() {
+        return std::borrow::Cow::Borrowed(content);
+    }
+    let mut out = String::new();
+    let mut keep = false;
+    for line in content.lines() {
+        if let Some(rest) = line.strip_prefix("----------") {
+            if let Some((name, val)) = rest.split_once('\t')
+                && val.trim().chars().all(|c| c == '-')
+                && !val.trim().is_empty()
+            {
+                keep = sections.iter().any(|s| s == name.trim());
+            }
+            continue;
+        }
+        if keep {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    std::borrow::Cow::Owned(out)
+}
+
 /// 加载 emoji 扩展表：优先 mmap `.wemj` 缓存，不新鲜则从上游 txt 重建。
 ///
 /// - `tables`：要解析的上游文本表，**按顺序合并**（先 `emoji_word.txt` 后
@@ -328,13 +360,22 @@ pub fn parse_upstream(
 /// 刻意不这样做**：emoji 扩展是纯锦上添花的可选功能，而「常驻内存随功能数量累积」正是
 /// 本设计要避开的东西（见模块文档与 `docs/design/emoji-suggestion.md` §3.4）。缓存建不了
 /// （目录只读、磁盘满）就让这个功能不可用并告警，不偷偷占着内存。
+/// - `sections`：只取这些分组（见 [`select_sections`]），空 = 整表。分组决定解析结果却不在
+///   源文件字节里，故并入指纹 tag——同一份 `others.txt` 拆成多个模块，各模块的缓存互不冒认。
 pub fn load_or_build(
     tables: &[std::path::PathBuf],
     fp_extra: &[std::path::PathBuf],
     cache_file: &Path,
+    sections: &[String],
     normalize: impl Fn(&str) -> String,
 ) -> Option<std::sync::Arc<EmojiReader>> {
     use crate::{cache_fp, reader_pool};
+    let tag = if sections.is_empty() {
+        cache_fp::EMOJI_TAG.to_string()
+    } else {
+        format!("{}#{}", cache_fp::EMOJI_TAG, sections.join("|"))
+    };
+    let tag = tag.as_str();
 
     // 指纹覆盖「解析的源」+「影响解析结果的源」两部分，缺一都会让缓存该重建时不重建。
     let fp_sources: Vec<&Path> = tables
@@ -347,7 +388,7 @@ pub fn load_or_build(
     let lock = reader_pool::file_lock(cache_file);
     let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
 
-    if cache_fp::cache_is_fresh(cache_file, &fp_sources, cache_fp::EMOJI_TAG)
+    if cache_fp::cache_is_fresh(cache_file, &fp_sources, tag)
         && let Ok(r) = reader_pool::open_emoji(cache_file)
     {
         return Some(r);
@@ -359,7 +400,7 @@ pub fn load_or_build(
             continue; // 分类表可选，缺了不算失败
         }
         match std::fs::read_to_string(t) {
-            Ok(s) => rows.extend(parse_upstream(&s, &normalize)),
+            Ok(s) => rows.extend(parse_upstream(&select_sections(&s, sections), &normalize)),
             Err(e) => warn!("读取 emoji 表失败 {}: {}", t.display(), e),
         }
     }
@@ -372,7 +413,7 @@ pub fn load_or_build(
         warn!("emoji 缓存构建失败 {}: {}", cache_file.display(), e);
         return None;
     }
-    cache_fp::write_cache_fp(cache_file, &fp_sources, cache_fp::EMOJI_TAG);
+    cache_fp::write_cache_fp(cache_file, &fp_sources, tag);
     match reader_pool::open_emoji(cache_file) {
         Ok(r) => Some(r),
         Err(e) => {
@@ -507,8 +548,8 @@ mod tests {
         let (w, c) = (g.path().join("word.txt"), g.path().join("cat.txt"));
         std::fs::write(&w, "奖项\t奖项 🏅\n").unwrap();
         std::fs::write(&c, "奖项\t奖项 🎖️ 🥇\n").unwrap();
-        let r =
-            load_or_build(&[w, c], &[], &g.path().join("e.wemj"), str::to_string).expect("应建成");
+        let r = load_or_build(&[w, c], &[], &g.path().join("e.wemj"), &[], str::to_string)
+            .expect("应建成");
         assert_eq!(
             r.lookup("奖项"),
             Some("🏅 🎖️ 🥇"),
@@ -526,6 +567,7 @@ mod tests {
             &[w, g.path().join("不存在.txt")],
             &[],
             &g.path().join("e.wemj"),
+            &[],
             str::to_string,
         )
         .expect("缺可选表不该失败");
@@ -537,7 +579,9 @@ mod tests {
     fn build_returns_none_when_no_source() {
         let g = tempdir::Guard::new("wemj-none");
         let cache = g.path().join("e.wemj");
-        assert!(load_or_build(&[g.path().join("无.txt")], &[], &cache, str::to_string).is_none());
+        assert!(
+            load_or_build(&[g.path().join("无.txt")], &[], &cache, &[], str::to_string).is_none()
+        );
         assert!(!cache.exists(), "没建成就不该留下缓存文件");
     }
 
@@ -559,6 +603,7 @@ mod tests {
             std::slice::from_ref(&w),
             std::slice::from_ref(&norm_tbl),
             &cache,
+            &[],
             str::to_string,
         )
         .unwrap();
@@ -567,9 +612,58 @@ mod tests {
 
         // 只改归一表内容（源词表一个字节没动），并换用真的会归一的闭包。
         std::fs::write(&norm_tbl, b"v2").unwrap();
-        let r2 = load_or_build(&[w], &[norm_tbl], &cache, |s| s.replace('個', "个")).unwrap();
+        let r2 = load_or_build(&[w], &[norm_tbl], &cache, &[], |s| s.replace('個', "个")).unwrap();
         assert_eq!(r2.lookup("个"), Some("👤"), "指纹变了 ⇒ 重建 ⇒ 归一生效");
         assert_eq!(r2.lookup("個"), None, "旧键不该还在");
+    }
+
+    /// 按分组取行：标题行不进结果；`（太短了不启用了）` 这类被注释掉的词条不是标题；
+    /// 第一个标题之前的行不属于任何组。空分组表 = 整表。
+    #[test]
+    fn select_sections_keeps_only_named_groups() {
+        let src = "前言\t前言 x\n\
+                   ----------偏旁部首\t----------\n\
+                   提手旁\t提手旁 扌\n\
+                   ----------（太短了不启用了）派\t派 pi π\n\
+                   土部\t土部 土\n\
+                   ----------著名表演艺术家\t----------\n\
+                   某某\t某某 x\n\
+                   ----------希腊字母\t----------\n\
+                   贝塔\t贝塔 beta β\n";
+        let got = select_sections(src, &["偏旁部首".into(), "希腊字母".into()]);
+        assert_eq!(got, "提手旁\t提手旁 扌\n土部\t土部 土\n贝塔\t贝塔 beta β\n");
+        assert_eq!(select_sections(src, &[]), src);
+    }
+
+    /// 同一份源按不同分组建的缓存互不冒认：分组进了指纹 tag。
+    #[test]
+    fn sections_are_part_of_cache_fingerprint() {
+        let g = tempdir::Guard::new("emoji-sections");
+        let src = g.path().join("others.txt");
+        std::fs::write(
+            &src,
+            "----------甲组\t----------\n甲\t甲 🅰\n----------乙组\t----------\n乙\t乙 🅱\n",
+        )
+        .unwrap();
+        let cache = g.path().join("m.wemj");
+        let a = load_or_build(
+            std::slice::from_ref(&src),
+            &[],
+            &cache,
+            &["甲组".into()],
+            str::to_string,
+        )
+        .unwrap();
+        assert_eq!(a.lookup("甲"), Some("🅰"));
+        assert_eq!(a.lookup("乙"), None);
+        drop(a);
+        let b = load_or_build(&[src], &[], &cache, &["乙组".into()], str::to_string).unwrap();
+        assert_eq!(
+            b.lookup("乙"),
+            Some("🅱"),
+            "换了分组必须重建，不能复用甲组的缓存"
+        );
+        assert_eq!(b.lookup("甲"), None);
     }
 
     /// 源与指纹都没变时**复用**缓存，不重建。
@@ -584,13 +678,13 @@ mod tests {
         let w = g.path().join("word.txt");
         let cache = g.path().join("e.wemj");
         std::fs::write(&w, "好\t好 🙂\n").unwrap();
-        let r = load_or_build(std::slice::from_ref(&w), &[], &cache, str::to_string).unwrap();
+        let r = load_or_build(std::slice::from_ref(&w), &[], &cache, &[], str::to_string).unwrap();
         assert_eq!(r.lookup("好"), Some("🙂"));
         drop(r); // 释放 mmap，Windows 上才能覆盖
 
         // 换成一份内容不同的合法缓存（源文件与 .fp 都不动）。
         write_emoji_wemj(&cache, &rows(&[("好", &["🎯"])])).unwrap();
-        let r2 = load_or_build(&[w], &[], &cache, str::to_string).unwrap();
+        let r2 = load_or_build(&[w], &[], &cache, &[], str::to_string).unwrap();
         assert_eq!(r2.lookup("好"), Some("🎯"), "走的是缓存，没有重建");
     }
 

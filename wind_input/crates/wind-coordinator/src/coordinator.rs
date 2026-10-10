@@ -1466,13 +1466,13 @@ pub struct Coordinator {
     /// ★ 功能关闭时恒为 `None` 且**数据文件根本不打开**——未启用的用户为本功能付出的
     /// 常驻内存与启动开销都是零。这是 `.wemj` 走 mmap 的同一条理由的延伸：本表按需读页，
     /// 常驻内存与库大小基本无关，但「不加载」比「加载得很省」还要省。
-    pub(crate) emoji_dict:
-        std::sync::RwLock<Option<std::sync::Arc<wind_dict::emojidict::EmojiReader>>>,
-    /// 上次生效的 emoji 加载参数 `(enabled, categories)`，`sync_emoji_dict` 的去重依据。
+    pub(crate) emoji_dict: std::sync::RwLock<Option<EmojiTables>>,
+    /// 上次生效的 emoji 加载参数 `(enabled, categories, 开着的附加模块 id)`，
+    /// `sync_emoji_dict` 的去重依据。
     ///
-    /// 只记**影响加载结果**的两项：`show_as` / `max_per_word` 这些是查询期参数，改了不必
-    /// 重建 mmap。判据写宽了会让每次 reload 都重解析一遍 4600 行词表。
-    pub(crate) emoji_spec: Mutex<Option<(bool, bool)>>,
+    /// 只记**影响加载结果**的几项：`show_as` / `max_per_word` 这些是查询期参数，改了不必
+    /// 重建 mmap。判据写宽了会让每次 reload 都重解析一遍词表。
+    pub(crate) emoji_spec: Mutex<Option<EmojiSpec>>,
     /// 「辅助码触发键被音节分隔符占用」的告警是否已发过（每方案一次，随
     /// `invalidate_aux_code_table` 复位）。见 `handle_aux_code::warn_aux_code_key_taken`。
     pub(crate) aux_code_key_warned: std::sync::atomic::AtomicBool,
@@ -4430,10 +4430,15 @@ impl Coordinator {
     /// 失败不记录 ⇒ 下次 sync 会重试，于是用户补跑 `gen-data` 后不必改配置就能生效；
     /// 重试成本只是解析一次路径后发现文件不在，可以忽略。
     pub(crate) fn sync_emoji_dict(&self) {
-        let (enabled, categories) = {
+        let (enabled, categories, modules) = {
             let rt = self.rt();
             let e = &rt.config.input.emoji;
-            (e.enabled, e.categories)
+            let modules: Vec<&'static str> = wind_config::EMOJI_MODULES
+                .iter()
+                .filter(|m| e.module_enabled(m.id))
+                .map(|m| m.id)
+                .collect();
+            (e.enabled, e.categories, modules)
         };
         // 值域校验放在去重之前：`scope`/`show_as` 不影响加载、不进变更判据，但配置变更
         // 时正是唯一该告警的时机。放进热路径的话每次按键都会刷一条。
@@ -4455,10 +4460,10 @@ impl Coordinator {
                 );
             }
         }
-        let spec = (enabled, categories);
+        let spec: EmojiSpec = (enabled, categories, modules.clone());
         {
             let cur = self.emoji_spec.lock().unwrap_or_else(|e| e.into_inner());
-            if *cur == Some(spec) {
+            if cur.as_ref() == Some(&spec) {
                 return;
             }
         }
@@ -4468,6 +4473,12 @@ impl Coordinator {
             *self.emoji_spec.lock().unwrap_or_else(|e| e.into_inner()) = Some(spec);
             info!("emoji 扩展已关闭");
             return;
+        }
+        // 一表一缓存之前是主表 + 分类表合建的一份 `emoji.wemj`，现已无人读它
+        if let Some(dir) = Config::cache_dir() {
+            for f in ["emoji.wemj", "emoji.wemj.fp"] {
+                let _ = std::fs::remove_file(dir.join("emoji").join(f));
+            }
         }
         // ★ 先放掉旧表，再重建。`categories` 翻转会改变指纹源 ⇒ `load_or_build` 要写新的
         // `.wemj` 并 rename 覆盖旧文件，而旧表此刻还被本字段的 Arc 持着 mmap——Windows 上
@@ -4479,7 +4490,7 @@ impl Coordinator {
         // 池里只存 Weak（`reader_pool` 模块文档），本字段是唯一的强引用；写锁会等正在
         // `apply_emoji_suggestions` 里的读者退出，之后旧映射即释放。
         *self.emoji_dict.write().unwrap_or_else(|e| e.into_inner()) = None;
-        let loaded = Self::load_emoji_dict(categories);
+        let loaded = Self::load_emoji_dict(categories, &modules);
         let ok = loaded.is_some();
         *self.emoji_dict.write().unwrap_or_else(|e| e.into_inner()) = loaded;
         if ok {
@@ -4487,39 +4498,100 @@ impl Coordinator {
         }
     }
 
-    /// 实际加载 emoji 表：解析路径 → 繁简归一 → 建/复用 `.wemj` 缓存 → mmap。
+    /// 实际加载 emoji 表：解析路径 → （繁简归一）→ 建/复用 `.wemj` 缓存 → mmap。
     ///
-    /// 失败一律返回 `None`（＝功能不可用），**不降级成内存表**——理由见
+    /// **一表一缓存**（`<cache>/emoji/<id>.wemj`），查询期按顺序合并（[`EmojiTables`]）：
+    /// 开关一个模块只是挂 / 不挂那张表，其余的缓存原样复用、永不因别人重建。合建一份的话，
+    /// 翻任何一个开关都要重写整份 `.wemj`，而 Windows 上覆盖被映射的文件会被拒（见
+    /// `sync_emoji_dict` 里「先放掉旧表」那段）。
+    ///
+    /// 顺序：rime-emoji 主表 → 分类表 → 附加模块（[`wind_config::EMOJI_MODULES`] 的顺序）。
+    /// 主表在前，开了附加模块的用户原有的首个 emoji 不变。
+    ///
+    /// 一张都没加载成返回 `None`（＝功能不可用），**不降级成内存表**——理由见
     /// [`wind_dict::emojidict::load_or_build`]：本功能是纯锦上添花的可选项，而「常驻内存
     /// 随功能数量累积」正是它要避开的东西。
-    fn load_emoji_dict(
-        categories: bool,
-    ) -> Option<std::sync::Arc<wind_dict::emojidict::EmojiReader>> {
+    fn load_emoji_dict(categories: bool, modules: &[&str]) -> Option<EmojiTables> {
         let data_dir = Config::data_dir();
         let dd = data_dir.as_deref();
-
-        let Some(word) = Config::resolve_data_file(dd, "emoji/emoji_word.txt") else {
-            warn!("emoji 词表缺失（data/emoji/emoji_word.txt），扩展不可用；运行 gen-data 下载");
+        let Some(cache_dir) = Config::cache_dir() else {
+            warn!("无缓存目录，emoji 扩展不可用");
             return None;
         };
-        let mut tables = vec![word];
-        if categories {
-            match Config::resolve_data_file(dd, "emoji/emoji_category.txt") {
-                Some(p) => tables.push(p),
-                // 分类表可缺：主表照常工作，只是打「动物」不再出一串。
-                None => warn!("emoji 分类表缺失，已按仅主表加载"),
+        let cache_of = |id: &str| cache_dir.join("emoji").join(format!("{id}.wemj"));
+        let mut readers = Vec::new();
+
+        // ── rime-emoji 主表 / 分类表：键是繁体，必须归一 ──
+        match Self::load_emoji_norm(dd) {
+            Some((norm, norm_path)) => {
+                let mut rime = vec![("word", "emoji/emoji_word.txt", true)];
+                rime.push(("category", "emoji/emoji_category.txt", categories));
+                for (id, rel, on) in rime {
+                    if !on {
+                        continue;
+                    }
+                    let Some(src) = Config::resolve_data_file(dd, rel) else {
+                        warn!("emoji 表缺失（data/{rel}），已跳过；运行 gen-data 下载");
+                        continue;
+                    };
+                    // 归一表进 `fp_extra`：它不参与解析但决定解析结果，漏传会让 OpenCC 数据
+                    // 升级后旧缓存被永久复用（见 `cache_fp::EMOJI_TAG`）。
+                    if let Some(r) = wind_dict::emojidict::load_or_build(
+                        &[src],
+                        std::slice::from_ref(&norm_path),
+                        &cache_of(id),
+                        &[],
+                        |s| norm.convert_once(s),
+                    ) {
+                        readers.push(r);
+                    }
+                }
+            }
+            None => warn!("emoji 繁简归一表不可用，rime-emoji 主表与分类表已跳过"),
+        }
+
+        // ── 附加模块（rime-frost，键已是简体，不归一）──
+        for m in wind_config::EMOJI_MODULES
+            .iter()
+            .filter(|m| modules.contains(&m.id))
+        {
+            let Some(src) = Config::resolve_data_file(dd, m.file) else {
+                warn!(
+                    "emoji 模块 {} 的源文件缺失（data/{}），已跳过",
+                    m.id, m.file
+                );
+                continue;
+            };
+            let sections: Vec<String> = m.sections.iter().map(|s| s.to_string()).collect();
+            if let Some(r) = wind_dict::emojidict::load_or_build(
+                &[src],
+                &[],
+                &cache_of(m.id),
+                &sections,
+                str::to_string,
+            ) {
+                readers.push(r);
             }
         }
 
-        // ★ 繁→简归一表是**必需**的，缺了不能降级成「不归一照样加载」。
-        // 上游 rime-emoji 的键全是繁体（实测 国0/國28、爱0/愛16），而本仓候选恒简体
-        // ⇒ 不归一的结果不是「差一点」，是**一条都命中不了**。那种状态下功能看着已启用、
-        // 实际完全不工作，比直接报不可用难查得多。
+        if readers.is_empty() {
+            warn!("emoji 表一张都没加载成，功能不可用");
+            return None;
+        }
+        let n: u32 = readers.iter().map(|r| r.entry_count()).sum();
+        info!("Loaded emoji dict: {} 张表 {} entries", readers.len(), n);
+        Some(EmojiTables(readers))
+    }
+
+    /// rime-emoji 的繁→简归一表。上游键全是繁体（实测 国0/國28、爱0/愛16），而本仓候选
+    /// 恒简体 ⇒ 缺了它主表与分类表**一条都命中不了**，此时宁可不挂这两张，也不挂上一张
+    /// 看着启用、实际全空的表。
+    fn load_emoji_norm(
+        dd: Option<&std::path::Path>,
+    ) -> Option<(wind_transform::s2t::Dict, std::path::PathBuf)> {
         let Some(norm_path) = Config::resolve_data_file(dd, "opencc/TSCharactersDerived.octrie")
         else {
-            warn!(
-                "emoji 繁简归一表缺失（opencc/TSCharactersDerived.octrie），扩展不可用；运行 gen-data 重建"
-            );
+            warn!("emoji 繁简归一表缺失（opencc/TSCharactersDerived.octrie）；运行 gen-data 重建");
             return None;
         };
         let norm_bytes = std::fs::read(&norm_path)
@@ -4529,23 +4601,7 @@ impl Coordinator {
             warn!("emoji 归一表格式无效: {}", norm_path.display());
             None
         })?;
-
-        let Some(cache_dir) = Config::cache_dir() else {
-            warn!("无缓存目录，emoji 扩展不可用");
-            return None;
-        };
-        let cache_file = cache_dir.join("emoji").join("emoji.wemj");
-
-        // 归一表进 `fp_extra`：它不参与解析但决定解析结果，漏传会让 OpenCC 数据升级后
-        // 旧缓存被永久复用（见 `cache_fp::EMOJI_TAG`）。
-        let r = wind_dict::emojidict::load_or_build(&tables, &[norm_path], &cache_file, |s| {
-            norm.convert_once(s)
-        });
-        match &r {
-            Some(d) => info!("Loaded emoji dict: {} entries", d.entry_count()),
-            None => warn!("emoji 扩展表加载失败，功能不可用"),
-        }
-        r
+        Some((norm, norm_path))
     }
 
     /// 辅助码来源缓存失效：方案切换后置 `None`，下次进入辅助码时按新方案的
@@ -17424,6 +17480,22 @@ mod input_diag_tests {
 // 注释词库：配置里的挂载表 × 词库自带 comment 列的自动派生项
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// `sync_emoji_dict` 的变更判据：`(enabled, categories, 开着的附加模块 id)`。
+pub(crate) type EmojiSpec = (bool, bool, Vec<&'static str>);
+
+/// 已挂载的 emoji 表，按查询合并顺序（见 `Coordinator::load_emoji_dict`）。
+pub(crate) struct EmojiTables(pub(crate) Vec<std::sync::Arc<wind_dict::emojidict::EmojiReader>>);
+
+impl EmojiTables {
+    /// 各表命中的值按表序拼成一串（空格分隔）。表间的重复（同一符号、或带 / 不带 U+FE0F）
+    /// 不在这里去：消费端本就要按 `emoji_dedup_key` 去重并截断到 `max_per_word`，在这里
+    /// 再去一遍只是多分配。
+    pub(crate) fn lookup(&self, text: &str) -> Option<String> {
+        let parts: Vec<&str> = self.0.iter().filter_map(|r| r.lookup(text)).collect();
+        (!parts.is_empty()).then(|| parts.join(" "))
+    }
+}
+
 /// 一个自动派生出的注释源：某个方案声明的词库自己带了 `comment` 列。
 #[derive(Debug, Clone, PartialEq)]
 pub struct AutoCommentSource {
@@ -18269,5 +18341,47 @@ mod toolbar_items_tests {
     fn defining_a_button_does_not_show_it() {
         let buttons = [btn("sym", "符")];
         assert_eq!(parse_with(&[], &buttons), DEFAULT_TOOLBAR_ITEMS.to_vec());
+    }
+}
+
+#[cfg(test)]
+mod emoji_tables_tests {
+    use super::EmojiTables;
+    use wind_dict::emojidict::{EmojiReader, write_emoji_wemj};
+
+    fn table(
+        dir: &std::path::Path,
+        name: &str,
+        rows: &[(&str, &[&str])],
+    ) -> std::sync::Arc<EmojiReader> {
+        let p = dir.join(format!("{name}.wemj"));
+        let rows: Vec<(String, Vec<String>)> = rows
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.iter().map(|s| s.to_string()).collect()))
+            .collect();
+        write_emoji_wemj(&p, &rows).unwrap();
+        std::sync::Arc::new(EmojiReader::open(&p).unwrap())
+    }
+
+    /// 多表按挂载顺序拼接：主表在前，附加模块的同词结果接在后面；只有一张表命中时就是它；
+    /// 都没命中为 None。去重留给消费端（`plan_emoji_insertions`）。
+    #[test]
+    fn lookup_concatenates_in_table_order() {
+        let dir = std::env::temp_dir().join(format!("wind-emoji-tables-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let t = EmojiTables(vec![
+            table(&dir, "word", &[("开心", &["😄"])]),
+            table(
+                &dir,
+                "frost",
+                &[("开心", &["😄", "😊"]), ("右箭头", &["➡️"])],
+            ),
+        ]);
+        assert_eq!(t.lookup("开心").as_deref(), Some("😄 😄 😊"));
+        assert_eq!(t.lookup("右箭头").as_deref(), Some("➡️"));
+        assert_eq!(t.lookup("无此词"), None);
+        drop(t);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

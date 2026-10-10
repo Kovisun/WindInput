@@ -779,6 +779,9 @@ download_dicts() {
     for f in $FROST_CELLS; do
         get_dict "$frost/cn_dicts_cell/$f.dict.yaml" "$rime/cn_dicts_cell/$f.dict.yaml" "扩展词库"
     done
+    # emoji / 符号表：emoji 附加模块的数据源（wind-config 的 EMOJI_MODULES，出厂只开 emoji）
+    get_dict "$frost/opencc/emoji.txt"  "$rime/opencc/emoji.txt"  "emoji 表"
+    get_dict "$frost/opencc/others.txt" "$rime/opencc/others.txt" "符号 / 杂项表"
     info "rime-frost (英文):"
     for f in en en_ext; do get_dict "$frost/en_dicts/$f.dict.yaml" "$rime/en_dicts/$f.dict.yaml"; done
 
@@ -823,6 +826,22 @@ download_dicts() {
 
 # 随包附带的 rime-frost 细胞词库。清单与理由见 scripts/dev.sh 的 FROST_CELLS（几处要同步）。
 FROST_CELLS="exthot idiom place history name name2 sport geography animal computer music media industry_product inputmethod chess chess2"
+
+# rime-frost others.txt 里不随包的分组。理由与清单见 scripts/dev.sh 的同名变量（几处要同步）。
+FROST_OTHERS_EXCLUDE="著名表演艺术家"
+
+# 按分组标题过滤 rime-frost 的 OpenCC 杂项表：$1 源，$2 目标。同 scripts/dev.sh 的同名函数。
+strip_frost_sections() {
+    awk -v excl="$FROST_OTHERS_EXCLUDE" '
+        BEGIN { n = split(excl, ex, " ") }
+        /^----------[^\t]*\t-+[ \t]*$/ {
+            name = $0; sub(/^-+/, "", name); sub(/\t.*$/, "", name)
+            skip = 0
+            for (i = 1; i <= n; i++) if (name == ex[i]) skip = 1
+        }
+        !skip { print }
+    ' "$1" > "$2"
+}
 
 # 把 rime 主表 import_tables 里**没随包**的子表、以及全部 cn_dicts_cell/ 细胞词库注释掉（就地改写）。
 # 与 scripts/dev.sh 的同名函数是同一件事（理由见那边），改一边要同步另外两边。
@@ -890,6 +909,15 @@ assemble_data() {
         strip_unshipped_imports "$pinyin/rime_frost.dict.yaml"
     else
         warn "缺 .cache/rime-frost/, 拼音词库不可用 (先跑 gd 下载)"
+    fi
+
+    # 2b. rime-frost 的 emoji / 符号表（emoji 附加模块；不依赖繁简归一表，mac 也能用）。
+    #     others.txt 剔除不随包的分组（FROST_OTHERS_EXCLUDE）。
+    if [[ -f "$rime/opencc/emoji.txt" ]]; then
+        mkdir -p "$data/emoji"
+        cp -f "$rime/opencc/emoji.txt" "$data/emoji/frost_emoji.txt"
+        [[ -f "$rime/opencc/others.txt" ]] \
+            && strip_frost_sections "$rime/opencc/others.txt" "$data/emoji/frost_others.txt"
     fi
 
     # 3. 英文词库。

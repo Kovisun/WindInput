@@ -452,6 +452,10 @@ download_dicts() {
     download_file "$FROST_BASE/cn_dicts/others.dict.yaml"         "$rime_frost_cn/others.dict.yaml"         "容错词"
     download_file "$FROST_BASE/cn_dicts/corrections.dict.yaml"    "$rime_frost_cn/corrections.dict.yaml"    "错音词"
     download_file "$FROST_BASE/cn_dicts/tencent.dict.yaml"        "$rime_frost_cn/tencent.dict.yaml"        "腾讯词频 ~17MB"
+    # emoji / 符号表：emoji 附加模块的数据源（wind-config 的 EMOJI_MODULES，出厂只开 emoji）
+    mkdir -p "$rime_frost/opencc"
+    download_file "$FROST_BASE/opencc/emoji.txt"  "$rime_frost/opencc/emoji.txt"  "emoji 表"
+    download_file "$FROST_BASE/opencc/others.txt" "$rime_frost/opencc/others.txt" "符号 / 杂项表"
     local cell
     mkdir -p "$rime_frost/cn_dicts_cell"
     for cell in $FROST_CELLS; do
@@ -551,6 +555,26 @@ download_dicts() {
 # ⚠ 与 dev.ps1 的 $FrostCells、mac/dev.sh 的 FROST_CELLS、data/schemas/{pinyin,shuangpin}.schema.toml
 #   里的 cell_* 词库声明同步。
 FROST_CELLS="exthot idiom place history name name2 sport geography animal computer music media industry_product inputmethod chess chess2"
+
+# rime-frost others.txt 里不随包的分组（按分组标题整组剔除）。「著名表演艺术家」是成人影星的
+# 中日文名对照，即便模块默认关也不该进安装包。
+# ⚠ 与 dev.ps1 的 $FrostOthersExclude、mac/dev.sh 的同名变量同步。
+FROST_OTHERS_EXCLUDE="著名表演艺术家"
+
+# 按分组标题过滤 rime-frost 的 OpenCC 杂项表：$1 源，$2 目标。标题行形如
+# `----------偏旁部首<Tab>----------`（OpenCC 无注释语法，rime-frost 借假词条写标题），
+# 被剔除的组从其标题到下一个标题整段去掉；其余行原样保留（运行时按分组取，见 emojidict::select_sections）。
+strip_frost_sections() {
+    awk -v excl="$FROST_OTHERS_EXCLUDE" '
+        BEGIN { n = split(excl, ex, " ") }
+        /^----------[^\t]*\t-+[ \t]*$/ {
+            name = $0; sub(/^-+/, "", name); sub(/\t.*$/, "", name)
+            skip = 0
+            for (i = 1; i <= n; i++) if (name == ex[i]) skip = 1
+        }
+        !skip { print }
+    ' "$1" > "$2"
+}
 
 # 把 rime 主表 import_tables 里**没随包**的子表、以及全部 cn_dicts_cell/ 细胞词库注释掉（就地改写）。
 #
@@ -713,6 +737,17 @@ assemble_data() {
         fi
     else
         warn "缺 .cache/rime-emoji/，emoji 扩展不可用（运行 gen-data 下载）"
+    fi
+
+    # 8b. rime-frost 的 emoji / 符号表（emoji 附加模块）。GPL-3.0，与上面的拼音词库同源同许可。
+    # others.txt 剔除不随包的分组（FROST_OTHERS_EXCLUDE），其余分组运行时按模块取。
+    if [ -f "$rime_frost/opencc/emoji.txt" ]; then
+        mkdir -p "$data/emoji"
+        cp -f "$rime_frost/opencc/emoji.txt" "$data/emoji/frost_emoji.txt"
+        [ -f "$rime_frost/opencc/others.txt" ] \
+            && strip_frost_sections "$rime_frost/opencc/others.txt" "$data/emoji/frost_others.txt"
+    else
+        warn "缺 .cache/rime-frost/opencc/，白霜 emoji 模块不可用（运行 gen-data 下载）"
     fi
 
     gray "data/ 组装完成 ($(find "$data" -type f | wc -l) 文件)"

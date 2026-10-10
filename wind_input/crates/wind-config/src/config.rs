@@ -4549,6 +4549,109 @@ pub struct EmojiConfig {
     /// 入口，故做成独立开关而不是不引入。
     #[serde(default)]
     pub categories: bool,
+    /// 附加模块开关（`[input.emoji.modules]`，键 = [`EMOJI_MODULES`] 的 id）。缺的键按该模块
+    /// 的出厂值（[`EmojiConfig::module_enabled`]）；不认识的键忽略。
+    ///
+    /// 用表而不是 `[[tables]]` 数组：配置分层对**表按键合并**、对**数组整体覆盖**。写成数组的话
+    /// 用户在设置里翻一个开关，整份列表就落进用户配置固化下来，之后新增的出厂模块对他不可见。
+    #[serde(default = "default_emoji_modules")]
+    pub modules: BTreeMap<String, bool>,
+}
+
+/// emoji 追加的附加模块（rime-frost 的 OpenCC 表，`docs/design/opencc-conversions.md` T3）。
+///
+/// rime-emoji 主表（`emoji/emoji_word.txt`，随 [`EmojiConfig::enabled`]）与分类表
+/// （[`EmojiConfig::categories`]）不在此列：它们早于本机制，开关保持原样。
+pub struct EmojiModule {
+    /// 配置键 `input.emoji.modules.<id>`，也是缓存文件名。
+    pub id: &'static str,
+    /// 相对数据根（`data/`）的源文件，OpenCC 文本词典。
+    pub file: &'static str,
+    /// 只取这些分组（`others.txt` 按分组拼成一份）；空 = 整表。
+    pub sections: &'static [&'static str],
+    /// 出厂是否开启。
+    pub default_on: bool,
+}
+
+/// 附加模块注册表。**顺序即查询合并顺序**（同一个词多个模块都有时，靠前的排前面）。
+///
+/// ⚠ 与 `data/config.toml` 的 `[input.emoji.modules]`、`config_schema` 的登记、设置端清单
+/// 的开关同步。`others.txt` 里「著名表演艺术家」一组（成人影星名）构建期就剔除、不在此列；
+/// 「emoji集合」一组的键带 `V` 前缀（`V动物`），正常打字打不出宿主词，也不收。
+pub const EMOJI_MODULES: &[EmojiModule] = &[
+    EmojiModule {
+        id: "frost_emoji",
+        file: "emoji/frost_emoji.txt",
+        sections: &[],
+        default_on: true,
+    },
+    EmojiModule {
+        id: "frost_radicals",
+        file: "emoji/frost_others.txt",
+        sections: &["偏旁部首"],
+        default_on: false,
+    },
+    EmojiModule {
+        id: "frost_greek",
+        file: "emoji/frost_others.txt",
+        sections: &["希腊字母"],
+        default_on: false,
+    },
+    EmojiModule {
+        id: "frost_misc",
+        file: "emoji/frost_others.txt",
+        sections: &["其他"],
+        default_on: false,
+    },
+    EmojiModule {
+        id: "frost_keys",
+        file: "emoji/frost_others.txt",
+        sections: &["键盘符号"],
+        default_on: false,
+    },
+    EmojiModule {
+        id: "frost_diezi",
+        file: "emoji/frost_others.txt",
+        sections: &["二叠字", "三叠字", "四叠字"],
+        default_on: false,
+    },
+    EmojiModule {
+        id: "frost_chem",
+        file: "emoji/frost_others.txt",
+        sections: &["化学式"],
+        default_on: false,
+    },
+    EmojiModule {
+        id: "frost_month",
+        file: "emoji/frost_others.txt",
+        sections: &["月份星期"],
+        default_on: false,
+    },
+    EmojiModule {
+        id: "frost_sitcom",
+        file: "emoji/frost_others.txt",
+        sections: &["生活大爆炸&老友记"],
+        default_on: false,
+    },
+];
+
+fn default_emoji_modules() -> BTreeMap<String, bool> {
+    EMOJI_MODULES
+        .iter()
+        .map(|m| (m.id.to_string(), m.default_on))
+        .collect()
+}
+
+impl EmojiConfig {
+    /// 模块是否开启：配置里写了按配置，没写按出厂值；不认识的 id 为 false。
+    pub fn module_enabled(&self, id: &str) -> bool {
+        self.modules.get(id).copied().unwrap_or_else(|| {
+            EMOJI_MODULES
+                .iter()
+                .find(|m| m.id == id)
+                .is_some_and(|m| m.default_on)
+        })
+    }
 }
 
 fn default_emoji_scope() -> String {
@@ -4577,6 +4680,7 @@ impl Default for EmojiConfig {
             max_hosts: default_emoji_max_hosts(),
             min_word_chars: default_emoji_min_word_chars(),
             categories: false,
+            modules: default_emoji_modules(),
         }
     }
 }
