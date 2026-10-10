@@ -322,12 +322,11 @@ impl ImeController for CoordIme {
         let Some(c) = self.0.upgrade() else {
             return Ok(());
         };
-        if !is_feature_target(target) {
-            anyhow::bail!(
-                "ime.set 只支持数据开关（emoji / emoji:<模块id> / dict:<注释库id>），收到 {target:?}"
-            );
+        if is_feature_target(target) {
+            c.cmd_set_feature(target, Some(on))
+        } else {
+            c.cmd_set_state(target, on)
         }
-        c.cmd_set_feature(target, Some(on))
     }
     fn open_setting(&self, page: &str, args: &str) -> anyhow::Result<()> {
         if let Some(c) = self.0.upgrade() {
@@ -615,6 +614,21 @@ pub(crate) fn parse_hex_rgba(s: &str) -> Option<[u8; 4]> {
 /// `ime.toggle` 的数据类开关 target：`emoji`、`emoji:<模块id>`、`dict:<注释库id>`。
 pub(crate) fn is_feature_target(target: &str) -> bool {
     target == "emoji" || target.starts_with("emoji:") || target.starts_with("dict:")
+}
+
+/// `ime.set` 输入状态已是目标时的提示。措辞按各开关在菜单 / 工具栏上的叫法：中英、全半角
+/// 是二选一的两个状态，直接说「已是英文模式」；简繁与工具栏是开关，说「已是开启状态」。
+pub(crate) fn state_unchanged_text(target: &str, on: bool) -> String {
+    let onoff =
+        |name: &str, yes: &str, no: &str| format!("{name}已是{}状态", if on { yes } else { no });
+    match target {
+        "cn-en" => format!("已是{}模式", if on { "中文" } else { "英文" }),
+        "fullshape" => format!("已是{}", if on { "全角" } else { "半角" }),
+        "s2t" => onoff("简入繁出", "开启", "关闭"),
+        "t2s" => onoff("繁入简出", "开启", "关闭"),
+        "toolbar" => onoff("工具栏", "显示", "隐藏"),
+        other => format!("{other}已是{}状态", if on { "开启" } else { "关闭" }),
+    }
 }
 
 /// 把注释词库 `id` 设为 `want`（`None` = 取反）。返回新的 `[[ui.comment_dicts]]` 数组与新状态；
@@ -1191,7 +1205,7 @@ mod reap_tests {
 
 #[cfg(test)]
 mod feature_toggle_tests {
-    use super::{is_feature_target, set_comment_dict};
+    use super::{is_feature_target, set_comment_dict, state_unchanged_text};
     use wind_config::CommentDictSpec;
 
     fn manual(id: &str, enabled: bool) -> CommentDictSpec {
@@ -1201,6 +1215,15 @@ mod feature_toggle_tests {
             enabled,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn state_unchanged_text_uses_menu_wording() {
+        assert_eq!(state_unchanged_text("cn-en", true), "已是中文模式");
+        assert_eq!(state_unchanged_text("cn-en", false), "已是英文模式");
+        assert_eq!(state_unchanged_text("fullshape", false), "已是半角");
+        assert_eq!(state_unchanged_text("s2t", true), "简入繁出已是开启状态");
+        assert_eq!(state_unchanged_text("toolbar", false), "工具栏已是隐藏状态");
     }
 
     #[test]
@@ -1265,5 +1288,44 @@ mod feature_toggle_tests {
     #[test]
     fn unknown_id_is_an_error() {
         assert!(set_comment_dict(&[manual("en", true)], &[], "nope", Some(true)).is_err());
+    }
+}
+
+#[cfg(test)]
+mod set_state_tests {
+    use crate::Coordinator;
+    use wind_config::Config;
+
+    fn coord() -> std::sync::Arc<Coordinator> {
+        let mut cfg = Config::default();
+        // 全半角切换会记「上次状态」；关掉，测试不落盘
+        cfg.input.default.remember_last_state = false;
+        Coordinator::new_headless(cfg, None)
+    }
+
+    fn full_width(c: &Coordinator) -> bool {
+        c.state.lock().unwrap().full_width
+    }
+
+    /// 与当前不同才切；已是目标状态再 set 不翻回去（toggle 的语义会翻回去）。
+    #[test]
+    fn set_is_idempotent_for_input_state() {
+        let c = coord();
+        assert!(!full_width(&c));
+        c.cmd_set_state("fullshape", true).unwrap();
+        assert!(full_width(&c));
+        c.cmd_set_state("fullshape", true).unwrap();
+        assert!(full_width(&c), "已是全角时再 set on 不应翻回半角");
+        c.cmd_set_state("fullshape", false).unwrap();
+        assert!(!full_width(&c));
+    }
+
+    /// 多值 / 循环类 target 没有「开」「关」可言，报错而不是静默翻一格。
+    #[test]
+    fn set_rejects_cyclic_targets() {
+        let c = coord();
+        for t in ["layout", "preedit", "candwin", "nope"] {
+            assert!(c.cmd_set_state(t, true).is_err(), "{t}");
+        }
     }
 }

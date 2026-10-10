@@ -6544,10 +6544,43 @@ impl Coordinator {
     /// `ime.set` 遇到状态本就一致：不写盘不重载，只提示「…已是开启 / 关闭状态」。
     fn notify_feature_unchanged(&self, target: &str, name: &str, on: bool) -> anyhow::Result<()> {
         let text = format!("{name}已是{}状态", if on { "开启" } else { "关闭" });
-        if let Err(e) = self.ui_toast(&text, "info", "", "center", 1500) {
-            warn!("数据开关的提示弹不出来: {e}");
+        self.notify_set_unchanged(target, &text);
+        Ok(())
+    }
+
+    fn notify_set_unchanged(&self, target: &str, text: &str) {
+        if let Err(e) = self.ui_toast(text, "info", "", "center", 1500) {
+            warn!("ime.set 的提示弹不出来: {e}");
         }
-        info!("数据开关 {target}: {text}（未改动）");
+        info!("ime.set {target}: {text}（未改动）");
+    }
+
+    /// `ime.set` 的输入状态开关（`cn-en` / `fullshape` / `s2t` / `t2s` / `toolbar`）：已是目标
+    /// 状态只提示（同数据开关），否则走 `ime.toggle` 同一条切换路径——那条路径自带状态气泡
+    /// 与工具栏刷新，这里不另弹提示，免得一次切换两个浮窗。
+    ///
+    /// `cn-en` 读的是 `chinese_mode`（用户选的中英），不含 CapsLock 临时英文：`set` 回答的是
+    /// 「切到中文」，CapsLock 松开后自然回到中文。
+    pub(crate) fn cmd_set_state(&self, target: &str, on: bool) -> anyhow::Result<()> {
+        let cur = {
+            let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            match target {
+                "cn-en" => s.chinese_mode,
+                "fullshape" => s.full_width,
+                "s2t" => s.s2t_enabled,
+                "t2s" => s.t2s_enabled,
+                "toolbar" => s.toolbar_visible,
+                _ => anyhow::bail!(
+                    "ime.set 不支持 {target:?}：输入状态只认 cn-en / fullshape / s2t / t2s / toolbar（layout / candwin / preedit 只能 ime.toggle）"
+                ),
+            }
+        };
+        if cur == on {
+            let text = crate::handle_cmdbar::state_unchanged_text(target, on);
+            self.notify_set_unchanged(target, &text);
+            return Ok(());
+        }
+        self.cmd_ime_toggle(target);
         Ok(())
     }
 

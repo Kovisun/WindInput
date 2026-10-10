@@ -14,7 +14,7 @@ pub fn specs() -> Vec<FuncSpec> {
         "dict.rev"        : Dict    (1, 2) pure   => fn_dict_rev,    "反查文本中某个字的编码与读音; n 为第几个字 (1 起, 默认 1), 超出字数返回空串", "dict.rev(clip())"
             named(fn_dict_rev_named, "format" = "版式模板, 同候选注释段语法; 变量 ${char}/${code_rev_all}(全部码位)/${code_rev}(仅全码)/${code_schema}(本方案击键)/${pinyin}/${chaizi}/${chaizi_code}/${dict}; 省略='${char}: ${code_rev_all} ${pinyin}'");
         "ime.toggle"      : Ime     (1, 1) effect => fn_ime_toggle,  "切换 IME 状态 (cn-en / fullshape / layout / candwin / s2t / t2s / preedit / toolbar)；数据开关 emoji / emoji:<模块id> / dict:<注释库id>", "ime.toggle(\"cn-en\")";
-        "ime.set"         : Ime     (2, 2) effect => fn_ime_set,     "把数据开关设为指定状态, 已是该状态则不动作; target 同 ime.toggle 的数据开关 (emoji / emoji:<模块id> / dict:<注释库id>), 状态 on/off (也认 true/false、1/0、开/关)", "ime.set(\"emoji:frost_greek\", \"on\")";
+        "ime.set"         : Ime     (2, 2) effect => fn_ime_set,     "把开关设为指定状态, 已是该状态则只提示不动作; target 为输入状态 (cn-en / fullshape / s2t / t2s / toolbar; cn-en 的 on=中文) 或数据开关 (emoji / emoji:<模块id> / dict:<注释库id>), 状态 on/off (也认 true/false、1/0、开/关)", "ime.set(\"emoji:frost_greek\", \"on\")";
         "ime.schema"      : Ime     (1, 1) effect => fn_ime_schema,  "切换输入方案并持久化", "ime.schema(\"pinyin\")";
         "ime.theme"       : Ime     (1, 1) effect => fn_ime_theme,   "切换主题并持久化 (= config.set ui.theme.name)", "ime.theme(\"msime\")";
         "ime.theme_cycle" : Ime     (0, 1) effect => fn_theme_cycle, "循环切换主题并持久化; dir 可选 next(默认)/prev", "ime.theme_cycle()";
