@@ -208,8 +208,9 @@ pub struct ViewImage {
 #[derive(Deserialize, Debug, Clone)]
 pub struct ViewGradientStop {
     pub color: Ld,
+    /// 0..1；缺省按序号均分（`i/(n-1)`，单个 stop 为 0），同 CSS 与主题编辑器。
     #[serde(default)]
-    pub pos: f32,
+    pub pos: Option<f32>,
 }
 
 /// 渐变填充：linear（默认，按 angle 方向）| radial（圆心=矩形中心）。

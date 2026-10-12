@@ -88,6 +88,7 @@ issue 的前提「运行时已具备 SVG 能力，只是编辑器没跟上」**�
 - schema：`background.gradient = { type, angle, stops = [{ color, pos }] }`（`schema.rs:207-235`）。
   `type`：`"linear"`（默认）/ `"radial"`。只挂在 `background` 下；**边框、文字、阴影不支持渐变**。
 - 求值：stop 颜色走 `resolve_color`；`pos` 钳到 [0,1] 升序；无有效 stop 返回 None（`resolve.rs:149-174`）。
+  缺 `pos` 的 stop 按序号均分（`i/(n-1)`，单个为 0），与 CSS / 编辑器同口径；此前缺省为 0，全部挤在起点退化成纯色（审查发现，已改）。
 - 绘制（`view.rs:1413-1487`）：1 个 stop 退化为纯色；linear 的 `angle` 单位是度，0 = 左→右，90 = 上→下（顺时针），端点按投影覆盖整个盒；
   radial 圆心固定在盒中心、半径 = 对角线一半，不可配；外延 Pad；裁到圆角内。
 - 状态补丁（selected/hover/disabled）写了非空 stops 即算有覆盖（`resolve.rs:294-301`）。
