@@ -273,6 +273,7 @@ fn decode_ext_point(body: &[u8]) -> Option<(i32, i32)> {
 struct HostDisplay {
     caret_free: Option<bool>,
     caret_trusted: Option<bool>,
+    inline_preedit: Option<bool>,
     scale: Option<f32>,
 }
 
@@ -285,6 +286,7 @@ fn decode_ext_host_display(body: &[u8]) -> Option<HostDisplay> {
     Some(HostDisplay {
         caret_free: obj.get("caret_free").and_then(|x| x.as_bool()),
         caret_trusted: obj.get("caret_trusted").and_then(|x| x.as_bool()),
+        inline_preedit: obj.get("inline_preedit").and_then(|x| x.as_bool()),
         scale: obj
             .get("scale")
             .and_then(|x| x.as_f64())
@@ -607,6 +609,9 @@ impl MessageHandler for Coordinator {
                     }
                     if let Some(trusted) = d.caret_trusted {
                         self.set_host_caret_trusted(trusted);
+                    }
+                    if let Some(inline) = d.inline_preedit {
+                        self.set_host_inline_preedit(inline);
                     }
                     // wind-ui 只在 desktop-ui（桌面形态）下才是依赖；headless / Android 没有它
                     #[cfg(all(feature = "desktop-ui", not(windows), not(target_os = "macos")))]
@@ -4637,6 +4642,7 @@ mod ext_envelope_tests {
             Some(HostDisplay {
                 caret_free: None,
                 caret_trusted: Some(true),
+                inline_preedit: None,
                 scale: None
             })
         );
@@ -4645,6 +4651,7 @@ mod ext_envelope_tests {
             Some(HostDisplay {
                 caret_free: Some(true),
                 caret_trusted: None,
+                inline_preedit: None,
                 scale: Some(1.5)
             })
         );
@@ -4654,6 +4661,7 @@ mod ext_envelope_tests {
             Some(HostDisplay {
                 caret_free: None,
                 caret_trusted: None,
+                inline_preedit: None,
                 scale: Some(2.0)
             })
         );
@@ -4662,6 +4670,7 @@ mod ext_envelope_tests {
             Some(HostDisplay {
                 caret_free: None,
                 caret_trusted: None,
+                inline_preedit: None,
                 scale: None
             })
         );
@@ -4671,6 +4680,7 @@ mod ext_envelope_tests {
             Some(HostDisplay {
                 caret_free: None,
                 caret_trusted: None,
+                inline_preedit: None,
                 scale: Some(1.25)
             })
         );
@@ -4679,6 +4689,7 @@ mod ext_envelope_tests {
             Some(HostDisplay {
                 caret_free: Some(false),
                 caret_trusted: None,
+                inline_preedit: None,
                 scale: None
             })
         );
@@ -4688,6 +4699,7 @@ mod ext_envelope_tests {
             Some(HostDisplay {
                 caret_free: None,
                 caret_trusted: None,
+                inline_preedit: None,
                 scale: None
             })
         );
@@ -4696,12 +4708,23 @@ mod ext_envelope_tests {
             Some(HostDisplay {
                 caret_free: None,
                 caret_trusted: None,
+                inline_preedit: None,
                 scale: None
             })
         );
         for bad in [&b""[..], b"not json", b"[1]", b"3"] {
             assert_eq!(d(bad), None, "body={:?} 应被拒", bad);
         }
+        // inline_preedit（Linux：客户端有没有 Preedit 能力位）同样独立解析
+        assert_eq!(
+            d(br#"{"caret_free":false,"inline_preedit":false}"#),
+            Some(HostDisplay {
+                caret_free: Some(false),
+                caret_trusted: None,
+                inline_preedit: Some(false),
+                scale: None
+            })
+        );
     }
 
     #[test]

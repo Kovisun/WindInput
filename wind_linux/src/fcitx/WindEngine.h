@@ -166,6 +166,7 @@ private:
     /// 主菜单不从这里进（组字时候选窗右键 / 候选菜单「更多…」）。
     fcitx::SimpleAction settingsAction_;
     std::unique_ptr<fcitx::HandlerTableEntry<fcitx::EventHandler>> shiftClaim_;
+    std::unique_ptr<fcitx::HandlerTableEntry<fcitx::EventHandler>> capabilityWatch_;
     ModeIndicator mode_;
     WindConfig config_;
     KeyHoldTracker keyHolds_;

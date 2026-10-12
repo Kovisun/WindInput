@@ -555,6 +555,10 @@ class KimpanelWatch:
         iface = bus.get_proxy_object(name, path, intro).get_interface(name)
         iface.on_update_property(lambda p: self.props.append(p))
         iface.on_register_properties(lambda ps: self.registered.append(list(ps)))
+        # Fcitx5 输入面板里的预编辑 / 辅助文本：classicui 会把它们画成另一个小窗。
+        self.panel_texts = []
+        iface.on_update_preedit_text(lambda t, _a: self.panel_texts.append(t))
+        iface.on_update_aux(lambda t, _a: self.panel_texts.append(t))
 
     def im(self):
         for p in reversed(self.props):
@@ -1761,6 +1765,31 @@ async def preedit_display_cases(bus, im):
     check("嵌入（复原 app_inline）：预编辑是编码本身、上屏正常",
           r.returncode == 0 and shown.replace("'", "") == "nihao" and got == "你好",
           f"rc={r.returncode} 预编辑={shown!r} 上屏={got!r}")
+    await c.ic.call_focus_out()
+    await asyncio.sleep(0.2)
+
+    # 客户端不声明 Preedit 能力位（WPS / QQ 一类走 XIM 的应用）：编码不能交给 Fcitx5 输入面板
+    # ——classicui 会另起小窗画它，被我们的候选窗盖住——而是由服务端画进候选窗顶部栏。
+    # kimpanel 收到的就是 classicui 会画的那份面板文本，拿它作观测点。
+    kw = await kimpanel_watch(bus)
+    c = await new_ctx(bus, im, "e2e-no-preedit", caps=0)
+    await c.ic.call_set_cursor_rect(300, 400, 2, 20)
+    kw.panel_texts.clear()
+    eaten = await c.type("nihao")
+    await asyncio.sleep(0.3)
+    leaked = [t for t in kw.panel_texts if t.strip()]
+    check("无 Preedit 能力位：编码不交给 Fcitx5 输入面板", all(eaten) and not leaked,
+          f"eaten={eaten} 面板文本={leaked}")
+    if os.environ.get("DISPLAY"):
+        win = candidate_window()
+        ok = win is not None and win[5]
+        check("无 Preedit 能力位：候选窗照常出现", ok, f"window={win}")
+        if ok:
+            path, _ = screenshot("candidate_no_preedit_cap", win[0])
+            print(f"  无 Preedit 能力位候选窗截图（编码应在顶部栏）：{path}", flush=True)
+    await c.key(" ")
+    got = c.take()
+    check("无 Preedit 能力位：上屏「你好」、没有多余空格", got == "你好", f"上屏={got!r}")
     await c.ic.call_focus_out()
     await asyncio.sleep(0.2)
 

@@ -1557,6 +1557,10 @@ pub struct Coordinator {
     /// 宿主报的光标坐标可直接当权威用（Linux addon：来自应用自己上报的光标矩形，没有 Windows
     /// 那种跨窗口 Win32 光标冒充插入点的问题，但来源字段恒为 UNKNOWN）。见 `host.display`。
     host_caret_trusted: std::sync::atomic::AtomicBool,
+    /// 焦点宿主**显示不了**应用内预编辑（Linux addon：客户端没声明 Fcitx5 的 Preedit 能力位，
+    /// 如 WPS、QQ 一类走 XIM 的应用）。置位时编码改由我们自己的候选窗画，见
+    /// [`Coordinator::preedit_in_app_effective`]。见 `host.display` 的 `inline_preedit`。
+    host_no_inline_preedit: std::sync::atomic::AtomicBool,
     /// 启动时预热全部已装方案（桌面默认开；移动端关，见构造里的说明）
     pub(crate) eager_prewarm: std::sync::atomic::AtomicBool,
     /// 0=Idle 1=Preparing 2=Ready 3=Failed（见 [`Coordinator::readiness`]）
@@ -2407,6 +2411,12 @@ impl Coordinator {
             .store(value, std::sync::atomic::Ordering::Relaxed);
     }
 
+    /// 声明焦点宿主能否显示应用内预编辑（见字段 `host_no_inline_preedit`）。
+    pub fn set_host_inline_preedit(&self, supported: bool) {
+        self.host_no_inline_preedit
+            .store(!supported, std::sync::atomic::Ordering::Relaxed);
+    }
+
     pub(crate) fn build(
         config: Config,
         data_dir: Option<&Path>,
@@ -2846,6 +2856,7 @@ impl Coordinator {
             last_valid_caret: Mutex::new((0, 0, 0)),
             caret_independent: std::sync::atomic::AtomicBool::new(false),
             host_caret_trusted: std::sync::atomic::AtomicBool::new(false),
+            host_no_inline_preedit: std::sync::atomic::AtomicBool::new(false),
             eager_prewarm: std::sync::atomic::AtomicBool::new(true),
             readiness_state: std::sync::atomic::AtomicU8::new(0),
             pending_first_show: Mutex::new(false),
@@ -6648,6 +6659,16 @@ impl Coordinator {
     pub(crate) fn preedit_in_app_effective(&self) -> bool {
         if self.ui_suppressed_by_host().is_some() {
             return true;
+        }
+        // 反方向的同一个道理：宿主**没有**应用内预编辑（Linux 下不声明 Preedit 能力位的客户端，
+        // WPS / QQ 等），配置说 app_inline 也嵌不进去。addon 不能把编码转交 Fcitx5 的输入面板
+        // ——那会由 classicui 另起一个小窗，正好被我们的候选窗盖住——所以编码归候选窗顶部栏
+        // （`SetPreeditEmbedded` 按配置原值下发，app_inline 时为 false，即顶部栏）。
+        if self
+            .host_no_inline_preedit
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return false;
         }
         self.preedit_display
             .lock()

@@ -76,15 +76,14 @@ public:
             text.append(utf8, {fcitx::TextFormatFlag::Underline, fcitx::TextFormatFlag::DontCommit});
             text.setCursor(int(caretBytes));
         }
-        auto& panel = ic_->inputPanel();
-        // 宿主支持内嵌预编辑就摆在光标处（与 Windows/macOS 的内嵌组合同观感）；不支持的
-        // （部分 XIM 客户端）退到 Fcitx5 自己的输入面板——那需要 classicui 之类的 UI 插件在场。
+        // 宿主支持内嵌预编辑就摆在光标处（与 Windows/macOS 的内嵌组合同观感）。不支持的
+        // （WPS、QQ 这类走 XIM 的客户端）**什么都不交给 Fcitx5**：曾退到 `InputPanel::setPreedit`，
+        // classicui 就另起一个小窗画编码，正好压在我们的候选窗底下看不见。获焦时已经经
+        // `host.display` 的 inline_preedit=false 告诉服务端，编码由它画进候选窗顶部栏，这里
+        // 收到的只是占位组合（见 HostUi.h clientPreeditText）。
         if (ic_->capabilityFlags().test(fcitx::CapabilityFlag::Preedit)) {
-            panel.setClientPreedit(text);
+            ic_->inputPanel().setClientPreedit(text);
             ic_->updatePreedit();
-        } else {
-            panel.setPreedit(text);
-            ic_->updateUserInterface(fcitx::UserInterfaceComponent::InputPanel);
         }
     }
 
@@ -244,6 +243,17 @@ WindEngine::WindEngine(fcitx::Instance* instance) : instance_(instance)
     shiftClaim_ = instance_->watchEvent(
         fcitx::EventType::InputContextKeyEvent, fcitx::EventWatcherPhase::PreInputMethod,
         [this](fcitx::Event& e) { claimShiftTap(static_cast<fcitx::KeyEvent&>(e)); });
+    // 客户端可能在获焦之后才声明 / 改动能力位（Preedit 决定编码归谁画）：焦点上的那个变了就重报。
+    capabilityWatch_ = instance_->watchEvent(
+        fcitx::EventType::InputContextCapabilityChanged, fcitx::EventWatcherPhase::Default,
+        [this](fcitx::Event& e) {
+            auto& ce = static_cast<fcitx::CapabilityChangedEvent&>(e);
+            if (ce.inputContext() == focusedIC()
+                && ce.oldFlags().test(fcitx::CapabilityFlag::Preedit)
+                    != ce.newFlags().test(fcitx::CapabilityFlag::Preedit)) {
+                sendHostDisplay(ce.inputContext());
+            }
+        });
 
     push_ = std::make_unique<PushClient>(
         pushSocketPath(),
@@ -467,7 +477,9 @@ void WindEngine::sendHostDisplay(fcitx::InputContext* ic)
 #endif
     // 光标可信恒为真：Linux 的光标矩形来自应用自己上报（没有 Windows 那种跨窗口光标冒充插入点
     // 的问题），只是来源字段没有 TSF 那套语义可填。不声明的话服务端「焦点变化时显示」永远挂起。
-    sendAndDrain(encodeHostDisplayFrame(caretFree, true, scale));
+    // 内嵌预编辑看客户端的 Preedit 能力位：没有的话编码由服务端画进候选窗（见 ICSink::setPreedit）。
+    const bool inlinePreedit = ic->capabilityFlags().test(fcitx::CapabilityFlag::Preedit);
+    sendAndDrain(encodeHostDisplayFrame(caretFree, true, inlinePreedit, scale));
 }
 
 void WindEngine::sendFocusGained(fcitx::InputContext* ic)
