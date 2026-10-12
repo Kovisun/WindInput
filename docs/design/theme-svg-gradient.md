@@ -195,10 +195,18 @@ background = { color = "${selection}", gradient = { type = "linear", angle = 90,
 SVG center/tile 只渲染目标盒可见部分，不先整单元栅格化——市场主题是不可信输入，超大 viewBox 或极端宽高比
 不得造成无界分配。SVG 单元按统一比例缩放；DPI 只对 SVG center/tile 进缓存键。
 
-## 实施状态
+## 实施状态：已实现（待真机核对）
 
 | 项 | 主仓 | 编辑器 |
 |---|---|---|
-| P0 | — | 未开始 |
-| P1 | — | 未开始 |
-| P2 | 已实现（本提交；真机待核对） | 预览跟进中 |
+| P0 编辑器修 bug | — | `1b5db07` |
+| P1 补齐已有能力 | — | `1b5db07` |
+| P2 引擎补能力 | `e913939c`、`080db393`（stop 缺 pos 均分） | `1b5db07`（预览跟进） |
+
+自动化验证：主仓 wind-theme 100 + wind-ui 554 全绿，Linux 与 xwin 交叉 clippy 零告警；
+编辑器 1124 项全绿，`pnpm build`（含 check-engine-schema、vue-tsc）通过；浏览器实测图层 SVG + tint、
+toast 背景图、渐变角度、导出再导入不丢图、SVG `<text>` 提示。
+
+**真机待核对**：高 DPI 下 SVG center/tile 的清晰度与接缝；弹窗渐变观感；只写一维 / 未写 size 的第三方主题在新尺寸规则下的变化。
+
+**遗留**：渐变色标编辑区偏挤；预览侧平铺块数（20000）与离屏染色边长（2048/8192）是预览自定保护值，引擎无对应常量，仅病态主题会触及。
