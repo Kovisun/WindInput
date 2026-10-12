@@ -7127,9 +7127,9 @@ impl EngineManager {
         }
     }
 
-    /// 码表 / 拼音方案（`[engine] type = "codetable" | "pinyin"`）没写 `dictionary_dirs` 键时，补一个
-    /// 兜底发现目录 `<主词库所在目录>/ext`，类型同主词库。出厂与第三方方案不改文件就能放扩展词库。
-    /// 英文、混输等不兜底：混输没有自己的词库，英文没有这个需求。
+    /// 码表 / 拼音 / 英文方案（`[engine] type = "codetable" | "pinyin" | "english"`）没写
+    /// `dictionary_dirs` 键时，补一个兜底发现目录 `<主词库所在目录>/ext`，类型同主词库。出厂与
+    /// 第三方方案不改文件就能放扩展词库（英文专业术语库，论坛 t306）。混输不兜底：它没有自己的词库。
     ///
     /// 补进方案本身而不是只在扫描时用：`schema.getConfig` 也就带上它，设置端的「打开扩展词库
     /// 目录」按钮不用另外推算。写了 `dictionary_dirs = []` 即显式关掉兜底。主词库在 `schemas/`
@@ -7143,7 +7143,9 @@ impl EngineManager {
             .and_then(|e| e.get("type"))
             .and_then(|t| t.as_str())
             .is_some_and(|t| {
-                t.eq_ignore_ascii_case("codetable") || t.eq_ignore_ascii_case("pinyin")
+                ["codetable", "pinyin", "english"]
+                    .iter()
+                    .any(|k| t.eq_ignore_ascii_case(k))
             });
         if !has_dict_dir {
             return;
@@ -9381,7 +9383,29 @@ mod tests {
         assert_eq!(schema.dictionary_dirs[0].dict_type, "rime_pinyin");
     }
 
-    /// 不兜底的三种：显式写了 `dictionary_dirs = []`；英文等其它方案；主词库在 schemas/ 根下。
+    /// 英文方案同样兜底（t306）：出厂主库在 `english/en.dict.yaml`，类型取 english，扫到的库排在
+    /// 内置 en_ext 之后、出厂关。
+    #[test]
+    fn english_without_dirs_falls_back_to_main_dict_ext() {
+        let src = "[engine]\ntype = \"english\"\n\
+            [[dictionaries]]\nid = \"en_main\"\npath = \"english/en.dict.yaml\"\n\
+            type = \"english\"\ndefault = true\nbase_order = 0\n\
+            [[dictionaries]]\nid = \"en_ext\"\npath = \"english/en_ext.dict.yaml\"\n\
+            type = \"english\"\ndefault_enabled = true\nbase_order = 1\n";
+        let base = inject_with(src, &["english/ext/en_it.dict.yaml"], &[]);
+        assert_eq!(
+            dict_ids(&base),
+            ["en_main", "en_ext", "dir:english/ext/en_it"]
+        );
+        let schema: Schema = base.try_into().unwrap();
+        assert_eq!(schema.dictionary_dirs[0].path, "english/ext");
+        assert_eq!(schema.dictionary_dirs[0].dict_type, "english");
+        assert_eq!(schema.dictionaries[2].dict_type, "english");
+        assert_eq!(schema.dictionaries[2].base_order, 2);
+        assert!(!schema.dictionaries[2].is_enabled());
+    }
+
+    /// 不兜底的三种：显式写了 `dictionary_dirs = []`；混输等没有词库类型的方案；主词库在 schemas/ 根下。
     #[test]
     fn default_dict_dir_only_when_undeclared_and_main_has_a_dir() {
         let files = ["wubi86/ext/a.dict.yaml", "ext/a.dict.yaml"];
@@ -9391,8 +9415,8 @@ mod tests {
             ["extra", "main"]
         );
 
-        let english = CODETABLE_NO_DIR.replace("\"codetable\"", "\"english\"");
-        let base = inject_with(&english, &files, &[]);
+        let mixed = CODETABLE_NO_DIR.replace("\"codetable\"", "\"mixed\"");
+        let base = inject_with(&mixed, &files, &[]);
         assert_eq!(dict_ids(&base), ["extra", "main"]);
         assert!(base.get("dictionary_dirs").is_none());
 
