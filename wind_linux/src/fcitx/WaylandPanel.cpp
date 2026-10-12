@@ -100,6 +100,15 @@ struct WaylandListeners {
             self->menuPtrOffY_ = oy;
             self->layerPtrX_ = wl_fixed_to_double(x);
             self->layerPtrY_ = wl_fixed_to_double(y);
+            if (self->pendingMenu_ && self->pendingMenu_->locate) {
+                self->pendingMenu_->x = ox + int32_t(std::lround(self->layerPtrX_));
+                self->pendingMenu_->y = oy + int32_t(std::lround(self->layerPtrY_));
+                self->pendingMenu_->locate = false;
+                if (self->catcher_.mapped) {
+                    self->sendPendingMenu();
+                }
+                return;
+            }
             self->reportScreenMenuPointer(MENU_POINTER_MOTION, 0);
             return;
         }
@@ -232,11 +241,9 @@ struct WaylandListeners {
             return;
         }
         if (button == kBtnRight && self->pointerOnPopupStatus() && self->cb_.contextMenu) {
-            // 右键 popup 里的状态气泡：状态菜单，同样画在 popup 里
+            // 右键 popup 里的状态气泡：状态菜单
             self->setHover(-1);
-            self->cb_.contextMenu(MENU_TARGET_STATUS,
-                                  int32_t(std::lround(self->pointerX_ * self->reportedScale_)),
-                                  int32_t(std::lround(self->pointerY_ * self->reportedScale_)));
+            self->openContextMenu(MENU_TARGET_STATUS);
             return;
         }
         if (button == kBtnLeft) {
@@ -249,9 +256,7 @@ struct WaylandListeners {
             // 悬停先清掉：菜单开着时候选窗收不到悬停，残留的高亮会一直挂着。
             const int32_t hit = self->hitAtPointer();
             self->setHover(-1);
-            self->cb_.contextMenu(contextMenuTarget(hit),
-                                  int32_t(std::lround(self->pointerX_ * self->reportedScale_)),
-                                  int32_t(std::lround(self->pointerY_ * self->reportedScale_)));
+            self->openContextMenu(contextMenuTarget(hit));
         }
     }
     static void ptrAxis(void* data, wl_pointer*, uint32_t, uint32_t axis, wl_fixed_t value)
@@ -1763,7 +1768,21 @@ void WaylandCandidatePanel::disarm(std::unique_ptr<fcitx::EventSourceTime>& t)
     }
 }
 
-void WaylandCandidatePanel::openScreenMenu(int32_t target, int32_t x, int32_t y)
+void WaylandCandidatePanel::openContextMenu(int32_t target)
+{
+    if (layerShell_ && subcomp_) {
+        // 合成进 popup 位图的话，菜单一大位图跟着变大，合成器重摆整块（翻到光标上方、夹回屏内），
+        // 候选窗被挤走；而且 popup 的屏幕位置不可知，开不了接住菜单外点击的底板。
+        openScreenMenu(target, 0, 0, true);
+        return;
+    }
+    if (cb_.contextMenu) {
+        cb_.contextMenu(target, int32_t(std::lround(pointerX_ * reportedScale_)),
+                        int32_t(std::lround(pointerY_ * reportedScale_)));
+    }
+}
+
+void WaylandCandidatePanel::openScreenMenu(int32_t target, int32_t x, int32_t y, bool locate)
 {
     if (!layerShell_ || !subcomp_ || !ready()) {
         WIND_WARN() << "开不了屏幕菜单：layer-shell/subcompositor 缺";
@@ -1773,11 +1792,15 @@ void WaylandCandidatePanel::openScreenMenu(int32_t target, int32_t x, int32_t y)
     closeMenu(); // popup 里若还开着菜单，先收（不报：服务端开新菜单时自己会关旧的）
     screenMenu_ = true;
     screenMenuShown_ = false;
-    pendingMenu_ = PendingMenu{target, x, y};
+    pendingMenu_ = PendingMenu{target, x, y, locate};
     layers_[OVERLAY_KIND_STATUS].hideTimer.reset(); // 菜单开着期间气泡不消失
     armTimer(menuMax_, menuMaxMs_, &WaylandCandidatePanel::onMenuMaxExpired);
     armTimer(menuIdle_, menuIdleMs_, &WaylandCandidatePanel::onMenuIdleExpired);
     showCatcher();
+    if (locate) {
+        // 指针一直不进底板（理论上松开右键、底板映射后合成器就会发进入）：别让底板挡着桌面
+        armTimer(menuWait_, 2000, &WaylandCandidatePanel::onMenuWaitExpired);
+    }
     if (catcher_.mapped) {
         sendPendingMenu();
     }
@@ -1849,8 +1872,8 @@ void WaylandCandidatePanel::catcherConfigured(uint32_t serial, uint32_t w, uint3
 
 void WaylandCandidatePanel::sendPendingMenu()
 {
-    if (!pendingMenu_) {
-        return;
+    if (!pendingMenu_ || pendingMenu_->locate) {
+        return; // 落点待定：等指针进入底板（见 ptrEnter）
     }
     const PendingMenu m = *pendingMenu_;
     pendingMenu_.reset();

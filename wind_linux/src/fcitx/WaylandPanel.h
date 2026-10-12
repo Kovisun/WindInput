@@ -317,6 +317,9 @@ private:
     bool screenMenuShown_ = false; // 本次菜单已有一级显示过（之前来的「隐藏」帧不算收菜单）
     struct PendingMenu {
         int32_t target, x, y; // x y：输出逻辑坐标
+        // 落点待定：右键在候选窗（popup / 面板）里，它的屏幕位置不可知，等指针进入底板时取指针的
+        // 输出坐标当落点（底板铺满输出，坐标即输出坐标）
+        bool locate = false;
     };
     std::optional<PendingMenu> pendingMenu_;
     std::unique_ptr<fcitx::EventSourceTime> menuWait_; // 请求后迟迟没有菜单帧
@@ -324,7 +327,10 @@ private:
     std::unique_ptr<fcitx::EventSourceTime> menuMax_;  // 绝对上限（底板挡着整个桌面的鼠标）
     wl_surface* menuPtrSurface_ = nullptr;
     int32_t menuPtrOffX_ = 0, menuPtrOffY_ = 0;
-    void openScreenMenu(int32_t target, int32_t x, int32_t y);
+    void openScreenMenu(int32_t target, int32_t x, int32_t y, bool locate = false);
+    /// 候选窗里的右键：有 layer-shell 时开在屏幕坐标系（候选窗不动、点菜单外能收），落点取
+    /// 指针进入底板时的位置；没有 layer-shell 时退回合成进 popup 位图（旧路径）。
+    void openContextMenu(int32_t target);
     void showCatcher();
     void catcherConfigured(uint32_t serial, uint32_t w, uint32_t h);
     void sendPendingMenu();
