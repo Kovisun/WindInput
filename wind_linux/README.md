@@ -7,7 +7,8 @@ addon（`libwindinput.so`），负责把按键交给清风输入法服务（`win
 ## 构建
 
 依赖：Fcitx5 5.x 开发包（`libfcitx5core-dev` `libfcitx5utils-dev` `libfcitx5config-dev`）、
-`libxcb1-dev` `libxcb-shape0-dev`（候选窗）、CMake ≥ 3.16、C++17 编译器。
+`libxcb1-dev` `libxcb-shape0-dev`（候选窗）、CMake ≥ 3.16、C++17 编译器。较新的 Fcitx5 头文件（如 Arch 的 5.1.23）
+要 C++20，配置时会自动探测并把 addon 升到 C++20，此时需要支持 C++20 的编译器；也可用 `-DCMAKE_CXX_STANDARD=20` 指定。
 
 ```bash
 cmake -S wind_linux -B wind_linux/build/cmake -G Ninja
@@ -47,6 +48,14 @@ sudo apt install ./windinput_*.deb     # 会带上 fcitx5 及 GTK/Qt 前端
 必须在 22.04 上构建：更新的发行版编出的产物带 GLIBC_2.38+ 符号和更新的 fcitx5 ABI，22.04 上加载不了。
 服务由 addon 在连不上时自动拉起（`/usr/lib/windinput/wind_input`，可用 `WIND_INPUT_SERVICE` 覆盖），
 服务自己持 flock 单例。
+
+## 已知限制
+
+- **KDE Plasma（Wayland）下，Wayland 原生应用（Konsole、Kate、KRunner、Plasma 启动器等）不显示候选窗**：
+  KWin 只实现 input-method-v1，而清风的 Wayland 候选窗目前只接了 input-method-v2（GH#192）。
+  打字、上屏不受影响；XWayland 应用（微信、Chrome、VS Code 等）的候选窗正常。
+- Plasma 6 Wayland 下请按 Fcitx5 的建议**不要**设 `QT_IM_MODULE`（Qt 应用走 text-input，经 KWin 交给
+  Fcitx5）；设了 `QT_IM_MODULE=fcitx` 时，Wayland 原生 Qt 应用报的是窗口内坐标，候选窗会偏到屏幕左上角。
 
 ## 使用
 

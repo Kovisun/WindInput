@@ -59,6 +59,7 @@ Gatekeeper 拦下时到「系统设置 → 隐私与安全性」放行。
 | `wind_input` | Rust | 核心服务：输入引擎、词库、候选管理、UI 渲染、IPC（跨平台） |
 | `wind_tsf` | C++ | Windows TSF 输入法框架接口，键盘事件捕获 |
 | `wind_macos` | Swift | macOS IMKit 输入法客户端 |
+| `wind_linux` | C++ | Linux Fcitx5 addon（测试中，见 [wind_linux/README.md](wind_linux/README.md)） |
 
 发布版安装包还需要以下配套项目，它们在各自的独立仓库中维护：
 
@@ -84,6 +85,7 @@ wind-ui-rust；只有 wind-setting 是 path 依赖（`windui = { path = "../wind
 - **Windows**：Rust stable + Visual Studio 2022（C++ 桌面开发）+ CMake，运行 `.\scripts\dev.ps1`
 - **macOS**：Rust stable + Xcode（Swift 5.9+），运行 `scripts/mac/dev.sh`
 - **Linux（交叉编译 Windows 产物）**：`scripts/dev.sh`
+- **Linux（Fcitx5 前端，测试中）**：构建、安装与已知限制见 [wind_linux/README.md](wind_linux/README.md)
 
 构建脚本会自动下载第三方词库数据并生成完整的数据目录。详细说明见
 [贡献指南](CONTRIBUTING.md)。
