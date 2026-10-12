@@ -1394,18 +1394,34 @@ impl crate::coordinator::Coordinator {
             // 归属与词频/短语同源——临英下要按 `english` 查，而不是主方案。
             // 这与注释**模板**取 active（呈现类）刻意不同，见 `comment_template_for`。
             // `${dict:id}` 只查那一个库（`${dict}` 只回第一个命中的库，多库并排要靠它）。
-            "dict" => match arg {
-                Some(id) => reverse.comment_of_id(id, &c.text, Some(&c.code), dict_schema),
-                None => reverse.comment_of(&c.text, Some(&c.code), dict_schema),
-            },
+            //
+            // ★ 按输入大小写投影过的英文候选（`case_source` 有值，见 `apply_english_case`）用
+            // **词库原文**查，且回退只往小写走（论坛 t281）：输入 `ASP` 时词库的 `asp`（毒蛇）
+            // 显示成 `ASP`，拿显示形态查会精确命中 IT 库的缩写 `ASP`；拿原文 `asp` 双向回退
+            // 同样会升格命中它。词库已确证这个词是小写的，升格就是换了个词。
+            "dict" => {
+                let (key, fb) = dict_query_key(c);
+                reverse.comment_of_with(arg, key, Some(&c.code), dict_schema, fb)
+            }
             // `${dict_all[:分隔符]}` —— 全部适用库各出一条（论坛 t282），默认 `；` 连接、按内容
             // 去重。`${dict}` 只回第一个命中的库，中英释义与 IT 术语库都收了同一个词时另一条
             // 就看不见；`${dict:id}` 能并排但要逐库写死 id。不带来源库标签：标签该写在库内容里。
-            "dict_all" => reverse
-                .comments_of(&c.text, Some(&c.code), dict_schema)
-                .join(arg.unwrap_or(DICT_ALL_SEP)),
+            "dict_all" => {
+                let (key, fb) = dict_query_key(c);
+                reverse
+                    .comments_of_with(key, Some(&c.code), dict_schema, fb)
+                    .join(arg.unwrap_or(DICT_ALL_SEP))
+            }
             _ => return None,
         })
+    }
+}
+
+/// 候选查注释库用的词与大小写回退方向（论坛 t281，理由见 `eval_var` 的 `dict` 分支）。
+fn dict_query_key(c: &Candidate) -> (&str, wind_reverse::CaseFallback) {
+    match &c.case_source {
+        Some(orig) => (orig.as_str(), wind_reverse::CaseFallback::LowerOnly),
+        None => (c.text.as_str(), wind_reverse::CaseFallback::Both),
     }
 }
 
@@ -2390,6 +2406,58 @@ mod eval_var_tests {
         assert_eq!(
             co.eval_text_var("dict_all", None, "nosuch", &rl).as_deref(),
             Some("")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ★ 论坛 t281：输入 `ASP` 时词库的 `asp`（毒蛇）被投影成 `ASP`，不得贴上 IT 库里缩写
+    /// `ASP` 的释义——`${dict}`、`${dict_all}` 都按词库原文 `asp` 查、回退不升格。
+    #[test]
+    fn case_projected_candidate_queries_dictionary_original() {
+        use crate::english_candidates::{CaseVariant, apply_english_case};
+        let co = coord("pinyin");
+        let dir = std::env::temp_dir().join(format!("wind_t281_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let lib = |name: &str, body: &str| {
+            let p = dir.join(name);
+            std::fs::write(
+                &p,
+                format!("name: t\ncolumns:\n  - text\n  - comment\n...\n{body}"),
+            )
+            .unwrap();
+            (p, Vec::new())
+        };
+        let it = lib("it.dict.yaml", "ASP\t[IT]动态服务器页面\n");
+        let en = lib("en.dict.yaml", "asp\tn.毒蛇\n");
+
+        let mut projected = [word("asp")];
+        assert!(apply_english_case(
+            &mut projected,
+            "ASP",
+            CaseVariant::Default
+        ));
+        let projected = &projected[0];
+        assert_eq!(projected.text, "ASP", "前提：asp 被投影成 ASP");
+
+        // 只有 IT 库：不显示缩写的释义。
+        let mut rl = wind_reverse::ReverseLookup::default();
+        rl.reload_comments(std::slice::from_ref(&it), None);
+        assert_eq!(comment(&co, &rl, "${dict}", projected), "");
+        assert_eq!(comment(&co, &rl, "{${dict_all}}", projected), "");
+        // 词库里本来就是大写的 `ASP`（未投影）照常显示 IT 释义。
+        assert_eq!(
+            comment(&co, &rl, "${dict}", &word("ASP")),
+            "[IT]动态服务器页面"
+        );
+
+        // 英汉库也收了小写 asp：显示毒蛇，聚合里同样没有 IT 那条。
+        rl.reload_comments(&[en, it], None);
+        assert_eq!(comment(&co, &rl, "${dict}", projected), "n.毒蛇");
+        assert_eq!(comment(&co, &rl, "${dict_all}", projected), "n.毒蛇");
+        assert_eq!(
+            comment(&co, &rl, "${dict_all}", &word("ASP")),
+            "[IT]动态服务器页面"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

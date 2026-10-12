@@ -514,6 +514,39 @@ fn opencc_comment<'a>(text: &str, value: &'a str) -> Option<&'a str> {
     }
 }
 
+/// 注释查询精确查不到时，大小写回退往哪个方向走。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaseFallback {
+    /// 双向（[`case_fallbacks`] 全部变形）：查询的文本是用户**打出来的形态**，大小写不说明
+    /// 它是哪个词——输入 `abc` 要能查到缩写 `ABC`。
+    Both,
+    /// 只往小写走（`Configure` → `configure`、`ASP` → `asp`），不升格（论坛 t281）。
+    ///
+    /// 用于词的大小写**已由词库确证**的场合：英文候选按输入大小写投影过时（`asp` 显示成
+    /// `ASP`），调用方拿词库原文 `asp` 来查。小写 `asp`（毒蛇）与缩写 `ASP` 是两个词，
+    /// 升格会给前者贴上后者的释义；往小写走只是句首 / 大写锁定的形态差，照常放行。
+    LowerOnly,
+}
+
+impl CaseFallback {
+    fn variants(self, text: &str) -> Vec<String> {
+        let mut out = case_fallbacks(text);
+        if self == Self::LowerOnly {
+            out.retain(|v| only_lowers(text, v));
+        }
+        out
+    }
+}
+
+/// `to` 是否只是把 `from` 的若干大写字母改成了小写（逐字符对应，其余原样）。
+fn only_lowers(from: &str, to: &str) -> bool {
+    from.chars().count() == to.chars().count()
+        && from
+            .chars()
+            .zip(to.chars())
+            .all(|(f, t)| f == t || (f.is_uppercase() && f.to_lowercase().eq(std::iter::once(t))))
+}
+
 /// 精确查不到时依次重试的大小写变形（全小写 → 首字母大写 → 全大写，去掉与原文相同者）。
 ///
 /// **必须双向**：英文注释库里既有小写词条（`apple`）也有大写缩写（`ABC`、`AAP`），
@@ -877,7 +910,20 @@ impl ReverseLookup {
     ///
     /// 全都没命中且词含 ASCII 字母时，再按大小写变形重试一遍（见 [`case_fallbacks`]）。
     pub fn comment_of(&self, text: &str, code: Option<&str>, schema: &str) -> String {
-        self.comment_in(None, text, code, schema)
+        self.comment_in(None, text, code, schema, CaseFallback::Both)
+    }
+
+    /// [`Self::comment_of`] / [`Self::comment_of_id`]（`id` 为 `Some`）的通用形：可指定大小写
+    /// 回退的方向（见 [`CaseFallback`]）。
+    pub fn comment_of_with(
+        &self,
+        id: Option<&str>,
+        text: &str,
+        code: Option<&str>,
+        schema: &str,
+        fallback: CaseFallback,
+    ) -> String {
+        self.comment_in(id, text, code, schema, fallback)
     }
 
     /// 只在 id 为 `id` 的那个注释库里查（`${dict:id}`）；其余同 [`Self::comment_of`]，
@@ -887,7 +933,7 @@ impl ReverseLookup {
     /// 时，单字「好」只能显示其一；按库取才能在同一模板里并排写 `${dict:en} ${dict:chaifen}`。
     /// 不存在的 id 得空串（与查不到同档）。
     pub fn comment_of_id(&self, id: &str, text: &str, code: Option<&str>, schema: &str) -> String {
-        self.comment_in(Some(id), text, code, schema)
+        self.comment_in(Some(id), text, code, schema, CaseFallback::Both)
     }
 
     /// 写入各库对应的 `[[ui.comment_dicts]].id`（`(源文件路径, ids)`，路径同 `reload_comments`）。
@@ -909,6 +955,17 @@ impl ReverseLookup {
     /// 不变量：[`Self::comment_of`] 的结果总在本函数的结果里——它取的是某个库的那一条，
     /// 而那个库在这里出的正是同一条（逐库「先同码后首条」与跨库两遍扫描对单个库等价）。
     pub fn comments_of(&self, text: &str, code: Option<&str>, schema: &str) -> Vec<String> {
+        self.comments_of_with(text, code, schema, CaseFallback::Both)
+    }
+
+    /// [`Self::comments_of`] 的通用形：可指定大小写回退的方向（见 [`CaseFallback`]）。
+    pub fn comments_of_with(
+        &self,
+        text: &str,
+        code: Option<&str>,
+        schema: &str,
+        fallback: CaseFallback,
+    ) -> Vec<String> {
         let code = code.filter(|c| !c.is_empty());
         let mut out: Vec<String> = Vec::new();
         let mut push = |s: &str| {
@@ -927,7 +984,7 @@ impl ReverseLookup {
             }
         }
         if !exact {
-            let variants = case_fallbacks(text);
+            let variants = fallback.variants(text);
             if !variants.is_empty() {
                 for src in self.applicable_comments(None, schema) {
                     if let Some(s) = variants.iter().find_map(|v| src.lookup_first(v)) {
@@ -954,7 +1011,14 @@ impl ReverseLookup {
         })
     }
 
-    fn comment_in(&self, id: Option<&str>, text: &str, code: Option<&str>, schema: &str) -> String {
+    fn comment_in(
+        &self,
+        id: Option<&str>,
+        text: &str,
+        code: Option<&str>,
+        schema: &str,
+        fallback: CaseFallback,
+    ) -> String {
         let applicable = || self.applicable_comments(id, schema);
         if let Some(c) = code.filter(|c| !c.is_empty())
             && let Some(hit) = applicable().find_map(|s| s.lookup_by_code(text, c))
@@ -964,7 +1028,7 @@ impl ReverseLookup {
         if let Some(hit) = applicable().find_map(|s| s.lookup_first(text)) {
             return hit.to_string();
         }
-        for v in case_fallbacks(text) {
+        for v in fallback.variants(text) {
             if let Some(hit) = applicable().find_map(|s| s.lookup_first(&v)) {
                 return hit.to_string();
             }
@@ -2177,6 +2241,60 @@ mod tests {
                 rl.comment_of("Us", None, ""),
                 "我们",
                 "{name} 回退顺序：小写在先"
+            );
+        }
+        drop(both);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ★ `LowerOnly`（论坛 t281）：词的大小写已由词库确证时，回退只许把大写改小写，不许升格。
+    ///
+    /// 小写 `asp`（毒蛇）与大写缩写 `ASP`（Active Server Pages）是两个词；双向回退会让前者
+    /// 贴上后者的释义。往小写走（`Configure` → `configure`）只是句首 / 大写锁定的形态差，
+    /// 照常放行。
+    #[test]
+    fn lower_only_fallback_never_raises_case() {
+        let (dir, both) = rl_both(
+            "case-lower-only",
+            &[&[
+                ("ASP", "[IT]动态服务器页面", ""),
+                ("configure", "v.配置", ""),
+            ]],
+        );
+        for (name, rl) in &both {
+            let one = |t: &str| rl.comment_of_with(None, t, None, "", CaseFallback::LowerOnly);
+            let all = |t: &str| rl.comments_of_with(t, None, "", CaseFallback::LowerOnly);
+            assert_eq!(one("asp"), "", "{name}：小写词不得升格去命中大写缩写");
+            assert!(all("asp").is_empty(), "{name}");
+            assert_eq!(one("Asp"), "", "{name}：首字母大写同样不得升到全大写");
+            assert_eq!(one("ASP"), "[IT]动态服务器页面", "{name}：精确照常");
+            assert_eq!(one("Configure"), "v.配置", "{name}：往小写走照常");
+            assert_eq!(all("CONFIGURE"), ["v.配置"], "{name}");
+            // 双向档（默认）行为不变。
+            assert_eq!(
+                rl.comment_of("asp", None, ""),
+                "[IT]动态服务器页面",
+                "{name}"
+            );
+        }
+        drop(both);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // 注释库同时收了小写原词：精确命中它，与大写那条无关。
+        let (dir, both) = rl_both(
+            "case-lower-only-both",
+            &[&[("ASP", "[IT]动态服务器页面", ""), ("asp", "n.毒蛇", "")]],
+        );
+        for (name, rl) in &both {
+            assert_eq!(
+                rl.comment_of_with(None, "asp", None, "", CaseFallback::LowerOnly),
+                "n.毒蛇",
+                "{name}"
+            );
+            assert_eq!(
+                rl.comments_of_with("asp", None, "", CaseFallback::LowerOnly),
+                ["n.毒蛇"],
+                "{name}"
             );
         }
         drop(both);
