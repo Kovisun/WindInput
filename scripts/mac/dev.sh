@@ -1306,8 +1306,9 @@ PY
     # 4c. 触发一次 input sources 重读
     defaults read com.apple.HIToolbox AppleEnabledInputSources >/dev/null 2>&1 || true
 
-    # 4c'. 踢掉替换期间被 IMK 用旧 bundle 拉起的控制器 (p1 先装 service, 那一步的 kick 会让
-    #     IMK 立刻重拉一个旧二进制的控制器)。**必须在起注册守护之前做, 之后绝不能再踢**:
+    # 4c'. 踢掉第 1 步之后又被 IMK 拉起的控制器: pkill 后到 cp 完成前, 清风正被选中的宿主
+    #     会让 IMK 立刻重拉一个 (可能还是旧二进制)。第 1 步杀过了不等于干净, 别删这一步。
+    #     **必须在起注册守护之前做, 之后绝不能再踢**:
     #     注册一发生, 当前选中清风的宿主会让 imklaunchagent 立即拉起一个**新**控制器
     #     (launchd: "spawned … because launch job demand"), 它是唯一持有 IMK 端点的进程。
     #     旧版在注册后 sleep 1 再 kick, 恰好把这个新控制器杀掉 (实测 macOS 27: 19:00:54 与

@@ -113,7 +113,6 @@ public class InputController: IMKInputController {
     /// 从而驱动工具栏 reducer 显示模式指示器 (CmdModeStatus → 菜单栏)。
     public override func activateServer(_ sender: Any!) {
         super.activateServer(sender)
-        Self.lastActivated = self
         if let pending = Self.blipDeferred {
             Self.blipDeferred = nil
             // 闪回不一定落在同一个 controller 上: Spotlight 实测第二对 D/A 换了个新实例来
@@ -124,6 +123,7 @@ public class InputController: IMKInputController {
                 // 右键菜单造成的闪回: 服务端从没收到 FocusLost, 这次 Activate 也就不必再报,
                 // 组合与候选原样保留。
                 pending.blipSender = nil
+                Self.lastActivated = self
                 if pending !== self { router.adoptState(from: pending.router) }
                 currentClient = sender as? (IMKTextInput & NSObjectProtocol)
                 CandidatePanelHost.shared.activeResponder = self
@@ -140,6 +140,11 @@ public class InputController: IMKInputController {
         router.digitTracker.reset()
         // 激活即确保连上 (装完首次激活 / 重启后并发竞态时 init 那次可能没连上)。
         ensureConnected()
+        // 旧控制器还没失活 (跨宿主切换系统先激活新 client): 它欠的 FocusLost 在这里先补上,
+        // 保住「Lost 先于 Gained」—— 服务端只在失焦时清输入缓冲/候选/菜单态, 不补的话组字中
+        // 切应用, 旧宿主里的编码会带进新宿主。它晚到的那次失活随后按过期丢弃, 见 performDeactivation。
+        if let prev = Self.lastActivated, prev !== self { sendEmpty(UpstreamCmd.focusLost) }
+        Self.lastActivated = self
         sendFocusGained()
         sendFrontContext()
     }
@@ -171,7 +176,8 @@ public class InputController: IMKInputController {
             let adapter = imkClient.map { IMKClientAdapter(imkClient: $0, controller: self) }
             router.applyClearComposition(client: adapter)
         }
-        // 已有别的控制器在本控制器之后激活: 服务端此刻的焦点属于它, 这条失活已过期, 不报。
+        // 已有别的控制器在本控制器之后激活: 它激活时已替本控制器补过 FocusLost, 服务端此刻的
+        // 焦点属于它, 这条失活已过期, 不报。
         if let newer = Self.lastActivated, newer !== self { return }
         Self.lastActivated = nil
         sendEmpty(UpstreamCmd.focusLost)

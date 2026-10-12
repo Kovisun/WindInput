@@ -132,6 +132,11 @@ final class CandidateContentView: NSView {
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
     override func mouseDown(with event: NSEvent) {
+        // 上一次点击的残留先清掉: 按下期间窗口被收起时, 那次的 mouseUp 不一定送得到。
+        pressedIndex = nil
+        dragAnchor = nil
+        dragOrigin = nil
+        dragMoved = false
         if let idx = hitIndex(event) { pressedIndex = idx; return }
         // 空白区（编码栏/内边距，非候选非翻页键）→ 起拖，整窗跟随光标。与 Windows 侧
         // WM_LBUTTONDOWN 的同一分支同构（那边用 SetCapture 保证移出窗口后仍收到消息；
@@ -164,13 +169,13 @@ final class CandidateContentView: NSView {
     /// 是系统处理这次点击的哪一步把它摆回来的没有查明 (拦掉推迟到松开的窗口排序无效);
     /// 改成整个点击结束再选之后, 收起后的窗口不再回来。
     override func mouseUp(with event: NSEvent) {
+        defer { dragAnchor = nil; dragOrigin = nil; dragMoved = false }
         if let idx = pressedIndex {
             pressedIndex = nil
             // 按下后移出该项再松开 = 放弃 (按钮的通行语义)。
             if hitIndex(event) == idx { onSelect?(idx) }
             return
         }
-        defer { dragAnchor = nil; dragOrigin = nil; dragMoved = false }
         guard dragAnchor != nil, dragMoved else { return }
         onDragEnded?()
     }
