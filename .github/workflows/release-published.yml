@@ -3,6 +3,7 @@ name: Release Published
 # Release 正式发布(release.yml 产出草稿 → 人工审核 Release Notes → 点 Publish)的下游动作:
 #   1. notify-docs  通知文档仓同步更新记录 → data/releases.json → 驱动 /changelog 与 /download
 #   2. sync-to-r2   把安装包与在线升级元数据推到 Cloudflare R2(dl.windinput.com)
+#   3. winget       向 microsoft/winget-pkgs 提交新版本清单(`winget install windinput`)
 #
 # 两平台各一套元数据:latest.json(exeUrl,Windows)与 latest-mac.json(pkgUrl,macOS)。
 # 键名故意不同,好让「客户端读到另一平台的元数据」在解析阶段就被拒 —— 客户端侧对应实现见
@@ -18,6 +19,7 @@ name: Release Published
 #     DOCS_REPO_PAT          对文档仓有 contents:write 的 PAT(GITHUB_TOKEN 跨仓无效)
 #     CLOUDFLARE_API_TOKEN   具备 R2 Edit 权限的 Token
 #     CLOUDFLARE_ACCOUNT_ID  Cloudflare 账户 ID
+#     WINGET_TOKEN           classic PAT(public_repo),其所有者名下要有 microsoft/winget-pkgs 的 fork
 #
 # ⚠️ 依赖 release.yml 的 draft: true。GitHub 不会为 GITHUB_TOKEN 发起的动作触发新 workflow
 # (防递归),若把 release.yml 改成直接发布正式版,release:published 事件不会产生,本工作流
@@ -379,3 +381,44 @@ jobs:
           else
             echo "Linux: 无需清理(本次同步=${LINUX_SYNCED:-false}, 前一版本=${PREV_LINUX:-<none>})"
           fi
+
+  # Scoop 不在这里:windinput-np 在官方 Nonportable 桶,由桶的机器人按清单里的
+  # checkver/autoupdate 自动跟进新版,本仓无需推送(清单源见 scripts/pkg-managers/scoop/)。
+  winget:
+    name: 提交 winget 清单
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+      HAS_TOKEN: ${{ secrets.WINGET_TOKEN != '' && 'true' || 'false' }}
+      PRERELEASE: ${{ github.event.release.prerelease || false }}
+    steps:
+      # komac update 以 winget-pkgs 里的上一版为模板,只换 URL / 哈希 / 版本 —— 所以包必须
+      # 已经在库里;首次入库走 scripts/pkg-managers/winget-manifest.sh 手工提交。
+      - name: 检查前置条件
+        id: gate
+        run: |
+          VERSION="${TAG#v}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          if [ "$HAS_TOKEN" != "true" ]; then
+            echo "::warning::未配置 secrets.WINGET_TOKEN,跳过 winget 提交。"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          # 预发布不进 winget:winget 没有渠道概念,提交了就会被所有 `winget upgrade` 拉到。
+          # 带 '-' 的版本号(0.124.1-beta.2 之类)同理,即便 Release 忘了勾 pre-release。
+          elif [ "$PRERELEASE" = "true" ] || [[ "$VERSION" == *-* ]]; then
+            echo "::notice::$TAG 是预发布版本,不提交 winget。"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # 下载地址用 GitHub Release 而不是 R2:R2 只留最新一版(见上面的清理步骤),
+      # winget-pkgs 的历史版本清单会定期回测 URL,指向 R2 的老清单会一个个变成 404 被下架。
+      - name: 提交到 winget-pkgs
+        if: steps.gate.outputs.skip != 'true'
+        uses: vedantmgoyal9/winget-releaser@v2
+        with:
+          identifier: huanfeng.WindInput
+          version: ${{ steps.gate.outputs.version }}
+          release-tag: ${{ env.TAG }}
+          installers-regex: '^WindInput-Setup-[0-9.]+\.exe$'
+          token: ${{ secrets.WINGET_TOKEN }}
