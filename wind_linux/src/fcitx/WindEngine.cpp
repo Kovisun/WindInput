@@ -336,6 +336,16 @@ bool WindEngine::reconnect()
             stallPending_ = false;
             resyncAfterStall();
         }
+        // 激活那一刻没连上，服务从没听说过当前这个文本框：宿主名、密码框、能不能内嵌编码
+        // （host.display 的 inline_preedit）全缺，服务端按默认值处理——WPS 这类没有 Preedit
+        // 能力位的应用首次打字就既不内嵌、候选窗也不画编码。赶在这次按键之前补上。
+        // 服务**重启**那条路由 CMD_SERVICE_READY 补报；首次拉起没有这一手，靠的就是这里。
+        if (focusUnreported_) {
+            if (fcitx::InputContext* ic = focusedIC()) {
+                reportFocus(ic);
+            }
+            focusUnreported_ = false;
+        }
         return true;
     }
     switch (bridge_.lastFailure()) {
@@ -610,6 +620,9 @@ void WindEngine::activate(const fcitx::InputMethodEntry&, fcitx::InputContextEve
     caps_.reset();
     eatenKeys_.clear();
     if (!ensureConnected()) {
+        // 服务还没起来（开机后第一次激活就是这样：上面那次 ensureConnected 才去拉起它）：
+        // 焦点信息等连上时补报，见 reconnect。
+        focusUnreported_ = true;
         return;
     }
     // 「切到本输入法」与「焦点进入文本框」在 Fcitx5 里都走 activate，事件类型把两者分开：
@@ -618,6 +631,12 @@ void WindEngine::activate(const fcitx::InputMethodEntry&, fcitx::InputContextEve
     if (isSwitchEvent(event)) {
         sendAsync(encodeClientTokenFrame(CMD_IME_ACTIVATED, clientToken(ic)));
     }
+    reportFocus(ic);
+}
+
+void WindEngine::reportFocus(fcitx::InputContext* ic)
+{
+    focusUnreported_ = false;
     sendFocusGained(ic);
     sendCaretUpdate(ic);
     sendAndDrain(encodeFrontContextFrame(ic->program(), std::string(), std::string()));
@@ -626,6 +645,7 @@ void WindEngine::activate(const fcitx::InputMethodEntry&, fcitx::InputContextEve
 void WindEngine::deactivate(const fcitx::InputMethodEntry&, fcitx::InputContextEvent& event)
 {
     fcitx::InputContext* ic = event.inputContext();
+    focusUnreported_ = false; // 焦点都走了，不再补报（下次 activate 自会再报）
     // 按住的键先抬起，发给当初按下的那个 IC（通常就是正在失焦的这个）。
     releaseHeldKeys("focus_out");
     // 失焦 / 切走输入法：菜单随之收起（服务端也会在 FocusLost 上关，但它有 250ms 的「刚打开」

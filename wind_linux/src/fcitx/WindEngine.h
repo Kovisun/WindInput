@@ -88,6 +88,8 @@ private:
     uint64_t clientToken(fcitx::InputContext* ic) const;
     uint64_t inputScopeMask(fcitx::InputContext* ic) const;
     void sendFocusGained(fcitx::InputContext* ic);
+    /// 获焦上报全套：FocusGained（含 host.display）+ 光标 + 前台应用。
+    void reportFocus(fcitx::InputContext* ic);
     /// `host.display`：光标坐标是否可用 + 界面缩放（见 ExtProtocol.h）。
     void sendHostDisplay(fcitx::InputContext* ic);
     void sendCaretUpdate(fcitx::InputContext* ic);
@@ -140,6 +142,8 @@ private:
     uint16_t keySeq_ = 0;
     bool lastReportedSecure_ = false;
     bool serviceSeenOnce_ = false;
+    /// 激活时连不上服务、焦点信息没报出去；连上时补报（见 reconnect）。
+    bool focusUnreported_ = false;
     /// 发生过超时、还没在重连时对齐过（见 noteStall / resyncAfterStall）。
     bool stallPending_ = false;
     bool untrustedWarned_ = false;
