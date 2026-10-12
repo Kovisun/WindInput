@@ -1,4 +1,4 @@
-# wind_linux：清风输入法的 Fcitx5 addon（C++17）。
+# wind_linux：清风输入法的 Fcitx5 addon（C++17；新版 Fcitx5 头文件下自动升 C++20）。
 #
 #   eval "$(scripts/linux/bootstrap-sdk.sh env)"      # 无 root 机器上先引入用户前缀 SDK
 #   cmake -S wind_linux -B wind_linux/build -G Ninja
@@ -11,7 +11,11 @@
 cmake_minimum_required(VERSION 3.16)
 project(wind_linux VERSION 0.1.0 LANGUAGES C CXX)   # C：wayland-scanner 生成的协议接口表是 C 代码
 
-set(CMAKE_CXX_STANDARD 17)
+# 默认 C++17（Ubuntu 22.04 的 Fcitx5 5.0.x 头文件即可）；命令行 -DCMAKE_CXX_STANDARD=20 可覆盖。
+# 较新的 Fcitx5 头文件要 C++20，addon 目标会在下面探测后自动升级。
+if(NOT DEFINED CMAKE_CXX_STANDARD)
+    set(CMAKE_CXX_STANDARD 17)
+endif()
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
@@ -64,6 +68,22 @@ if(WIND_BUILD_ADDON)
         src/fcitx/X11Panel.cpp
     )
     target_link_libraries(windinput PRIVATE windcore Fcitx5::Core Fcitx5::Utils PkgConfig::XCB)
+
+    # 新版 Fcitx5（Arch 等）的头文件用了 std::ranges / std::span / std::source_location，按当前标准编不过
+    # 就把 addon 升到 C++20（GH#192）。只探 addon 用到的头文件与日志宏，纯逻辑库与单测不受影响。
+    include(CheckCXXSourceCompiles)
+    set(CMAKE_REQUIRED_LIBRARIES Fcitx5::Utils)
+    check_cxx_source_compiles("
+        #include <fcitx-utils/key.h>
+        #include <fcitx-utils/log.h>
+        FCITX_DEFINE_LOG_CATEGORY(probe_log, \"probe\");
+        int main() { FCITX_LOGC(probe_log, Debug) << fcitx::Key(\"a\").toString(); return 0; }
+    " WIND_FCITX_HEADERS_OK_AT_DEFAULT_STD)
+    unset(CMAKE_REQUIRED_LIBRARIES)
+    if(NOT WIND_FCITX_HEADERS_OK_AT_DEFAULT_STD)
+        message(STATUS "Fcitx5 头文件需要 C++20，addon 按 C++20 编译")
+        target_compile_features(windinput PRIVATE cxx_std_20)
+    endif()
 
     # Wayland 候选窗（input-method-v2 popup surface）：要 libwayland-client 与 wayland-scanner。缺任何一样就不编这一路
     # （只剩 X11 候选窗，Wayland 原生应用里不显示）；发布构建里缺了应当是配置错误，由 verify-deb.sh 兜（见该脚本）。
