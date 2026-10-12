@@ -1213,7 +1213,8 @@ mod gradient_tests {
     use crate::theme_assets::gradient_fixture as fx;
 
     /// status 节点的 `background.gradient` 叠在底色上（口径同候选窗节点）。
-    /// 取样点在内容盒上缘内侧（内边距里，文字画不到）。
+    /// 取样点在左内边距、垂直居中：文字居中画不到这里。上内边距只有几像素，macOS 的字形
+    /// 墨迹会伸进去（CI 上取到过 `[253, 32, 32]`），不能用。
     #[test]
     fn status_bubble_paints_bg_gradient() {
         let (tx, _rx) = std::sync::mpsc::channel();
@@ -1221,9 +1222,9 @@ mod gradient_tests {
         let mut theme = wind_theme::Resolved::default();
         theme.views.status = Some(fx::node());
         tip.set_theme(&theme);
-        let (buf, w, _, cw, _, ml, mt, _) = tip.render_bubble_to_bgra("中");
+        let (buf, w, _, _, ch, ml, mt, _) = tip.render_bubble_to_bgra("中");
         assert_eq!(
-            fx::rgb(&buf, w, ml + cw / 2, mt + 3),
+            fx::rgb(&buf, w, ml + 3, mt + ch / 2),
             fx::RED,
             "status 渐变没画"
         );
@@ -1235,9 +1236,9 @@ mod gradient_tests {
             ..fx::node()
         });
         tip.set_theme(&plain);
-        let (buf, w, _, cw, _, ml, mt, _) = tip.render_bubble_to_bgra("中");
+        let (buf, w, _, _, ch, ml, mt, _) = tip.render_bubble_to_bgra("中");
         assert_eq!(
-            fx::rgb(&buf, w, ml + cw / 2, mt + 3),
+            fx::rgb(&buf, w, ml + 3, mt + ch / 2),
             fx::BLUE,
             "旧主题的渐变残留"
         );
