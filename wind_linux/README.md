@@ -51,11 +51,12 @@ sudo apt install ./windinput_*.deb     # 会带上 fcitx5 及 GTK/Qt 前端
 
 ## 已知限制
 
-- **KDE Plasma（Wayland）下，Wayland 原生应用（Konsole、Kate、KRunner、Plasma 启动器等）不显示候选窗**：
-  KWin 只实现 input-method-v1，而清风的 Wayland 候选窗目前只接了 input-method-v2（GH#192）。
-  打字、上屏不受影响；XWayland 应用（微信、Chrome、VS Code 等）的候选窗正常。
-- Plasma 6 Wayland 下请按 Fcitx5 的建议**不要**设 `QT_IM_MODULE`（Qt 应用走 text-input，经 KWin 交给
-  Fcitx5）；设了 `QT_IM_MODULE=fcitx` 时，Wayland 原生 Qt 应用报的是窗口内坐标，候选窗会偏到屏幕左上角。
+- **KDE Plasma（Wayland）**：要在「系统设置 → 键盘 → 虚拟键盘」里选「Fcitx 5」并重新登录——KWin
+  只把输入法协议（input-method-v1）交给它自己拉起的 Fcitx5，否则 Wayland 原生应用里没有候选窗。
+  并按 Fcitx5 的建议**不要**设 `QT_IM_MODULE` / `GTK_IM_MODULE`：设了的 Wayland 原生应用走 D-Bus、
+  报的是窗口内坐标，候选窗会落到屏幕左上角。
+- Fcitx5 默认每个应用各记各的输入法状态，新开的应用从键盘布局起步；想全局一致，在 Fcitx5 配置的
+  「全局选项」里把「共享输入状态」设为「所有」（Deepin 出厂即如此）。
 
 ## 使用
 
@@ -65,6 +66,7 @@ sudo apt install ./windinput_*.deb     # 会带上 fcitx5 及 GTK/Qt 前端
 3. 设置：应用菜单或 Fcitx5 托盘菜单里的「清风输入法设置」、Fcitx5 输入法配置里清风的「配置」，
    或在输入时按 `Ctrl+Shift+]`（开发时设置程序路径可用
    `WIND_INPUT_SETTING` 覆盖，默认 `/usr/lib/windinput/wind_setting`）。
+   主菜单：Fcitx5 托盘菜单里的「清风输入法菜单」（弹在指针处），或组字时右键候选窗。
 4. Shift 单击切中英：Fcitx5 出厂把左 Shift 配成「临时在当前和第一个输入法之间切换」
    （`AltTriggerKeys`），会在引擎之前截走。addon 在更早的阶段把 Shift 单击接过来
    （`WindEngine::claimShiftTap`），用户不必改配置；清空了该项或当前不是清风时不插手。
