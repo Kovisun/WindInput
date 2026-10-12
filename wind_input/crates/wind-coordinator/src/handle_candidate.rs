@@ -1430,7 +1430,7 @@ impl Coordinator {
             // 精确匹配模式（`single_code_input`，仅纯码表方案）：默认抑制短语前缀枚举，只保留上面的
             // 精确码短语（`lookup`）——与码表引擎跳过 `search_prefix` 的行为对齐。混输不适用：其拼音半边
             // 恒前缀匹配，切精确会与拼音割裂（见 `EngineManager::is_codetable`）。
-            // 例外——镜像码表引擎 `single_code_complete`：当前无任何候选（码表 + 精确短语均空）且未满码时，
+            // 例外——镜像码表引擎 `single_code_complete`：当前无任何候选（码表 + 精确短语均空）且不超码长时，
             // 放行一次前缀枚举作**补全候选源**，避免精确模式下彻底无候选。
             let ct = self.engine_mgr.codetable_settings();
             // 引擎模式：纯码表 vs 拼音/混输。全局短语的前缀命中按**来源**（来源=短语库、全局、
@@ -1446,7 +1446,8 @@ impl Coordinator {
             let complete_fallback = exact_only
                 && ct.single_code_complete
                 && candidates.is_empty()
-                && state.input_buffer.chars().count() < self.engine_mgr.active_max_code_length();
+                // `<=`：满码长空码也补（论坛 t302），与引擎侧 `completion_hints` 的闸门同口径。
+                && state.input_buffer.chars().count() <= self.engine_mgr.active_max_code_length();
             let prefix_hits = if !exact_only || complete_fallback {
                 phrases.lookup_prefix(&state.input_buffer, &recent, min_prefix, &phrase_scope)
             } else {
@@ -1541,6 +1542,22 @@ impl Coordinator {
             }
         }
         drop(phrases);
+        // 码表合成候选（逆切分 / 整句）让位给**精确码短语**（论坛 t307）。
+        //
+        // 引擎判「空码」只看得见码表：两者的闸门都是「整串无精确解」，而短语在 convert 之后
+        // 才由上面追加 ⇒ 短语码在码表里空码时照切不误，`ojs`（直通命令）旁边多出「井三/井所有」，
+        // 组合区还会显示切分串。补上引擎够不到的那一半：精确码短语就是这串码的精确解。
+        //
+        // ⚠️ 限定码表来源：拼音整句同样带 `is_sentence`，它与短语本就并列，不归这里管。
+        let codetable_composed = |c: &Candidate| {
+            (c.is_split_composed || c.is_sentence) && c.source == CandidateSource::CodeTable
+        };
+        if candidates.iter().any(codetable_composed)
+            && self.phrase_has_exact_code(state, &state.input_buffer)
+        {
+            candidates.retain(|c| !codetable_composed(c));
+            state.preedit_codetable_body.clear();
+        }
         let mixed =
             self.engine_mgr.current_engine_type() == Some(wind_engine::engine::EngineType::Mixed);
         // 供跨来源档位判「消费整串」与「码 == 输入」。缓冲恒 ASCII，字节长度与 `consumed_length` 同域。
