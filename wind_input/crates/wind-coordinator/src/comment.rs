@@ -338,6 +338,8 @@ pub(crate) fn role_of(name: &str) -> &str {
     match name {
         "code" => "code_rev",
         "code_all" => "code_rev_all",
+        // 同一份注释库数据，只是聚合了全部库：主题按 `dict` 配的色对它同样生效。
+        "dict_all" => "dict",
         other => other,
     }
 }
@@ -846,6 +848,7 @@ pub(crate) const EVAL_VAR_NAMES: &[&str] = &[
     "chaizi_all",
     "chaizi_code_all",
     "dict",
+    "dict_all",
 ];
 
 /// [`Coordinator::eval_text_var`] 自己的分支（其余交给 [`reverse_text_var`]）。
@@ -857,7 +860,11 @@ pub(crate) const EVAL_TEXT_VAR_NAMES: &[&str] = &[
     "pinyin",
     "shuangpin",
     "dict",
+    "dict_all",
 ];
+
+/// `${dict_all}` 不写分隔符时的连接符。
+pub(crate) const DICT_ALL_SEP: &str = "；";
 
 /// [`reverse_text_var`]。
 pub(crate) const REVERSE_TEXT_VAR_NAMES: &[&str] = &[
@@ -1203,6 +1210,12 @@ impl crate::coordinator::Coordinator {
                     None => reverse.comment_of(text, None, &schema),
                 }
             }
+            "dict_all" => {
+                let schema = self.engine_mgr.active_schema_id();
+                reverse
+                    .comments_of(text, None, &schema)
+                    .join(arg.unwrap_or(DICT_ALL_SEP))
+            }
             _ => return reverse_text_var(name, arg, text, reverse),
         })
     }
@@ -1237,6 +1250,8 @@ impl crate::coordinator::Coordinator {
     ///   不限字数、默认空格连接、参数改分隔符规则相同（t207）。无编码的字同样跳过。
     /// - `dict` —— 用户挂载的注释词库（`[[ui.comment_dicts]]`）里该词的注释。键是**词**，
     ///   一份「英汉释义」「emoji 名称」可跨全部方案复用；候选 `code` 作可选消歧。
+    /// - `dict_all[:分隔符]` —— 全部适用注释库**各出一条**，按挂载顺序、去重，默认 `；` 连接
+    ///   （`dict` 只回第一个命中的库）。见 `ReverseLookup::comments_of`。
     ///
     /// `arg` = `${name:arg}` 的冒号后部分（未 trim）。只有声明支持参数的变量会读它，
     /// 其余变量收到参数时**静默忽略**而非报未知——参数写错不该让整个变量退化成错误回显。
@@ -1383,6 +1398,12 @@ impl crate::coordinator::Coordinator {
                 Some(id) => reverse.comment_of_id(id, &c.text, Some(&c.code), dict_schema),
                 None => reverse.comment_of(&c.text, Some(&c.code), dict_schema),
             },
+            // `${dict_all[:分隔符]}` —— 全部适用库各出一条（论坛 t282），默认 `；` 连接、按内容
+            // 去重。`${dict}` 只回第一个命中的库，中英释义与 IT 术语库都收了同一个词时另一条
+            // 就看不见；`${dict:id}` 能并排但要逐库写死 id。不带来源库标签：标签该写在库内容里。
+            "dict_all" => reverse
+                .comments_of(&c.text, Some(&c.code), dict_schema)
+                .join(arg.unwrap_or(DICT_ALL_SEP)),
             _ => return None,
         })
     }
@@ -2282,6 +2303,107 @@ mod eval_var_tests {
     fn eval(co: &Coordinator, name: &str, c: &Candidate, hint: CodeHintSource) -> Option<String> {
         let rev = wind_reverse::ReverseLookup::default();
         co.eval_var(name, None, c, &rev, hint, "shuangpin")
+    }
+
+    // ───────────── `${dict_all}`（论坛 t282） ─────────────
+
+    /// 挂两个注释库：英汉释义 + IT 术语，都收了 `configure`。
+    fn two_comment_libs(tag: &str) -> (PathBuf, wind_reverse::ReverseLookup) {
+        let dir = std::env::temp_dir().join(format!("wind_dict_all_{}_{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let head = "name: t\ncolumns:\n  - text\n  - comment\n...\n";
+        let mut specs = Vec::new();
+        for (i, body) in ["configure\tv.配置\n", "configure\t[IT]配置…\n"]
+            .iter()
+            .enumerate()
+        {
+            let p = dir.join(format!("lib{i}.dict.yaml"));
+            std::fs::write(&p, format!("{head}{body}")).unwrap();
+            specs.push((p, Vec::new()));
+        }
+        let mut rl = wind_reverse::ReverseLookup::default();
+        rl.reload_comments(&specs, None);
+        (dir, rl)
+    }
+
+    fn word(text: &str) -> Candidate {
+        Candidate {
+            text: text.into(),
+            code: text.into(),
+            comment: "kh".into(),
+            source: CandidateSource::English,
+            ..Default::default()
+        }
+    }
+
+    fn comment(
+        co: &Coordinator,
+        rl: &wind_reverse::ReverseLookup,
+        tpl: &str,
+        c: &Candidate,
+    ) -> String {
+        comment_max(co, rl, tpl, c, 0)
+    }
+
+    fn comment_max(
+        co: &Coordinator,
+        rl: &wind_reverse::ReverseLookup,
+        tpl: &str,
+        c: &Candidate,
+        max: usize,
+    ) -> String {
+        co.comment_for(c, &Template::parse(tpl), max, rl, CodeHintSource::Off, "")
+            .as_str()
+            .to_string()
+    }
+
+    /// 默认分隔符 `；`，`${dict_all:/}` 自定义；`${dict}` 仍只回第一条。
+    #[test]
+    fn dict_all_joins_every_library_with_separator() {
+        let co = coord("pinyin");
+        let (dir, rl) = two_comment_libs("sep");
+        let c = word("configure");
+        assert_eq!(comment(&co, &rl, "${dict_all}", &c), "v.配置；[IT]配置…");
+        assert_eq!(comment(&co, &rl, "${dict_all:/}", &c), "v.配置/[IT]配置…");
+        assert_eq!(comment(&co, &rl, "${dict}", &c), "v.配置");
+        // 裸文本入口（cmdbar `dict.rev`）同义。
+        assert_eq!(
+            co.eval_text_var("dict_all", Some(" | "), "configure", &rl)
+                .as_deref(),
+            Some("v.配置 | [IT]配置…")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 查不到时是「已知变量、值为空」：所在可选段整段消失，而不是原样回显 `${dict_all}`。
+    #[test]
+    fn empty_dict_all_drops_its_optional_group() {
+        let co = coord("pinyin");
+        let (dir, rl) = two_comment_libs("empty");
+        let tpl = "${code_hint}{ [${dict_all}]}";
+        assert_eq!(comment(&co, &rl, tpl, &word("nosuch")), "kh");
+        assert_eq!(
+            comment(&co, &rl, tpl, &word("configure")),
+            "kh [v.配置；[IT]配置…]"
+        );
+        assert_eq!(
+            co.eval_text_var("dict_all", None, "nosuch", &rl).as_deref(),
+            Some("")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 注释段的字数上限照样截断聚合结果。
+    #[test]
+    fn dict_all_obeys_comment_max_chars() {
+        let co = coord("pinyin");
+        let (dir, rl) = two_comment_libs("max");
+        assert_eq!(
+            comment_max(&co, &rl, "${dict_all}", &word("configure"), 6),
+            "v.配置；[…"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// ★ 核心：双拼方案下 `${shuangpin}` 给出用户实际要敲的键。

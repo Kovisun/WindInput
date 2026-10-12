@@ -7001,12 +7001,16 @@ const TIP_DEBUG: &str = "调试";
 /// 「完整原文」置首：只在候选显示被截断时有值，平时整段不出现；出现时正是用户最想看的。
 /// 其后复现旧出厂外观：`[编码]`（非直接输入时带来源方案名）、`[拼音]` 逐字全读音，
 /// 拆字、调试关着。Unicode 段是新增能力，出厂关。
+///
+/// 「释义」段（论坛 t282）出厂开：全部适用注释库各出一条、每条一行（分隔符是真换行）。
+/// 没挂注释库或查不到时整段为空、不显示，故对没用注释库的用户零外观变化。
 pub fn default_tooltip_sections() -> Vec<TooltipSection> {
     vec![
         TooltipSection::new("完整原文", "", "${full_text}"),
         TooltipSection::new(TIP_CODE, "", "${word_code}"),
         TooltipSection::new(TIP_PINYIN, "han", "${char}：${readings}"),
         TooltipSection::new(TIP_CHAIZI, "han", "${char}：${chaizi}{ [${chaizi_code}]}").disabled(),
+        TooltipSection::new("释义", "", "${dict_all:\n}"),
         TooltipSection::new("Unicode", "char", "${char}：${unicode}").disabled(),
         TooltipSection::new(TIP_DEBUG, "", "${debug}").disabled(),
     ]
@@ -11886,8 +11890,8 @@ active = "x"
             .collect();
         assert_eq!(
             on,
-            ["完整原文", "编码{(${code_source})}", "拼音"],
-            "出厂开完整原文、编码、拼音"
+            ["完整原文", "编码{(${code_source})}", "拼音", "释义"],
+            "出厂开完整原文、编码、拼音、释义"
         );
         assert_eq!(t.max_chars, 200, "单行显示上限默认 200 字");
         assert_eq!(t.wrap_width, 40, "折行宽度默认 40 列");
@@ -11966,7 +11970,7 @@ active = "x"
         let (secs, user) = tooltip_after_migration("[ui.tooltip]\nchaizi_enabled = true\n");
         assert_eq!(
             enabled_labels(&secs),
-            ["完整原文", "编码{(${code_source})}", "拆字 / 拼音"]
+            ["完整原文", "编码{(${code_source})}", "拆字 / 拼音", "释义"]
         );
         let merged = secs.iter().find(|s| s.label == "拆字 / 拼音").unwrap();
         assert_eq!(merged.each, "han");
@@ -11992,7 +11996,7 @@ active = "x"
         );
         assert_eq!(
             enabled_labels(&secs),
-            ["完整原文", "编码{(${code_source})}", "拆字"]
+            ["完整原文", "编码{(${code_source})}", "拆字", "释义"]
         );
     }
 
@@ -12024,7 +12028,7 @@ active = "x"
     fn migrate_tooltip_code_and_debug_switches() {
         let (secs, _) =
             tooltip_after_migration("[ui.tooltip]\ncode_enabled = false\ndebug_enabled = true\n");
-        assert_eq!(enabled_labels(&secs), ["完整原文", "拼音", "调试"]);
+        assert_eq!(enabled_labels(&secs), ["完整原文", "拼音", "释义", "调试"]);
     }
 
     /// 用户已写 `sections` 时以它为准，旧键只清不迁。

@@ -1372,6 +1372,8 @@ comment_enabled = true
 #   dict               挂载的注释词库里该词的注释（见下方 [[ui.comment_dicts]]）
 #   dict:<id>          只查 id 为 <id> 的那个注释库（${dict} 只取第一个命中的库；多库并排如
 #                      "${dict:en}{ ${dict:chaifen}}"）
+#   dict_all[:分隔符]  全部适用注释库各取一条，按库顺序、相同内容只留一条，默认「；」连接；
+#                      如 ${dict_all:/}（可能很长，慎用于横排）
 #
 # 出厂值 ${code_hint|code_rev|shuangpin} 的回退链含义：优先显示引擎产的编码提示，
 # 没有就显示主码表反查编码，再没有（例如没配主码表的用户）就显示双拼编码。
@@ -1515,7 +1517,7 @@ wrap_width = 40
 # ${word_code} 该词在编码来源方案里的全部编码（a/ab/abc）；${code_source} 编码来源
 # 方案名（直接用该方案输入时为空）；${readings} / ${readings:N} 当前字的全部读音 / 前 N 个；
 # ${unicode} 当前字码位；${unicode_all} / ${unicode_all:分隔符} 逐字码位；${debug} 调试信息。
-# 注释模板的变量（${pinyin}、${chaizi}、${chaizi_code}、${dict}……）同样可用。
+# 注释模板的变量（${pinyin}、${chaizi}、${chaizi_code}、${dict}、${dict_all}……）同样可用。
 [[ui.tooltip.sections]]
 enabled = true
 label = "完整原文"
@@ -1545,6 +1547,14 @@ enabled = false
 label = "拆字"
 template = "${char}：${chaizi}{ [${chaizi_code}]}"
 each = "han"
+promote = ""
+inline = false
+
+[[ui.tooltip.sections]]
+enabled = true
+label = "释义"
+template = "${dict_all:\n}"   # 全部注释库各一条、每条一行；没挂注释库或查不到时整段不出现
+each = ""
 promote = ""
 inline = false
 

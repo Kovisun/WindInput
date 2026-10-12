@@ -902,15 +902,60 @@ impl ReverseLookup {
         }
     }
 
-    fn comment_in(&self, id: Option<&str>, text: &str, code: Option<&str>, schema: &str) -> String {
-        // ★ 白名单过滤对三遍扫描**统一施加**：漏掉任何一遍，那条路径就会从被排除的库里
-        // 取出注释，表现为「限定了方案，可有些词还是显示别的方案的注释」——只在大小写
-        // 回退这类少数路径上出现，最难查。
-        let applicable = || {
-            self.comments.iter().filter(|s| {
-                s.applies_to(schema) && id.is_none_or(|id| s.ids.iter().any(|i| i == id))
-            })
+    /// 查词在**全部适用库**里的注释（`${dict_all}`）：每库最多一条（先同码、无则该库首条），
+    /// 按挂载顺序，按字符串去重，空串跳过。所有库都没有精确命中时，再按大小写变形各库
+    /// 取一条（同 [`Self::comment_of`] 的回退那遍，且同受白名单约束）。
+    ///
+    /// 不变量：[`Self::comment_of`] 的结果总在本函数的结果里——它取的是某个库的那一条，
+    /// 而那个库在这里出的正是同一条（逐库「先同码后首条」与跨库两遍扫描对单个库等价）。
+    pub fn comments_of(&self, text: &str, code: Option<&str>, schema: &str) -> Vec<String> {
+        let code = code.filter(|c| !c.is_empty());
+        let mut out: Vec<String> = Vec::new();
+        let mut push = |s: &str| {
+            if !s.is_empty() && !out.iter().any(|o| o == s) {
+                out.push(s.to_string());
+            }
         };
+        let mut exact = false;
+        for src in self.applicable_comments(None, schema) {
+            let one = code
+                .and_then(|c| src.lookup_by_code(text, c))
+                .or_else(|| src.lookup_first(text));
+            if let Some(s) = one {
+                exact = true;
+                push(s);
+            }
+        }
+        if !exact {
+            let variants = case_fallbacks(text);
+            if !variants.is_empty() {
+                for src in self.applicable_comments(None, schema) {
+                    if let Some(s) = variants.iter().find_map(|v| src.lookup_first(v)) {
+                        push(s);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// 适用于 `schema` 语境的注释库（`id` 给定时只限该库），按挂载顺序。
+    ///
+    /// ★ 白名单判据只此一份：`comment_in` 的三遍扫描与 `comments_of` 的两遍都经它。
+    /// 漏掉任何一遍，那条路径就会从被排除的库里取出注释，表现为「限定了方案，可有些词
+    /// 还是显示别的方案的注释」——只在大小写回退这类少数路径上出现，最难查。
+    fn applicable_comments<'a>(
+        &'a self,
+        id: Option<&'a str>,
+        schema: &'a str,
+    ) -> impl Iterator<Item = &'a CommentSource> + 'a {
+        self.comments.iter().filter(move |s| {
+            s.applies_to(schema) && id.is_none_or(|id| s.ids.iter().any(|i| i == id))
+        })
+    }
+
+    fn comment_in(&self, id: Option<&str>, text: &str, code: Option<&str>, schema: &str) -> String {
+        let applicable = || self.applicable_comments(id, schema);
         if let Some(c) = code.filter(|c| !c.is_empty())
             && let Some(hit) = applicable().find_map(|s| s.lookup_by_code(text, c))
         {
@@ -1675,6 +1720,177 @@ mod tests {
             "",
             "白名单照样生效"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ───────────── `${dict_all}`：全部适用库各出一条（论坛 t282） ─────────────
+
+    /// 两库都有该词 → 按挂载顺序各出一条；`${dict}` 只回第一条。
+    #[test]
+    fn comments_of_collects_one_per_library_in_mount_order() {
+        let (dir, both) = rl_both(
+            "all-order",
+            &[
+                &[("configure", "v.配置", "")],
+                &[("configure", "[IT]配置…", "")],
+            ],
+        );
+        for (name, rl) in &both {
+            assert_eq!(
+                rl.comments_of("configure", None, ""),
+                ["v.配置", "[IT]配置…"],
+                "{name}"
+            );
+            assert_eq!(rl.comment_of("configure", None, ""), "v.配置", "{name}");
+            assert!(rl.comments_of("nosuch", None, "").is_empty(), "{name}");
+        }
+        drop(both);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 同一份内容挂两次（不同路径）只出一条：按字符串去重。
+    #[test]
+    fn comments_of_dedups_identical_text_across_libraries() {
+        let (dir, both) = rl_both(
+            "all-dedup",
+            &[
+                &[("好", "good", "")],
+                &[("好", "good", "")],
+                &[("好", "女子", "")],
+            ],
+        );
+        for (name, rl) in &both {
+            assert_eq!(rl.comments_of("好", None, ""), ["good", "女子"], "{name}");
+        }
+        drop(both);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 同库同词多码：注释相同只出一条；注释不同按 code 只出对应那条，无 code 出首条。
+    #[test]
+    fn comments_of_gives_at_most_one_per_library() {
+        let (dir, both) = rl_both(
+            "all-percode",
+            &[
+                &[("了", "助词", "le"), ("了", "助词", "liao")],
+                &[("行", "走", "xing"), ("行", "银行", "hang")],
+            ],
+        );
+        for (name, rl) in &both {
+            assert_eq!(rl.comments_of("了", Some("liao"), ""), ["助词"], "{name}");
+            assert_eq!(rl.comments_of("行", Some("hang"), ""), ["银行"], "{name}");
+            assert_eq!(rl.comments_of("行", Some("xing"), ""), ["走"], "{name}");
+            assert_eq!(rl.comments_of("行", None, ""), ["走"], "{name}");
+            assert_eq!(
+                rl.comments_of("行", Some("zzz"), ""),
+                ["走"],
+                "{name}：code 对不上回落该库首条"
+            );
+        }
+        drop(both);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 白名单排除的库不出现——精确那遍与大小写回退那遍都一样。
+    #[test]
+    fn comments_of_respects_schema_whitelist_in_both_passes() {
+        let (dir, mut paths) = write_libs(
+            "all-wl",
+            &[&[("apple", "n.苹果", "")], &[("apple", "[水果]苹果", "")]],
+        );
+        paths[0].1 = vec!["english".into()];
+        let mut rl = ReverseLookup::default();
+        rl.reload_comments(&paths, Some(&dir.join("cache")));
+
+        assert_eq!(
+            rl.comments_of("apple", None, "english"),
+            ["n.苹果", "[水果]苹果"]
+        );
+        assert_eq!(rl.comments_of("apple", None, "wubi86"), ["[水果]苹果"]);
+        assert_eq!(
+            rl.comments_of("APPLE", None, "wubi86"),
+            ["[水果]苹果"],
+            "大小写回退那一遍同样受白名单约束"
+        );
+        assert_eq!(
+            rl.comments_of("APPLE", None, "english"),
+            ["n.苹果", "[水果]苹果"]
+        );
+        drop(rl);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 大小写回退：全无精确命中时 `Configure` 能聚合两库；任一库有精确命中则不走回退。
+    #[test]
+    fn comments_of_case_fallback_only_without_exact_hits() {
+        let (dir, both) = rl_both(
+            "all-case",
+            &[
+                &[("configure", "v.配置", "")],
+                &[("configure", "[IT]配置…", "")],
+            ],
+        );
+        for (name, rl) in &both {
+            assert_eq!(
+                rl.comments_of("Configure", None, ""),
+                ["v.配置", "[IT]配置…"],
+                "{name}"
+            );
+        }
+        drop(both);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let (dir, both) = rl_both(
+            "all-case-exact",
+            &[
+                &[("configure", "v.配置", "")],
+                &[("Configure", "人名?", "")],
+            ],
+        );
+        for (name, rl) in &both {
+            assert_eq!(
+                rl.comments_of("Configure", None, ""),
+                ["人名?"],
+                "{name}：有精确命中就不再按大小写变形去别的库捞"
+            );
+        }
+        drop(both);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 不变量：`comment_of` 的结果 ∈ `comments_of` 的结果（都空时同为空）。
+    #[test]
+    fn comment_of_is_always_among_comments_of() {
+        let (dir, both) = rl_both(
+            "all-inv",
+            &[
+                &[("行", "通用释义", ""), ("Us", "缩写", "")],
+                &[("行", "五笔专用", "tfhh"), ("us", "我们", "")],
+                &[("US", "美国", ""), ("行", "通用释义", "")],
+            ],
+        );
+        let queries: &[(&str, Option<&str>)] = &[
+            ("行", None),
+            ("行", Some("tfhh")),
+            ("行", Some("hang")),
+            ("us", None),
+            ("US", None),
+            ("uS", None),
+            ("Us", None),
+            ("无", None),
+        ];
+        for (name, rl) in &both {
+            for &(t, code) in queries {
+                let one = rl.comment_of(t, code, "");
+                let all = rl.comments_of(t, code, "");
+                if one.is_empty() {
+                    assert!(all.is_empty(), "{name} {t} {code:?}: {all:?}");
+                } else {
+                    assert!(all.contains(&one), "{name} {t} {code:?}: {one} ∉ {all:?}");
+                }
+            }
+        }
+        drop(both);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
