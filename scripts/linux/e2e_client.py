@@ -1585,11 +1585,37 @@ async def settings_cases(bus, im):
     await asyncio.sleep(0.3)
     regs = [p for ps in watch.registered for p in ps]
     listed = any(p.startswith("/Fcitx/windinput-settings:清风输入法设置:") for p in regs)
-    check("设置：状态区列出「清风输入法设置」、不再有「清风输入法菜单」",
-          listed and not any("windinput-menu" in p for p in regs), f"属性={regs[-6:]}")
+    listed_menu = any(p.startswith("/Fcitx/windinput-menu:清风输入法菜单:") for p in regs)
+    check("设置：状态区同时列出「清风输入法设置」与「清风输入法菜单」",
+          listed and listed_menu, f"属性={regs[-6:]}")
     before = len(read_lines(argv_log))
     panel.trigger("/Fcitx/windinput-settings")
     await launched_again("状态区点「清风输入法设置」", before)
+
+    # 状态区「清风输入法菜单」：主菜单弹在指针处（刚点托盘的地方），不在文本光标处。
+    # 内容左上 = 指针，位图带阴影扩边，故按窗口左上留 30px 余量。
+    await c.ic.call_set_cursor_rect(900, 600, 2, 20)  # 光标放远处：菜单若跟光标走就会被看出来
+    sh("xdotool", "mousemove", "300", "120")
+    panel.trigger("/Fcitx/windinput-menu")
+    main = await wait_window("wind-menu-0", True)
+    ok = main is not None and main[5]
+    check("菜单：状态区「清风输入法菜单」弹出主菜单", ok, f"menu={main}")
+    if ok:
+        _, mx, my, _, _, _ = main
+        check("菜单：状态区入口的主菜单在指针处（不跟文本光标）",
+              0 <= 300 - mx <= 30 and 0 <= 120 - my <= 30, f"@({mx},{my})")
+    await c.key("Escape")
+    await wait_menus_gone()
+    # 指针在屏幕右下角（托盘的典型位置）：菜单翻到指针左上方、整个留在屏内（1280x800）
+    sh("xdotool", "mousemove", "1270", "790")
+    panel.trigger("/Fcitx/windinput-menu")
+    main = await wait_window("wind-menu-0", True)
+    ok = (main is not None and main[5] and main[1] >= 0 and main[2] >= 0
+          and main[1] + main[3] <= 1280 + 30 and main[2] + main[4] <= 800 + 30)
+    check("菜单：指针在屏幕右下角时主菜单不出屏", ok, f"menu={main}")
+    await c.key("Escape")
+    await wait_menus_gone()
+    sh("xdotool", "mousemove", "5", "5")
 
     # 系统输入法配置里点清风的「配置」：配置工具经 Controller1.GetConfig 取描述。整页只有一个
     # External 项时 fcitx5-configtool（5.1.6+）直接启动它，而不是弹一张空白配置页。

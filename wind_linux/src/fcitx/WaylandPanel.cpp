@@ -1768,6 +1768,15 @@ void WaylandCandidatePanel::disarm(std::unique_ptr<fcitx::EventSourceTime>& t)
     }
 }
 
+bool WaylandCandidatePanel::openMenuAtPointer(int32_t target)
+{
+    if (!layerShell_ || !subcomp_ || !ready()) {
+        return false;
+    }
+    openScreenMenu(target, 0, 0, true);
+    return true;
+}
+
 void WaylandCandidatePanel::openContextMenu(int32_t target)
 {
     if (layerShell_ && subcomp_) {

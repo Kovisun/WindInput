@@ -129,6 +129,9 @@ public:
     bool menuOpen() const;
     /// 菜单此刻开在屏幕坐标系（layer-shell）上：菜单帧不论焦点在哪种应用都归这里。
     bool screenMenuActive() const { return screenMenu_; }
+    /// 在指针处开屏幕菜单（状态区「清风输入法菜单」用）：落点等指针进入底板时取。没有
+    /// layer-shell / 连接没就绪时返回 false，调用方退回 X11。
+    bool openMenuAtPointer(int32_t target);
     /// 本端收起菜单（不报服务端）。
     void closeMenu();
     Rect virtualWorkArea() const;

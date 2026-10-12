@@ -236,6 +236,11 @@ WindEngine::WindEngine(fcitx::Instance* instance) : instance_(instance)
     settingsAction_.connect<fcitx::SimpleAction::Activated>(
         [this](fcitx::InputContext*) { launchSettings({}); });
     instance_->userInterfaceManager().registerAction("windinput-settings", &settingsAction_);
+    menuAction_.setShortText("清风输入法菜单");
+    menuAction_.setIcon("application-menu");
+    menuAction_.connect<fcitx::SimpleAction::Activated>(
+        [this](fcitx::InputContext*) { openMainMenuAtPointer(); });
+    instance_->userInterfaceManager().registerAction("windinput-menu", &menuAction_);
 
     // Fcitx5 出厂 AltTriggerKeys=Shift_L：它在 InputMethod 阶段先于引擎处理按键，按下即把 Shift
     // 过滤掉、松开时切到组里第一个输入法——「Shift 切中英」永远到不了本引擎。用户不该为此去改
@@ -614,6 +619,7 @@ void WindEngine::activate(const fcitx::InputMethodEntry&, fcitx::InputContextEve
     currentIC_ = ic->watch();
     // 状态区入口：InputMethod 组在切换输入法时由 Fcitx5 自己清空，每次激活挂一次。
     ic->statusArea().addAction(fcitx::StatusGroup::InputMethod, &settingsAction_);
+    ic->statusArea().addAction(fcitx::StatusGroup::InputMethod, &menuAction_);
     // 光标前字符的记账只对「这一个文本框里我们自己打出去的东西」有效，换焦点即作废。
     router_.reset();
     tap_.reset();
@@ -1263,6 +1269,27 @@ void WindEngine::requestMenu(int32_t target, int32_t x, int32_t y)
 #endif
     WIND_DEBUG() << "请求打开菜单 target=" << target << " @(" << x << "," << y << ")";
     sendAndDrain(encodeMenuOpenFrame(target, x, y, wa.x, wa.y, wa.x + wa.w, wa.y + wa.h));
+}
+
+void WindEngine::openMainMenuAtPointer()
+{
+    if (!ensureConnected()) {
+        WIND_WARN() << "清风输入法菜单：服务不在，打不开";
+        return;
+    }
+#ifdef WIND_HAVE_WAYLAND
+    // Wayland 会话：点的是托盘菜单，它在屏幕上的位置不可知；不论焦点在哪种应用都走屏幕菜单
+    if (wlPanel_ && wlPanel_->openMenuAtPointer(MENU_TARGET_MAIN)) {
+        return;
+    }
+#endif
+    // X11：托盘菜单这时可能还抓着指针，抓取由 X11 菜单自己重试（见 X11CandidatePanel::grabPointer）
+    const auto p = panel_->pointerPosition();
+    if (!p) {
+        WIND_WARN() << "清风输入法菜单：取不到指针位置，打不开";
+        return;
+    }
+    requestMenu(MENU_TARGET_MAIN, p->first, p->second);
 }
 
 } // namespace windlinux
