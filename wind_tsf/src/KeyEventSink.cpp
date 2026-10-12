@@ -881,8 +881,12 @@ STDAPI CKeyEventSink::OnTestKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM 
             // 设计软件（CAD/EDA 等）通过 WM_KEYDOWN 触发快捷功能；CommitText 仅产生
             // WM_CHAR，不会激活依赖原始键值的功能。同时避免输出中文标点。
             // 有 input session 时仍须拦截：让 coordinator 先提交候选再处理标点。
+            //
+            // 例外：英文半角会吃的键（配对键 / 英半自定义键）照英文模式吃下转发，否则
+            // 「中文 + 大写」下配对与跳出静默失效，而「英文 + 大写」正常（GH#197）。
             if (!hasInputSession && !_pTextService->IsFullWidth() &&
-                (GetKeyState(VK_CAPITAL) & 0x0001))
+                (GetKeyState(VK_CAPITAL) & 0x0001) &&
+                !_IsEnglishHalfEatenPunctKey(wParam, modifiers))
             {
                 _LogKeyDecision(L"test_down", _pTextService->GetFocusSessionId(), wParam, modifiers, keyType,
                                 isChineseMode, hasComposition, _hasCandidates, hasInputSession, FALSE,
@@ -1344,7 +1348,8 @@ STDAPI CKeyEventSink::OnKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM lPar
         isChineseMode && !hasInputSession && !_pTextService->IsFullWidth() &&
         !(modifiers & (KEYMOD_CTRL | KEYMOD_ALT)) &&
         (CHotkeyManager::ClassifyInputKey(wParam, modifiers) == HotkeyType::Punctuation) &&
-        (GetKeyState(VK_CAPITAL) & 0x0001);
+        (GetKeyState(VK_CAPITAL) & 0x0001) &&
+        !_IsEnglishHalfEatenPunctKey(wParam, modifiers); // 与 OnTestKeyDown 同一例外（GH#197）
 
     // 与 OnTestKeyDown 的 `chinese_punct_passthrough` 对称：中文输入模式 + 无 session +
     // 非全角 + 该标点在**当下标点态**下产物就是原样半角 ASCII ⇒ 同步透传（不吃、不发 core）。
@@ -1554,9 +1559,10 @@ STDAPI CKeyEventSink::OnKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM lPar
             // 若吐成 pfEaten=FALSE 就是「吃了再吐」——记事本/Chromium 会补发 WM_KEYDOWN，
             // EverEdit 这类不补发的宿主直接丢字符。故降级为本地插入**单个字符**：
             // 不配对、不记栈（也就不会留下需要清理的状态），断连期间「无配对但不丢字」。
+            // 「中文 + CapsLock」同样按英文语义吃了配对键（GH#197），兜底一并覆盖。
             bool hasShift = (modifiers & KEYMOD_SHIFT) != 0;
             wchar_t pairChar = _MapVkToEnglishPairChar(wParam, hasShift);
-            if (!isChineseMode && !_pTextService->IsFullWidth()
+            if ((!isChineseMode || (GetKeyState(VK_CAPITAL) & 0x0001)) && !_pTextService->IsFullWidth()
                 && !(modifiers & (KEYMOD_CTRL | KEYMOD_ALT))
                 && pairChar != 0 && _englishPairEngine.ShouldEat(pairChar))
             {
@@ -1965,6 +1971,9 @@ STDAPI CKeyEventSink::OnKeyTraceDown(WPARAM wParam, LPARAM lParam)
     // If a key is intercepted by OnTestKeyDown in English mode (for full-width or auto-pair),
     // it will be sent to Go and recorded there. We should not count it here.
     // CapsLock 透传键直接到系统、不经 Go recordCommit，跳过下方去重检查。
+    // 但其中英文半角会吃的键（配对 / 英半自定义）已被吃下转发 core，由 core 记账（GH#197）。
+    if (capsLockPassthrough && _IsEnglishHalfEatenPunctKey(wParam, modifiers))
+        return S_OK;
     if (!capsLockPassthrough)
     {
         // 1. English auto-pair check（与 OnTestKeyDown/OnKeyDown 一致：Ctrl/Alt 不走配对）
@@ -2875,6 +2884,19 @@ BOOL CKeyEventSink::_IsCustomEnglishPunctKey(WPARAM vk, uint32_t modifiers) cons
         return FALSE;
     wchar_t ch = CHotkeyManager::VirtualKeyToPunctuation(vk, (modifiers & KEYMOD_SHIFT) != 0);
     return ch != 0 && _customEnPunctChars.count(ch) > 0;
+}
+
+// 英文半角下会被吃下转发 core 的标点键：英半自定义键，或英文配对键（含右符号）。
+// 判据与 OnTestKeyDown 的 english_autopair / english_custom_punct 两条同源，
+// 也与 core 的 `handle_english_custom_punct` 接手判据逐条对应。
+BOOL CKeyEventSink::_IsEnglishHalfEatenPunctKey(WPARAM vk, uint32_t modifiers) const
+{
+    if (_IsCustomEnglishPunctKey(vk, modifiers))
+        return TRUE;
+    if (modifiers & (KEYMOD_CTRL | KEYMOD_ALT))
+        return FALSE;
+    wchar_t pairChar = _MapVkToEnglishPairChar(vk, (modifiers & KEYMOD_SHIFT) != 0);
+    return pairChar != 0 && _englishPairEngine.ShouldEat(pairChar);
 }
 
 // 该键在中文模式下是否该**透传**（不吃）——core 推送的字符集合说了算。

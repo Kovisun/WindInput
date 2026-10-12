@@ -16432,6 +16432,50 @@ mod capslock_tests {
         );
     }
 
+    /// GH#197：中文 + CapsLock + 英文配对开 → 配对键与「英文 + 大写」同样出一对、可跳出。
+    /// DLL 对配对键开了透传例外（`_IsEnglishHalfEatenPunctKey`）吃下转发，此处若仍
+    /// PassThrough 就是「吃了再吐」，配对静默失效。
+    #[test]
+    fn capslock_on_english_pair_key_inserts_pair() {
+        let mut cfg = Config::default();
+        cfg.input.default.chinese_mode = true;
+        cfg.input.symbol.smart_mode = false;
+        cfg.input.auto_pair.english = true;
+        let c = Coordinator::new_headless(cfg, None);
+        set_caps_lock(&c, true);
+        let mut ev = kev_caps(0x39 /* '9' */, EVENT_KEY_DOWN);
+        ev.modifiers = MOD_SHIFT;
+        match c.handle_key_event(&ev) {
+            KeyAction::InsertTextWithCursor {
+                text,
+                cursor_offset,
+            } => {
+                assert_eq!(text, "()");
+                assert_eq!(cursor_offset, 1);
+            }
+            other => panic!("中文+CapsLock+Shift+9 应插入英文配对，实际: {:?}", other),
+        }
+        // 非配对标点仍按原样透传（保留原始 WM_KEYDOWN）。
+        assert!(matches!(
+            c.handle_key_event(&kev_caps(0xBC, EVENT_KEY_DOWN)),
+            KeyAction::PassThrough
+        ));
+    }
+
+    /// 对照：英文配对关时配对键仍透传（DLL 判据 `ShouldEat` 同样为假，不吃）。
+    #[test]
+    fn capslock_on_pair_key_passthrough_when_english_pair_off() {
+        let mut cfg = Config::default();
+        cfg.input.default.chinese_mode = true;
+        cfg.input.symbol.smart_mode = false;
+        cfg.input.auto_pair.english = false;
+        let c = Coordinator::new_headless(cfg, None);
+        set_caps_lock(&c, true);
+        let mut ev = kev_caps(0x39, EVENT_KEY_DOWN);
+        ev.modifiers = MOD_SHIFT;
+        assert!(matches!(c.handle_key_event(&ev), KeyAction::PassThrough));
+    }
+
     #[test]
     fn capslock_off_punct_commits_chinese_punct() {
         let c = coord_cn();

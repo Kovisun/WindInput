@@ -319,6 +319,9 @@ private:
     // （吃下的键要交给 core 出字，本地配对若抢先 CommitText 就把转发吞了）。
     // 判据必须与 core 的 `wind_punct::custom_english_punct_chars` 同源，漂移即「吃了再吐」丢键。
     BOOL _IsCustomEnglishPunctKey(WPARAM vk, uint32_t modifiers) const;
+    // 英文半角会吃下转发 core 的标点键（英半自定义 ∪ 英文配对键）。「中文 + CapsLock」的
+    // 标点透传按它开例外，与「英文 + CapsLock」对齐（GH#197）。
+    BOOL _IsEnglishHalfEatenPunctKey(WPARAM vk, uint32_t modifiers) const;
     // 「中文模式下该透传不吃」的标点集合（core 经 CONFIG_KEY_CN_PASSTHROUGH_PUNCT 推送）。
     // 空集合（默认）= 与历史行为完全一致。
     std::set<wchar_t> _cnPassthroughPunctChars;

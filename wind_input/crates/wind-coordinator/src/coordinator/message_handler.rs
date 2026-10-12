@@ -1393,6 +1393,14 @@ impl MessageHandler for Coordinator {
                     state.chinese_punct = saved_punct;
                     return Self::commit_action(text, true);
                 }
+            } else if state.input_buffer.is_empty()
+                && state.candidates.is_empty()
+                && let Some(act) = self.handle_english_custom_punct(&mut state, data)
+            {
+                // 半角：与英文半角同一出口。DLL 对英文配对键 / 英半自定义键开了透传例外
+                // （`_IsEnglishHalfEatenPunctKey`）吃下转发，此处必须出字 + 配对，否则
+                // 「中文 + 大写」下配对静默失效，而「英文 + 大写」正常（GH#197）。
+                return act;
             }
             return KeyAction::PassThrough;
         }
