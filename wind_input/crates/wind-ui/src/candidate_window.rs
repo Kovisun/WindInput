@@ -2407,6 +2407,7 @@ impl CandidateWindow {
             opacity: 1.0,
             tint,
             place: None,
+            scale: self.scale,
         })
     }
 
@@ -2450,17 +2451,9 @@ impl CandidateWindow {
         )
     }
 
-    /// RvGradient → 渲染用 ViewGradient（stop 颜色直通 [R,G,B,A]）。
+    /// RvGradient → 渲染用 ViewGradient（委托共享 theme_assets，弹窗类同一份）。
     fn rv_gradient(&self, g: Option<&wind_theme::RvGradient>) -> Option<crate::view::ViewGradient> {
-        let g = g?;
-        if g.stops.is_empty() {
-            return None;
-        }
-        Some(crate::view::ViewGradient {
-            radial: g.kind == "radial",
-            angle: g.angle,
-            stops: g.stops.clone(),
-        })
+        crate::theme_assets::rv_gradient(g)
     }
 
     /// 按当前状态构建候选视图树（横向布局）。

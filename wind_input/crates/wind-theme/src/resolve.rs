@@ -705,6 +705,41 @@ mod tests {
         );
     }
 
+    /// 弹窗类节点（status / tooltip / toast / menu.root）的 `background.gradient` 必须求值进
+    /// RvNode——渲染层要消费它，这一层先不能丢。
+    #[test]
+    fn test_popup_nodes_carry_bg_gradient() {
+        let text = r##"
+[status]
+background = { gradient = { stops = [{ color = "#FF0000", pos = 0.0 }, { color = "#0000FF", pos = 1.0 }] } }
+[tooltip]
+background = { gradient = { type = "radial", stops = [{ color = "#FF0000", pos = 0.0 }] } }
+[toast]
+background = { gradient = { angle = 90, stops = [{ color = "#00FF00", pos = 1.0 }] } }
+[menu.root]
+background = { gradient = { stops = [{ color = "#0000FF", pos = 0.5 }] } }
+"##;
+        let value: toml::Value = toml::from_str(text).unwrap();
+        let theme: Theme = crate::normalize::normalize_theme(value).try_into().unwrap();
+        let r = resolve(&theme, false, &[data_dir()]);
+        let g = |n: Option<&RvNode>, name: &str| {
+            n.and_then(|n| n.bg_gradient.clone())
+                .unwrap_or_else(|| panic!("{name} 的渐变没求值进 RvNode"))
+        };
+        let st = g(r.views.status.as_ref(), "status");
+        assert_eq!(st.kind, "linear");
+        assert_eq!(
+            st.stops,
+            vec![([255, 0, 0, 255], 0.0), ([0, 0, 255, 255], 1.0)]
+        );
+        assert_eq!(g(r.views.tooltip.as_ref(), "tooltip").kind, "radial");
+        assert_eq!(g(r.views.toast.as_ref(), "toast").angle, 90.0);
+        assert_eq!(
+            g(r.views.menu_root.as_ref(), "menu.root").stops,
+            vec![([0, 0, 255, 255], 0.5)]
+        );
+    }
+
     #[test]
     fn test_index_labels_survive_resolve() {
         // 主题 [index] labels 经 normalize→typed→resolve 全链路存活到 Resolved.views.index_labels。
