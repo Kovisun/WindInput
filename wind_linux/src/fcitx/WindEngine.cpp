@@ -225,7 +225,7 @@ WindEngine::WindEngine(fcitx::Instance* instance) : instance_(instance)
     }
     // 输出缩放变了（改系统缩放 / 换屏）：焦点正在 Wayland 应用里就重新上报，服务端下一帧起按新缩放画。
     wlPanel_->setOnScaleChanged([this]() {
-        if (fcitx::InputContext* ic = focusedIC(); ic && WaylandCandidatePanel::handles(ic)) {
+        if (fcitx::InputContext* ic = focusedIC(); ic && wlPanel_->handles(ic)) {
             sendHostDisplay(ic);
         }
     });
@@ -477,12 +477,12 @@ void WindEngine::sendHostDisplay(fcitx::InputContext* ic)
     bool caretFree = false;
     double scale = panel_->hostScale();
 #ifdef WIND_HAVE_WAYLAND
-    if (wlPanel_ && WaylandCandidatePanel::handles(ic)) {
+    if (wlPanel_ && wlPanel_->handles(ic)) {
         caretFree = true;
         scale = wlPanel_->scale();
     }
     if (wlPanel_) {
-        wlPanel_->setReportedScale(WaylandCandidatePanel::handles(ic) ? scale : 1.0);
+        wlPanel_->setReportedScale(wlPanel_->handles(ic) ? scale : 1.0);
     }
 #endif
     // 光标可信恒为真：Linux 的光标矩形来自应用自己上报（没有 Windows 那种跨窗口光标冒充插入点
@@ -912,7 +912,7 @@ void WindEngine::onRenderFrame(const HostRenderFramePayload& p)
     }
 #ifdef WIND_HAVE_WAYLAND
     // Wayland 原生应用：cursorRect 是窗口相对坐标，没法自己摆；交给合成器按 popup surface 摆位。
-    if (wlPanel_ && WaylandCandidatePanel::handles(focusedIC())) {
+    if (wlPanel_ && wlPanel_->handles(focusedIC())) {
         panel_->hide();
         wlPanel_->show(focusedIC(), f);
         return;
@@ -1025,7 +1025,7 @@ void WindEngine::onOverlayFrame(const OverlayFramePayload& p)
     // Wayland 原生应用：浮层的屏幕坐标没有意义，并进 popup 与候选一起由合成器摆位。
     // 按屏幕摆的（Toast、屏幕锚点 / 固定位置的气泡）在 Wayland 会话里一律走 layer-shell，与焦点
     // 在哪种应用无关：焦点在 XWayland 应用（或没有焦点）时若走 X11 窗口，treeland 会把它压在任务栏下面。
-    if (wlPanel_ && (WaylandCandidatePanel::handles(focusedIC()) || wlPanel_->wantsLayer(p.kind, p))) {
+    if (wlPanel_ && (wlPanel_->handles(focusedIC()) || wlPanel_->wantsLayer(p.kind, p))) {
         panel_->hideOverlay(p.kind);
         wlPanel_->showOverlay(focusedIC(), p.kind, f, p);
         return;
@@ -1058,7 +1058,7 @@ void WindEngine::onMenuFrame(uint32_t level, const OverlayFramePayload& p)
         return;
     }
 #ifdef WIND_HAVE_WAYLAND
-    if (wlPanel_ && (wlPanel_->screenMenuActive() || WaylandCandidatePanel::handles(focusedIC()))) {
+    if (wlPanel_ && (wlPanel_->screenMenuActive() || wlPanel_->handles(focusedIC()))) {
         panel_->hideMenuLevel(level);
         wlPanel_->showMenuLevel(focusedIC(), level, f, p);
         return;
@@ -1257,7 +1257,7 @@ void WindEngine::requestMenu(int32_t target, int32_t x, int32_t y)
     Rect wa = panel_->screenWorkArea().value_or(Rect{});
 #ifdef WIND_HAVE_WAYLAND
     // Wayland 应用：x y 是 popup 位图里的坐标，工作区也在这套坐标系里
-    if (wlPanel_ && WaylandCandidatePanel::handles(focusedIC())) {
+    if (wlPanel_ && wlPanel_->handles(focusedIC())) {
         wa = wlPanel_->virtualWorkArea();
     }
 #endif
