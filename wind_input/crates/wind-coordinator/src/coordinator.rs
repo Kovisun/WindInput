@@ -10830,6 +10830,55 @@ mod mode_comment_e2e_tests {
         assert!(tip.is_empty(), "悬停关掉 ⇒ 候选不带气泡：{tip:?}");
         assert_eq!(lookups, 0, "悬停关掉 ⇒ 不再调用 word_codes_display");
     }
+
+    /// 出厂「释义」段走真实链路（论坛 t282）：挂两个注释库，经 `notify_ui_update` 下发的气泡
+    /// 里每个库的释义各占一行；查不到的候选没有这一段。
+    #[test]
+    fn default_tooltip_dict_all_section_lists_every_library() {
+        let dir = std::env::temp_dir().join(format!("wind_tip_dict_all_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let head = "name: t\ncolumns:\n  - text\n  - comment\n...\n";
+        let specs: Vec<_> = [("en", "v.配置"), ("it", "[IT]配置…")]
+            .iter()
+            .map(|(n, cmt)| {
+                let p = dir.join(format!("{n}.dict.yaml"));
+                std::fs::write(&p, format!("{head}configure\t{cmt}\n")).unwrap();
+                (p, Vec::new())
+            })
+            .collect();
+        let (c, rx) = coord_with_ui(Config::default());
+        c.reverse.write().unwrap().reload_comments(&specs, None);
+        let tip_of = |text: &str| {
+            {
+                let mut st = c.state.lock().unwrap();
+                st.candidates = vec![wind_candidate::Candidate {
+                    text: text.into(),
+                    code: text.into(),
+                    source: wind_candidate::CandidateSource::English,
+                    ..Default::default()
+                }];
+                st.input_buffer = text.into();
+            }
+            let st = c.state.lock().unwrap();
+            c.notify_ui_update(&st);
+            drop(st);
+            let mut tip = None;
+            while let Ok(cmd) = rx.try_recv() {
+                if let UiCommand::UpdateCandidates { candidates, .. } = cmd {
+                    tip = candidates.first().map(|c| c.tooltip.to_plain_text());
+                }
+            }
+            tip.expect("应下发候选")
+        };
+        assert!(
+            tip_of("configure").contains("[释义]\nv.配置\n[IT]配置…"),
+            "{:?}",
+            tip_of("configure")
+        );
+        assert!(!tip_of("nosuch").contains("[释义]"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 #[cfg(test)]

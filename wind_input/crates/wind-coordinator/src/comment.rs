@@ -1418,10 +1418,22 @@ impl crate::coordinator::Coordinator {
 }
 
 /// 候选查注释库用的词与大小写回退方向（论坛 t281，理由见 `eval_var` 的 `dict` 分支）。
+///
+/// | 候选 | 查的词 | 回退 |
+/// |---|---|---|
+/// | 未改写 | 显示文本 | 双向（输入 `abc` 要能查到缩写 `ABC`） |
+/// | 英文**词库**词被改写（投影 / 大小写档） | 词库原文 `case_source` | 只往小写 |
+/// | 头部候选（用户所打原文及其变形）被大小写档改写 | **显示文本** | 只往小写 |
+///
+/// 头部候选不是词库词，`case_source` 只是用户打出来的形态，不说明它是哪个词；用户按出了
+/// 哪种形态，就该按那种形态查——全大写档打 `asp` 得到的 `ASP` 要能查到缩写 `ASP`。但全小写档
+/// 打 `ASP` 得到的 `asp` 是用户显式要的小写，双向回退会把它升格回 `ASP`，故同样只往小写走。
 fn dict_query_key(c: &Candidate) -> (&str, wind_reverse::CaseFallback) {
+    use wind_reverse::CaseFallback::{Both, LowerOnly};
     match &c.case_source {
-        Some(orig) => (orig.as_str(), wind_reverse::CaseFallback::LowerOnly),
-        None => (c.text.as_str(), wind_reverse::CaseFallback::Both),
+        None => (c.text.as_str(), Both),
+        Some(orig) if c.source == CandidateSource::English => (orig.as_str(), LowerOnly),
+        Some(_) => (c.text.as_str(), LowerOnly),
     }
 }
 
@@ -2383,11 +2395,21 @@ mod eval_var_tests {
         assert_eq!(comment(&co, &rl, "${dict_all}", &c), "v.配置；[IT]配置…");
         assert_eq!(comment(&co, &rl, "${dict_all:/}", &c), "v.配置/[IT]配置…");
         assert_eq!(comment(&co, &rl, "${dict}", &c), "v.配置");
-        // 裸文本入口（cmdbar `dict.rev`）同义。
+        // 分隔符参数不 trim：两侧空格原样保留。分隔符里不能有 `|`（变量回退链）与 `}`（变量
+        // 结束），这里用模板写得出来的 ` · `。
         assert_eq!(
-            co.eval_text_var("dict_all", Some(" | "), "configure", &rl)
-                .as_deref(),
-            Some("v.配置 | [IT]配置…")
+            comment(&co, &rl, "${dict_all: · }", &c),
+            "v.配置 · [IT]配置…"
+        );
+        // 裸文本入口（cmdbar `dict.rev`）同义，同样经模板解析。
+        assert_eq!(
+            render("${dict_all: · }", 0, |n, a| co.eval_text_var(
+                n,
+                a,
+                "configure",
+                &rl
+            )),
+            "v.配置 · [IT]配置…"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2459,6 +2481,45 @@ mod eval_var_tests {
             comment(&co, &rl, "${dict_all}", &word("ASP")),
             "[IT]动态服务器页面"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 头部候选（用户所打原文，非词库词）被大小写档改写时按**显示文本**查、只往小写回退
+    /// （论坛 t281 审查）：全大写档打 `asp` → `ASP` 查得到缩写；全小写档打 `ASP` → `asp`
+    /// 不得升格贴上缩写的释义。
+    #[test]
+    fn case_variant_head_candidate_queries_display_text() {
+        use crate::english_candidates::{CaseVariant, apply_english_case, english_head_candidates};
+        let co = coord("pinyin");
+        let dir = std::env::temp_dir().join(format!("wind_t281h_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("it.dict.yaml");
+        std::fs::write(
+            &p,
+            "name: t\ncolumns:\n  - text\n  - comment\n...\nASP\t[IT]动态服务器页面\n",
+        )
+        .unwrap();
+        let mut rl = wind_reverse::ReverseLookup::default();
+        rl.reload_comments(&[(p, Vec::new())], None);
+
+        let mut up = english_head_candidates("asp", true, false);
+        assert!(apply_english_case(&mut up, "asp", CaseVariant::Upper));
+        assert_eq!(
+            (up[0].text.as_str(), up[0].source),
+            ("ASP", CandidateSource::None)
+        );
+        assert_eq!(comment(&co, &rl, "${dict}", &up[0]), "[IT]动态服务器页面");
+        assert_eq!(
+            comment(&co, &rl, "${dict_all}", &up[0]),
+            "[IT]动态服务器页面"
+        );
+
+        let mut low = english_head_candidates("ASP", true, false);
+        assert!(apply_english_case(&mut low, "ASP", CaseVariant::Lower));
+        assert_eq!(low[0].text, "asp");
+        assert_eq!(comment(&co, &rl, "${dict}", &low[0]), "");
+        assert_eq!(comment(&co, &rl, "${dict_all}", &low[0]), "");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
