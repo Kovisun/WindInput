@@ -909,7 +909,7 @@ STDAPI CKeyEventSink::OnTestKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM 
                 // （`_DigitCharFromVk` 对 Shift+数字恒返回 0，正是「清零」语义）。
                 // 提前 return 会跳过末尾那处，不补的话「打 3 → 打 @ → 打 .」里的 `.` 会
                 // 继承到陈旧的 `3`，被「数字后智能标点」误判成数字后而直出半角。
-                _lastPassthroughDigit = _DigitCharFromVk(wParam, modifiers);
+                _NotePassthroughKey(wParam, modifiers);
                 return S_OK; // pfEaten 保持 FALSE → 同步透传
             }
             // Punctuation: always eat in Chinese mode.
@@ -960,10 +960,16 @@ STDAPI CKeyEventSink::OnTestKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM 
     // 判据统一交给 _DigitCharFromVk：非数字键返回 0，正好落进「清零」语义。
     if (*pfEaten == FALSE)
     {
-        _lastPassthroughDigit = _DigitCharFromVk(wParam, modifiers);
+        _NotePassthroughKey(wParam, modifiers);
     }
 
     return S_OK;
+}
+
+void CKeyEventSink::_NotePassthroughKey(WPARAM vk, uint32_t modifiers)
+{
+    _lastPassthroughDigit = _DigitCharFromVk(vk, modifiers);
+    _pTextService->InvalidateCachedPrevChar();
 }
 
 STDAPI CKeyEventSink::OnKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM lParam, BOOL* pfEaten)
@@ -1489,7 +1495,7 @@ STDAPI CKeyEventSink::OnKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM lPar
         else if (numberPassthrough)
         {
             // 与 OnTestKeyDown 末尾同一记账：宿主自己出的数字，供下一个标点的数字后智能标点用。
-            _lastPassthroughDigit = _DigitCharFromVk(wParam, modifiers);
+            _NotePassthroughKey(wParam, modifiers);
             _LogKeyDecision(L"down", _pTextService->GetFocusSessionId(), wParam, modifiers, HotkeyType::Number,
                             isChineseMode, hasComposition, _hasCandidates, hasInputSession, FALSE, L"number_passthrough");
         }
@@ -1673,9 +1679,9 @@ STDAPI CKeyEventSink::OnKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM lPar
     // 送往服务端的键，包括本处 pfEaten 为真、根本不进这个分支的那些）。
     if (!(*pfEaten))
     {
-        if (WCHAR digit = _DigitCharFromVk(wParam, modifiers))
+        if (_DigitCharFromVk(wParam, modifiers))
         {
-            _lastPassthroughDigit = digit;
+            _NotePassthroughKey(wParam, modifiers);
         }
     }
 

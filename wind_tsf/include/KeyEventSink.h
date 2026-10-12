@@ -462,6 +462,12 @@ private:
         return 0;
     }
 
+    // 按键侧记录点的统一入口：键已透传进宿主时调用。除了记下「是不是数字」，还要作废
+    // CTextService 缓存的 prevChar——那是按键前的快照。不作废的话，在不触发 OnEndEdit 的
+    // 宿主里（Tabby：上屏「对」后打 `1.`），旧值「对」非 0，挡住备用通路，`.` 出成「。」，
+    // 且只在缓存恰好非 0 时出现，表现为时灵时不灵。
+    void _NotePassthroughKey(WPARAM vk, uint32_t modifiers);
+
     // 经引擎上屏的文本也要更新备用 prevChar。全角数字、小键盘 direct「顶屏候选再追加
     // 数字」、候选文本本身带数字这些路径，pfEaten 为真且响应不是 PassThrough，两个按键侧
     // 记录点（OnTestKeyDown 透传臂 / OnKeyDown 补设）都不覆盖——能读文档的宿主靠主路径
