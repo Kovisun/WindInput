@@ -275,7 +275,7 @@ pub(crate) fn schema_custom_covered_punct_chars(
     out
 }
 
-/// 所有已安装方案的码元集里可作首码的非字母字符（并集）。见
+/// 所有已安装方案的码元集里可作首码的非字母字符（并集），含开着的符号通配键。见
 /// [`SchemaKeyUnion::leading_code_chars`]。
 ///
 /// 只收非字母：字母本就是默认码元，与标点集合不可能相交，白扫一遍。
@@ -309,6 +309,13 @@ pub(crate) fn schema_leading_code_chars(mgr: &EngineManager) -> std::collections
             }
         }
     }
+    // 符号通配键同样可作首码（论坛 t302），不在 `input_chars` 里也得算上：映射成原样
+    // ASCII 的反引号会进透传集，首位按下 DLL 直接放给宿主，通配根本收不到。
+    out.extend(
+        mgr.installed_schemas()
+            .iter()
+            .filter_map(|id| mgr.schema_symbol_wildcard_key(id)),
+    );
     out
 }
 

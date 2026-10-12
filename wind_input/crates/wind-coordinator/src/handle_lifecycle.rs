@@ -109,6 +109,9 @@ impl Coordinator {
     /// Shift+字母进临时英文、以及 `z_key_action` 的三重身份裁决（后者本就自带
     /// `has_code_prefix("z")` 判据处理码元冲突，不需要也不能被本函数接管）。
     ///
+    /// 符号**通配键**同理（论坛 t302）：方案开了通配并选了这个符号，它在首位就是码元，
+    /// 出厂的全局绑定（反引号 = 临拼触发）不该先把它抢走。判据见 `wildcard_symbol_takes_lead`。
+    ///
     /// ★★ 五c 之后**只对全局层绑定生效**（`bound_key_decision` 按来源分流）：这是
     /// **跨层**仲裁——全局配置无从知道某个方案把这个符号当码元用了。方案级 `[key_actions]`
     /// 与同方案的 `leading_chars` 是同层冲突，显式绑定优先，见 §4.3。
@@ -121,6 +124,7 @@ impl Coordinator {
         }
         self.engine_mgr
             .active_is_leading_char(ch.to_ascii_lowercase())
+            || self.wildcard_symbol_takes_lead(ch)
     }
 
     /// 空缓冲模式激活的单一入口。命中返回激活 KeyAction，都不命中返回 None（落普通输入）。

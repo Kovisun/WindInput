@@ -4770,6 +4770,20 @@ impl EngineManager {
         ))
     }
 
+    /// 指定方案开着的**符号**通配键（`wildcard` 关、键非法或是字母 ⇒ `None`）。
+    ///
+    /// 与 [`Self::schema_code_char_set`] 同为纯配置读、不建引擎，理由同那边。供协调器把它从
+    /// 「空闲时透传的标点」里扣掉：符号通配键可作首码（论坛 t302），透传掉就到不了 core。
+    /// 非法键不在此告警——建引擎时 `wildcard_char` 已告警过一次。
+    pub fn schema_symbol_wildcard_key(&self, schema_id: &str) -> Option<char> {
+        let ct = self.codetable_settings_of(schema_id);
+        if !ct.wildcard {
+            return None;
+        }
+        wind_config::config::parse_wildcard_key(&ct.wildcard_key)
+            .filter(|c| !c.is_ascii_alphabetic())
+    }
+
     /// **所有已安装**方案（含 overlay）的 `[key_actions]` 里出现过的键名（并集）。
     ///
     /// 与 [`Self::all_key_action_keys`] 只差枚举源，但那一差是**语义性**的：
