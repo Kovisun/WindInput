@@ -208,7 +208,8 @@ pub struct ViewImage {
 #[derive(Deserialize, Debug, Clone)]
 pub struct ViewGradientStop {
     pub color: Ld,
-    /// 0..1；缺省按序号均分（`i/(n-1)`，单个 stop 为 0），同 CSS 与主题编辑器。
+    /// 0..1；缺省按原序号均分（`i/(n-1)`，单个 stop 为 0），与主题编辑器同口径。
+    /// 全缺时结果同 CSS；与显式 pos 混写时不做 CSS 那种邻值插值。
     #[serde(default)]
     pub pos: Option<f32>,
 }

@@ -749,7 +749,7 @@ background = { gradient = { stops = [{ color = "#0000FF", pos = 0.5 }] } }
         );
     }
 
-    /// 缺 `pos` 的 stop 按序号均分（CSS 口径，与主题编辑器同口径）；此前缺省 0，
+    /// 缺 `pos` 的 stop 按序号均分（与主题编辑器同口径；全缺时同 CSS）；此前缺省 0，
     /// 全部 stop 挤在起点，整块退化成最后一色的纯色。显式给了 pos 的照旧。
     #[test]
     fn test_gradient_missing_pos_spreads_evenly() {

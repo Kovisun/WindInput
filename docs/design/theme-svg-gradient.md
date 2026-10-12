@@ -87,8 +87,8 @@ issue 的前提「运行时已具备 SVG 能力，只是编辑器没跟上」**�
 
 - schema：`background.gradient = { type, angle, stops = [{ color, pos }] }`（`schema.rs:207-235`）。
   `type`：`"linear"`（默认）/ `"radial"`。只挂在 `background` 下；**边框、文字、阴影不支持渐变**。
-- 求值：stop 颜色走 `resolve_color`；`pos` 钳到 [0,1] 升序；无有效 stop 返回 None（`resolve.rs:149-174`）。
-  缺 `pos` 的 stop 按序号均分（`i/(n-1)`，单个为 0），与 CSS / 编辑器同口径；此前缺省为 0，全部挤在起点退化成纯色（审查发现，已改）。
+- 求值：stop 颜色走 `resolve_color`；`pos` 钳到 [0,1] 升序；无有效 stop 返回 None（`resolve.rs` `resolve_gradient`）。
+  缺 `pos` 的 stop 按序号均分（`i/(n-1)`，单个为 0），与编辑器同口径（全缺时同 CSS；与显式 pos 混写时不做邻值插值）；此前缺省为 0，全部挤在起点退化成纯色（审查发现，已改）。
 - 绘制（`view.rs:1413-1487`）：1 个 stop 退化为纯色；linear 的 `angle` 单位是度，0 = 左→右，90 = 上→下（顺时针），端点按投影覆盖整个盒；
   radial 圆心固定在盒中心、半径 = 对角线一半，不可配；外延 Pad；裁到圆角内。
 - 状态补丁（selected/hover/disabled）写了非空 stops 即算有覆盖（`resolve.rs:294-301`）。
@@ -102,7 +102,7 @@ background = { color = "${selection}", gradient = { type = "linear", angle = 90,
 ] } }
 ```
 
-## 3. 编辑器侧现状
+## 3. 编辑器侧现状（实施前快照，下列问题已由编辑器 `1b5db07` 修复）
 
 技术栈：Vue 3 + Pinia + Vite；预览为 Canvas 2D，逐行对照 `wind-ui` 手写（`src/lib/preview/AGENTS.md`），不复用 Rust。
 
@@ -199,7 +199,7 @@ SVG center/tile 只渲染目标盒可见部分，不先整单元栅格化——�
 
 | 项 | 主仓 | 编辑器 |
 |---|---|---|
-| P0 编辑器修 bug | — | `1b5db07` |
+| P0 编辑器修 bug | — | `1b5db07`、`05c5d6d`（终审修排序） |
 | P1 补齐已有能力 | — | `1b5db07` |
 | P2 引擎补能力 | `e913939c`、`080db393`（stop 缺 pos 均分） | `1b5db07`（预览跟进） |
 
