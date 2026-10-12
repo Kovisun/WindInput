@@ -288,7 +288,8 @@ fn clear_blocked_by_candidates(candidates: &[Candidate], input_len: usize) -> bo
 /// `opts`，协调器取不到，故短语侧须在此重算。两处语义必须一致。
 ///
 /// `max_code_length` 为 0（拼音等无「全码」概念的引擎，见 `Engine::max_code_length` 默认实现）
-/// 时结果为 0 → 调用方的 `len < 0` 恒假 → 不设闸，与引擎侧同构降级。
+/// 时结果为 0 → `len < 0` 恒假、不设闸。短语自动上屏因此在调用前就先把这类引擎整体拦下
+/// （论坛 t308），不靠这里。
 fn resolve_auto_commit_min_len(configured: usize, max_code_length: usize) -> usize {
     if configured > 0 {
         configured
@@ -1912,6 +1913,15 @@ impl Coordinator {
     pub(crate) fn phrase_auto_commit(&self, state: &State) -> Option<InputOutcome> {
         let ct = self.engine_mgr.codetable_settings();
         if !ct.auto_commit_at_full {
+            return None;
+        }
+        // 无「满码」概念的引擎（拼音 / 双拼，`max_code_length` 为 0）**整体不参与**（论坛 t308）。
+        //
+        // 开关读的是 `schema.codetable`，拼音方案照样继承全局那一份；而下面的最短码长闸在码长
+        // 为 0 时恒放行 ⇒ 只剩「唯一候选」一道闸。双拼关掉简拼后，`ofa` 这类码没有任何拼音
+        // 候选，直通命令 `$CC(…ime.schema…)` 成了唯一一条，打完第三码当场执行。简拼开着时
+        // 不触发只是碰巧多了一条简拼候选，换个无拼音解的码照样中招。
+        if self.engine_mgr.active_max_code_length() == 0 {
             return None;
         }
         // 最短码长闸：与引擎 decide_auto_commit 的 `input.chars().count() < min_len` 同构。
