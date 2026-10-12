@@ -421,7 +421,8 @@ fn make_emoji_candidate(text: String) -> Candidate {
 impl Coordinator {
     /// 记录一次选词到 redb FREQ（词频维度：count+1、last_used=now，按 schema+code+text）。
     /// 词频是与权重解耦的独立维度（frequency.md），仅记真实使用数据；redb 事务即时持久。
-    /// 未开启「自动调频」（`schema.codetable/pinyin.frequency.enabled`）时不记录，避免关闭功能后仍写库。
+    /// 未开启「自动调频」（`schema.*.frequency.enabled`）时不记录，避免关闭功能后仍写库；
+    /// 例外是用户显式要求「只记次数」（`record_always`，论坛 t278）——那时只写不读。
     /// 记一条上屏历史（最近置前，限 16 条）。供命令栏 `last(n)`、加词推荐、
     /// z 键重复上屏与快捷输入的 `quick_input.repeat` 共用同一事实源。
     ///
@@ -488,7 +489,7 @@ impl Coordinator {
     /// ★ 找不到对应词库词的头部候选（纯原文，如 `wxyzq`）**不记词频、只记上屏历史**——与
     /// 临英 / 快捷输入同一口径（理由见 `english_head_dict_word`：`(wxyzq, wxyzq)` 是读端永远
     /// 查不中的孤儿键）。输入统计由各出口自己的 `record_commit` 记，不经本函数，照旧。
-    /// 调频关时同样只记历史——那时改前也只记了历史（写端被开关挡下）。
+    /// 不记词频时（调频关且未开 `record_always`）同样只记历史——写端本就被开关挡下。
     pub(crate) fn record_selection_cand(&self, code: &str, cand: &Candidate) {
         if self.engine_mgr.active_is_english()
             && crate::english_candidates::is_english_head_candidate(cand, code)
@@ -499,7 +500,7 @@ impl Coordinator {
                 return self.record_selection_cand_in(None, &freq_code, &word);
             }
             self.push_commit_history(&cand.text);
-            // 头部候选找不到词库词：英文自动造词的信号。`english_head_dict_word` 在调频关着时
+            // 头部候选找不到词库词：英文自动造词的信号。`english_head_dict_word` 在不记词频时
             // 恒 None，所以「是不是词库词」由 `learn_english_raw` 自己再问一遍引擎。
             self.learn_english_raw(&active, &cand.text);
             return;
@@ -594,9 +595,10 @@ impl Coordinator {
             let owner = schema_override
                 .map(str::to_string)
                 .unwrap_or_else(|| self.engine_mgr.active_schema_id());
-            // 未开启「自动调频」则不记录（配置说关、代码却记的潜在 bug，对齐 apply_freq_rerank 的开关检查）。
+            // 未开启「自动调频」则不记录（配置说关、代码却记的潜在 bug，对齐 apply_freq_rerank 的开关检查），
+            // 除非开了「只记次数」`record_always`。读端仍只认 `enabled`，见 `FreqSettings::records`。
             let settings = self.engine_mgr.freq_settings_for(&owner);
-            if !settings.enabled {
+            if !settings.records() {
                 return;
             }
             // 排除区块（`schema.frequency.exclude_blocks`，出厂为空）：emoji 这类候选不学词频。

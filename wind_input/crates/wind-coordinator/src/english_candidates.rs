@@ -380,7 +380,7 @@ impl crate::coordinator::Coordinator {
     /// （`temp_english_literal_text_is_not_recorded` 钉着）。想让自造词参与排序，该走加词。
     ///
     /// `cand` 不是头部候选（有来源 / 有码 / 短语 / emoji，或文本不是缓冲的大小写形态）、
-    /// 或 `engine_schema` 的调频关着时直接 `None`，不查词库。
+    /// 或 `engine_schema` 不记词频（调频关且未开 `record_always`）时直接 `None`，不查词库。
     pub(crate) fn english_head_dict_word(
         &self,
         engine_schema: &str,
@@ -391,9 +391,11 @@ impl crate::coordinator::Coordinator {
             return None;
         }
         let head_text = cand.freq_text();
-        // 调频关着就不查：结果只用来记词频，而写端本来也会因开关关着而不写。先判开关，
+        // 不记词频就不查：结果只用来记词频，而写端本来也会因开关关着而不写。先判开关，
         // 关着时连这次查询与它的副作用（临英的上屏历史）都不发生，行为与改前逐字相同。
-        if !self.engine_mgr.freq_settings_for(engine_schema).enabled {
+        // ⚠️ 判据是写端的 `records()` 而非 `enabled`：这里是**写端**的一环，用 `enabled` 会让
+        // 「仅记录次数」（`record_always`）在最常见的「打全词按空格」下一条都不记（论坛 t278）。
+        if !self.engine_mgr.freq_settings_for(engine_schema).records() {
             return None;
         }
         let code = buf.to_lowercase();

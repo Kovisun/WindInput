@@ -1051,6 +1051,9 @@ impl Default for EnglishAutoLearn {
 pub struct EnglishFrequency {
     #[serde(default)]
     pub enabled: bool,
+    /// 调频关闭时仍记录选词次数；语义同 [`CodetableFrequency::record_always`]。
+    #[serde(default)]
+    pub record_always: bool,
     /// `"top"` / `"step"` / `"position"`，默认 `"position"`。
     ///
     /// **与码表默认不同**：英文候选几乎全是前缀匹配，`top`/`step` 那种「用过一次即整体
@@ -1091,6 +1094,7 @@ impl Default for EnglishFrequency {
     fn default() -> Self {
         Self {
             enabled: false,
+            record_always: false,
             strategy: default_english_freq_strategy(),
             promote_prefix: default_codetable_promote_prefix(),
             half_life: 0.0,
@@ -2424,6 +2428,9 @@ impl CodetableGlobal {
             if let Some(v) = f.enabled {
                 out.frequency.enabled = v;
             }
+            if let Some(v) = f.record_always {
+                out.frequency.record_always = v;
+            }
             if let Some(v) = &f.strategy {
                 out.frequency.strategy = v.clone();
             }
@@ -2498,6 +2505,13 @@ impl CodetableGlobal {
 pub struct CodetableFrequency {
     #[serde(default)]
     pub enabled: bool,
+    /// **调频关闭时仍记录选词次数**（GH 论坛 t278）。`enabled = true` 时本项无意义（本来就记）。
+    ///
+    /// 记录与使用是两件事：本项只放开**写端**（`record_selection_in`），读端（主候选重排、
+    /// 英文热词召回、词语联想打分）仍只认 `enabled`。用途是攒一份「真实常用字词」的次数表
+    /// 供设置页查看 / 导出，而候选顺序保持固定。日后再开 `enabled`，攒下的次数即刻参与排序。
+    #[serde(default)]
+    pub record_always: bool,
     /// 锁定码表原始前 N 位——**兜底档**：码长 ≥ 4 的深码位。
     /// 简码位（码长 1/2/3）另有分级值，见下面三个字段。
     ///
@@ -2566,6 +2580,7 @@ impl Default for CodetableFrequency {
     fn default() -> Self {
         Self {
             enabled: false,
+            record_always: false,
             protect_top_n: 0,
             protect_top_n_len1: default_protect_len1(),
             protect_top_n_len2: default_protect_len2(),
@@ -2582,6 +2597,9 @@ impl Default for CodetableFrequency {
 pub struct PinyinFrequency {
     #[serde(default)]
     pub enabled: bool,
+    /// 调频关闭时仍记录选词次数；语义同 [`CodetableFrequency::record_always`]。
+    #[serde(default)]
+    pub record_always: bool,
     /// 半衰期（小时）。
     #[serde(default)]
     pub half_life: f64,

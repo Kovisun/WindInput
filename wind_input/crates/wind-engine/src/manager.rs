@@ -110,6 +110,9 @@ impl PromotePrefix {
 pub struct FreqSettings {
     /// 词频维度主开关（全局 schema.{codetable,pinyin}.frequency.enabled）；关则完全不重排。
     pub enabled: bool,
+    /// 调频关闭时仍记录（`schema.*.frequency.record_always`）。**只放开写端**，读端一律
+    /// 只认 [`Self::enabled`]；写端判据走 [`Self::records`]，不要直接读本字段。
+    pub record_always: bool,
     /// used-first 内的排序策略（全局 schema.codetable.frequency.strategy；仅码表用）。
     pub strategy: FreqStrategy,
     /// 呈现层前 N 位保护（全局 `schema.codetable.frequency.protect_top_n*`；仅码表/混输用）。
@@ -135,6 +138,7 @@ impl Default for FreqSettings {
     fn default() -> Self {
         Self {
             enabled: false,
+            record_always: false,
             strategy: FreqStrategy::Step,
             protect: ProtectPolicy::NONE,
             promote_prefix: PromotePrefix::Single,
@@ -146,6 +150,14 @@ impl Default for FreqSettings {
 }
 
 impl FreqSettings {
+    /// 选中时要不要记账：调频开着，或用户要求「只记次数、不调序」（论坛 t278）。
+    ///
+    /// 写端（`record_selection_in`）用它，读端（重排 / 英文热词召回 / 联想打分）用
+    /// [`Self::enabled`]——两端的开关**刻意不同**，这正是 `record_always` 的全部语义。
+    pub fn records(&self) -> bool {
+        self.enabled || self.record_always
+    }
+
     /// 这条候选文本要不要**整个绕开词频**（既不记录、也不重排）。
     ///
     /// # ★ 这个方法存在的唯一理由是「两端同源」
@@ -1614,7 +1626,16 @@ impl EngineManager {
             }
         }
 
-        let scores = self.assoc_freq_scores(&data_schema, &items);
+        // 选词次数只在调频开着时参与排序：`record_always`（只记不调）攒下的次数不得在这里
+        // 悄悄改联想顺序。此前不查开关也没出事，只因关调频时写端不记、库里没数据。
+        //
+        // ⚠️ 开关按**活跃方案**取，不按 `schema_id`：混输下后者是主码表（`assoc_word_schema`），
+        // 而写端与主候选重排读的是混输自己的折叠值（方案级覆盖可以与主码表不同）。
+        let scores = if self.freq_settings_for(&self.active_schema_id()).enabled {
+            self.assoc_freq_scores(&data_schema, &items)
+        } else {
+            vec![0.0; items.len()]
+        };
         let mut order: Vec<usize> = (0..items.len()).collect();
         order.sort_by(|&a, &b| {
             items[a]
@@ -5495,6 +5516,7 @@ impl EngineManager {
                 let en = self.english.lock().unwrap_or_else(|e| e.into_inner());
                 FreqSettings {
                     enabled: en.frequency.enabled,
+                    record_always: en.frequency.record_always,
                     strategy: Self::parse_freq_strategy(&en.frequency.strategy),
                     // 英文没有「简码位」：一个 a 后面跟的是几万个词而不是钦定首选，
                     // 套用码表那套按码长分级的首选保护只会锁死前几位不让调频。
@@ -5509,6 +5531,7 @@ impl EngineManager {
                 // 拼音 strategy/protect 字段不参与（仅码表 used-first 排序用），取默认。
                 FreqSettings {
                     enabled: pf.frequency.enabled,
+                    record_always: pf.frequency.record_always,
                     strategy: FreqStrategy::Step,
                     protect: ProtectPolicy::NONE,
                     promote_prefix: PromotePrefix::parse(&pf.frequency.promote_prefix),
@@ -5539,6 +5562,7 @@ impl EngineManager {
                     english_code_by_input,
                     charsets: Arc::clone(&charsets),
                     enabled: ct.frequency.enabled,
+                    record_always: ct.frequency.record_always,
                     strategy: Self::parse_freq_strategy(&ct.frequency.strategy),
                     protect: ProtectPolicy {
                         by_len: [
