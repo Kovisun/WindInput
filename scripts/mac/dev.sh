@@ -391,7 +391,7 @@ app_build() {
     done
 
     # 菜单栏图标 (单色 PDF 模板). plist 引用 menu_icon.pdf, 另带 _15 / _26 应对 Retina.
-    # 源 SVG 在 Resources/wind-{15,26}.svg, 重新生成: rsvg-convert -f pdf -o menu_icon_15.pdf wind-15.svg
+    # SVG/PDF 由 scripts/mac/gen_menu_icon.py 生成 (圆角方块镂空「风」, 对齐系统输入法图标), 勿手改.
     local icon src
     for icon in menu_icon.pdf menu_icon_15.pdf menu_icon_26.pdf; do
         src="$MACOS_DIR/Sources/WindInputApp/Resources/$icon"
