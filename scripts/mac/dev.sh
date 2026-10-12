@@ -785,6 +785,14 @@ download_dicts() {
     info "rime-frost (英文):"
     for f in en en_ext; do get_dict "$frost/en_dicts/$f.dict.yaml" "$rime/en_dicts/$f.dict.yaml"; done
 
+    # rime-emoji（emoji 候选主表 / 分类表，LGPL-3.0：只下载不入库，组装时原样复制，见 dev.sh 同段）。
+    local emoji="$CACHE_DIR/rime-emoji"
+    local emojibase="https://raw.githubusercontent.com/rime/rime-emoji/master"
+    info "rime-emoji (候选扩展):"
+    get_dict "$emojibase/opencc/emoji_word.txt"     "$emoji/opencc/emoji_word.txt"     "词→emoji"
+    get_dict "$emojibase/opencc/emoji_category.txt" "$emoji/opencc/emoji_category.txt" "分类→emoji"
+    get_dict "$emojibase/LICENSE"                   "$emoji/LICENSE"                   "LGPL-3.0"
+
     local py="$CACHE_DIR/pinyin-data"
     local pybase="https://raw.githubusercontent.com/mozillazg/pinyin-data/master"
     info "pinyin-data (汉字拼音反查):"
@@ -918,6 +926,19 @@ assemble_data() {
         cp -f "$rime/opencc/emoji.txt" "$data/emoji/frost_emoji.txt"
         [[ -f "$rime/opencc/others.txt" ]] \
             && strip_frost_sections "$rime/opencc/others.txt" "$data/emoji/frost_others.txt"
+    fi
+
+    # 2c. rime-emoji 主表 / 分类表：**原样复制**，繁→简归一与建缓存都在用户本机首次启用时做
+    #     （我们分发的是 LGPL 原文的逐字副本，见 dev.sh 的 emoji 段）。LICENSE 必须一并带上。
+    local emoji_cache="$CACHE_DIR/rime-emoji"
+    if [[ -f "$emoji_cache/opencc/emoji_word.txt" && -f "$emoji_cache/LICENSE" ]]; then
+        mkdir -p "$data/emoji"
+        cp -f "$emoji_cache/opencc/emoji_word.txt" "$data/emoji/"
+        [[ -f "$emoji_cache/opencc/emoji_category.txt" ]] \
+            && cp -f "$emoji_cache/opencc/emoji_category.txt" "$data/emoji/"
+        cp -f "$emoji_cache/LICENSE" "$data/emoji/LICENSE"
+    else
+        warn "缺 .cache/rime-emoji/（或其 LICENSE）, emoji 主表不可用 (先跑 gd 下载)"
     fi
 
     # 3. 英文词库。

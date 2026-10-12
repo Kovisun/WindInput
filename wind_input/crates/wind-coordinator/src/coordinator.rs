@@ -4540,7 +4540,9 @@ impl Coordinator {
                         continue;
                     }
                     let Some(src) = Config::resolve_data_file(dd, rel) else {
-                        warn!("emoji 表缺失（data/{rel}），已跳过；运行 gen-data 下载");
+                        warn!(
+                            "emoji 表缺失（data/{rel}），已跳过（安装包应已附带；源码构建请跑 gen-data）"
+                        );
                         continue;
                     };
                     // 归一表进 `fp_extra`：它不参与解析但决定解析结果，漏传会让 OpenCC 数据
@@ -4599,7 +4601,9 @@ impl Coordinator {
     ) -> Option<(wind_transform::s2t::Dict, std::path::PathBuf)> {
         let Some(norm_path) = Config::resolve_data_file(dd, "opencc/TSCharactersDerived.octrie")
         else {
-            warn!("emoji 繁简归一表缺失（opencc/TSCharactersDerived.octrie）；运行 gen-data 重建");
+            warn!(
+                "emoji 繁简归一表缺失（opencc/TSCharactersDerived.octrie）（安装包应已附带；源码构建请跑 gen-data）"
+            );
             return None;
         };
         let norm_bytes = std::fs::read(&norm_path)
