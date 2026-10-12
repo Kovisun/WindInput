@@ -7802,6 +7802,14 @@ pub struct CustomManifest {
     /// 主题减法清单。
     #[serde(default)]
     pub themes: CustomHideList,
+    /// 设置界面减法清单：条目是选择器（`key:<配置键>`，可带尾部 `*`；`feature:<id>`），
+    /// 由设置程序消费，core 只解析与校验。
+    ///
+    /// ⚠️ 与上面两段**语义不同**：那两段是「不存在」，这一段只是「界面上不显示」——
+    /// 被隐藏的设置照常生效，值仍来自定制层 / 用户层。要关掉一个功能，定制者应在
+    /// `data_custom/config.toml` 里把值设好，再在这里把它藏起来；两件事不得合成一个开关。
+    #[serde(default)]
+    pub settings: CustomHideList,
 }
 
 /// 定制版身份。没有它，定制版用户报障时连他装的是不是定制版都判断不出来。
