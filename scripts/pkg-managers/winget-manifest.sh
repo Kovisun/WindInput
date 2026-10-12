@@ -21,7 +21,7 @@ VERSION="${VERSION#v}"
 
 REPO="huanfeng/WindInput"
 ID="huanfeng.WindInput"
-MANIFEST_VERSION="1.10.0"
+MANIFEST_VERSION="1.12.0"
 ASSET="WindInput-Setup-${VERSION}.exe"
 URL="https://github.com/${REPO}/releases/download/v${VERSION}/${ASSET}"
 
