@@ -251,6 +251,7 @@ async def x11_cases(bus, im):
     await asyncio.sleep(0.3)
     win = candidate_window()
     got = ""
+    hit = None
     if win and win[5]:
         _, x, y, w, h, _ = win
         for dx in range(4, w, 8):
@@ -258,6 +259,7 @@ async def x11_cases(bus, im):
             await asyncio.sleep(0.12)
             got = c.take()
             if got:
+                hit = (x + dx, y + h // 2)
                 break
     check("X11：鼠标点候选 → 上屏（CMD_CANDIDATE_SELECT → push 回来的 CommitText）",
           got != "", "点遍中线都没有上屏")
@@ -265,6 +267,23 @@ async def x11_cases(bus, im):
     win = candidate_window()
     check("X11：鼠标选词后候选窗隐藏", win is not None and not win[5], f"window={win}")
     sh("xdotool", "mousemove", "5", "5")
+
+    # 点选在松开时生效（同 macOS）：按下不上屏；按住拖出候选窗再松开 = 放弃，候选窗仍在。
+    if hit:
+        await c.type("nihao")
+        await asyncio.sleep(0.3)
+        sh("xdotool", "mousemove", str(hit[0]), str(hit[1]), "mousedown", "1")
+        await asyncio.sleep(0.2)
+        on_press = c.take()
+        sh("xdotool", "mousemove", "5", "5", "mouseup", "1")
+        await asyncio.sleep(0.2)
+        on_release = c.take()
+        win = candidate_window()
+        check("X11：按下候选不上屏，拖出候选窗松开 = 放弃（候选窗仍在）",
+              on_press == "" and on_release == "" and win is not None and win[5],
+              f"按下={on_press!r} 松开={on_release!r} window={win}")
+        await c.key("Escape")
+        c.take()
 
     # 屏幕底边：光标在 (300, 780)，下方放不下 → 翻到光标上方，且不出屏。
     await c.ic.call_set_cursor_rect(300, 780, 2, 16)

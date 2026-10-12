@@ -153,6 +153,7 @@ struct WaylandListeners {
             return;
         }
         self->pointerInside_ = false;
+        self->click_.cancel();
         self->setHover(-1);
         self->updatePopupStatusHover();
     }
@@ -229,7 +230,17 @@ struct WaylandListeners {
             }
             return;
         }
-        if (!self->pointerInside_ || !pressed || self->screenMenu_) {
+        if (!self->pointerInside_ || self->screenMenu_) {
+            return;
+        }
+        if (!pressed) {
+            // 左键点选在松开时生效（ClickGate）：按下时的隐式抓取让松开仍落在本 surface 上
+            if (button == kBtnLeft) {
+                const int32_t idx = self->click_.release(self->hitAtPointer());
+                if (idx != kNoHit && self->cb_.select) {
+                    self->cb_.select(idx);
+                }
+            }
             return;
         }
         if (self->menuOpen()) {
@@ -247,10 +258,7 @@ struct WaylandListeners {
             return;
         }
         if (button == kBtnLeft) {
-            const int32_t idx = self->hitAtPointer();
-            if (idx != kNoHit && self->cb_.select) {
-                self->cb_.select(idx);
-            }
+            self->click_.press(self->hitAtPointer());
         } else if (button == kBtnRight && self->cb_.contextMenu) {
             // 命中候选 → 候选菜单，空白 / 翻页按钮 → 主菜单（同 X11 与 Windows）。
             // 悬停先清掉：菜单开着时候选窗收不到悬停，残留的高亮会一直挂着。
@@ -1358,6 +1366,7 @@ void WaylandCandidatePanel::hidePopup()
     if (!surface_ || !display_) {
         return;
     }
+    click_.cancel(); // 收起后的松开不再选
     // 销毁 popup 角色（合成器据此摘窗，下一次显示重建时按当时的文本光标矩形重新摆位——只摘 buffer
     // 不销毁角色，treeland 会让候选窗一直钉在第一次出现的地方），但 **wl_surface 本身留着**：
     // 它一旦销毁，鼠标恰好正进入它时迟到的 `wl_pointer.enter` 带的是已销毁对象（libwayland 交给

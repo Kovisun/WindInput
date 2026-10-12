@@ -19,6 +19,7 @@
 #include "Codec.h"
 #include "ExtProtocol.h"
 #include "Menu.h"
+#include "OverlayInput.h"
 #include "RetiredSurfaces.h"
 #include "ShmFrame.h"
 
@@ -357,6 +358,7 @@ private:
     bool pointerInside_ = false;
     double pointerX_ = 0, pointerY_ = 0; // surface 内逻辑坐标
     int32_t hover_ = -1;
+    ClickGate click_; // 左键点选：按下记命中，松开同一项才选
     /// 指针在位图里的命中（kNoHit / 候选下标 / 翻页 -1 -2）。
     int32_t hitAtPointer() const;
     void setHover(int32_t index);
