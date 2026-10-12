@@ -323,6 +323,13 @@ fn exact_code_phrase_suppresses_split() {
         assert_eq!(coord.debug_page_texts(), vec![shown], "{tag}：只剩短语");
         assert_eq!(coord.debug_preedit(), "ojs", "{tag}：组合区不得留切分串");
     }
+
+    // 码在短语表里、但求值为空的条目不出候选（这里是非 Windows 恒空的 `{clip()}`）⇒ 它不是
+    // 这串码的解，切分照常——按「码在不在表里」判的话候选窗会全空。
+    let (empty, _d2) = coord_xy("t307_empty");
+    empty.debug_install_phrases(vec![seed("ojs", "{clip()}")]);
+    press(&empty, "ojs");
+    assert_eq!(empty.debug_page_texts(), vec!["井三", "井所有"]);
 }
 
 /// 同上，满码长（主场）那一格：五笔 `aaab` 空码会切成「式节/式蒸…」。

@@ -1323,6 +1323,11 @@ impl Coordinator {
         let phrase_spec = self.phrase_spec_of(state);
         let phrase_scope = crate::schema_scope::phrase_scope(&phrase_spec);
         let phrases = self.phrases.read().unwrap_or_else(|e| e.into_inner());
+        // 本轮是否**真出了**精确码短语候选（下方合成候选让位的判据）。不能用
+        // `phrase_has_exact_code`：码在表里不等于候选出得来——求值为空（非节日的 `$LF`、
+        // 剪贴板空时的 `{dict.rev(clip())}`）或求值出错的条目被 `lookup` 整条丢弃，照那个
+        // 判据会把切分候选也删掉，候选窗全空。
+        let mut exact_phrase_shown = false;
         if wildcard_pattern.is_none() && !phrases.is_empty() && !phrase_scope.is_closed() {
             let recent = self.recent_commits_snapshot();
             // 剪贴板读取回调注入 wind-phrase（其不依赖平台 UI 层）：精确码命令 display
@@ -1352,6 +1357,7 @@ impl Coordinator {
                 reverse: &reverse,
             };
             for hit in phrases.lookup(&state.input_buffer, &recent, &host, &phrase_scope) {
+                exact_phrase_shown = true;
                 let is_command = hit.command_src.is_some();
                 let is_system = hit.is_system;
                 // 稳定 id 取**模板原文**：text 可能是求值结果（date/time/clip），逐日变化。
@@ -1553,9 +1559,7 @@ impl Coordinator {
         let codetable_composed = |c: &Candidate| {
             (c.is_split_composed || c.is_sentence) && c.source == CandidateSource::CodeTable
         };
-        if candidates.iter().any(codetable_composed)
-            && self.phrase_has_exact_code(state, &state.input_buffer)
-        {
+        if exact_phrase_shown && candidates.iter().any(codetable_composed) {
             candidates.retain(|c| !codetable_composed(c));
             state.preedit_codetable_body.clear();
         }

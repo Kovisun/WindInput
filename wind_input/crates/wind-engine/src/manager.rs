@@ -4770,18 +4770,44 @@ impl EngineManager {
         ))
     }
 
-    /// 指定方案开着的**符号**通配键（`wildcard` 关、键非法或是字母 ⇒ `None`）。
+    /// [`Self::schema_code_char_set`] 加上该方案开着的**符号**通配键，**一次**读方案文件。
     ///
-    /// 与 [`Self::schema_code_char_set`] 同为纯配置读、不建引擎，理由同那边。供协调器把它从
-    /// 「空闲时透传的标点」里扣掉：符号通配键可作首码（论坛 t302），透传掉就到不了 core。
-    /// 非法键不在此告警——建引擎时 `wildcard_char` 已告警过一次。
-    pub fn schema_symbol_wildcard_key(&self, schema_id: &str) -> Option<char> {
-        let ct = self.codetable_settings_of(schema_id);
-        if !ct.wildcard {
-            return None;
-        }
-        wind_config::config::parse_wildcard_key(&ct.wildcard_key)
-            .filter(|c| !c.is_ascii_alphabetic())
+    /// 供协调器算「空闲时可作首码的符号」：符号通配键也能作首码（论坛 t302），须同码元首码
+    /// 一样从 DLL 透传标点集里扣掉。同为纯配置读、不建引擎，理由见 `schema_code_char_set`。
+    ///
+    /// 通配键只算**纯码表**方案：混输首位恒字面（扣了也收不到），拼音 / 英文方案虽会经折叠
+    /// 继承全局 `wildcard` 开关，但根本不消费它——算进来只会让别的方案下这个符号被白吃。
+    /// 非法键不在此告警（建引擎时 `wildcard_char` 已告警过一次）。
+    pub fn schema_lead_inputs(
+        &self,
+        schema_id: &str,
+    ) -> Option<(wind_config::CodeCharSet, Option<char>)> {
+        let schema = Self::read_schema(
+            schema_id,
+            self.data_dir.as_deref(),
+            self.override_dir.as_deref(),
+        )?;
+        let ct = &schema.engine.codetable;
+        let charset = wind_config::CodeCharSet::new(
+            &ct.input_chars,
+            &ct.leading_chars,
+            &format!("schema {schema_id}"),
+        );
+        let wildcard = if schema.engine.engine_type.eq_ignore_ascii_case("codetable") {
+            let global = self
+                .codetable
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            let eff = Self::codetable_baseline(Some(&schema), &global).resolved(Some(ct));
+            eff.wildcard
+                .then(|| wind_config::config::parse_wildcard_key(&eff.wildcard_key))
+                .flatten()
+                .filter(|c| !c.is_ascii_alphabetic())
+        } else {
+            None
+        };
+        Some((charset, wildcard))
     }
 
     /// **所有已安装**方案（含 overlay）的 `[key_actions]` 里出现过的键名（并集）。
@@ -9889,6 +9915,40 @@ input_chars = \"a-z;\"
         // 读不到的方案返回 None，而不是默认 a-z——拿默认值去提示等于凭空报冲突。
         assert!(mgr.schema_code_char_set("no_such_schema").is_none());
 
+        let _ = std::fs::remove_dir_all(&base_dir);
+    }
+
+    /// 符号通配键只算纯码表方案（论坛 t302）：拼音方案经折叠也继承全局 `wildcard`，但不消费它，
+    /// 算进去会让「空闲透传标点」在拼音下也白吃这个符号。字母键不算（字母本不在透传集）。
+    #[test]
+    fn schema_lead_inputs_counts_symbol_wildcard_only_for_codetable() {
+        let base_dir =
+            std::env::temp_dir().join(format!("wind_eng_lead_in_{}", std::process::id()));
+        let schemas = base_dir.join("schemas");
+        std::fs::create_dir_all(&schemas).unwrap();
+        for (id, ty) in [("lct", "codetable"), ("lpy", "pinyin")] {
+            std::fs::write(
+                schemas.join(format!("{id}.schema.toml")),
+                format!("[schema]\nid = \"{id}\"\n[engine]\ntype = \"{ty}\"\n"),
+            )
+            .unwrap();
+        }
+        let mk = |key: &str| {
+            let mut cfg = Config::default();
+            cfg.schema.active = "lct".to_string();
+            cfg.schema.available = vec!["lct".to_string()];
+            cfg.schema.codetable.wildcard = true;
+            cfg.schema.codetable.wildcard_key = key.to_string();
+            EngineManager::with_store_override(&cfg, Some(&base_dir), None, None)
+        };
+        let m = mk("/");
+        assert_eq!(m.schema_lead_inputs("lct").unwrap().1, Some('/'));
+        assert_eq!(m.schema_lead_inputs("lpy").unwrap().1, None, "拼音方案不算");
+        assert_eq!(
+            mk("z").schema_lead_inputs("lct").unwrap().1,
+            None,
+            "字母键不算"
+        );
         let _ = std::fs::remove_dir_all(&base_dir);
     }
 

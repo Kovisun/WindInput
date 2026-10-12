@@ -134,3 +134,31 @@ fn symbol_wildcard_key_is_not_passed_through_when_idle() {
     let _ = std::fs::remove_dir_all(&ov0);
     let _ = std::fs::remove_dir_all(&ov);
 }
+
+/// 满码后按符号通配键：通配按字面（`wildcard_past_full`），须与关闭通配时**逐键相同**——
+/// 出厂下是「顶字 + 进临拼」。曾因首位仲裁不看缓冲，组码中那条路也让全局临拼让位，
+/// 引导键与通配两头落空，键被白吞（审查实测）。
+#[test]
+fn full_code_then_wildcard_key_matches_wildcard_off() {
+    if !has_data() {
+        eprintln!("跳过：缺 build_dev 词库");
+        return;
+    }
+    let run = |tag: &str, on: bool| {
+        let (c, ov) = coord(tag, on, "");
+        for ch in "aaaa".chars() {
+            c.handle_key_event(&key(u32::from(ch.to_ascii_uppercase())));
+        }
+        let act = format!("{:?}", c.handle_key_event(&key(VK_OEM_3)));
+        let out = (act, c.debug_active_mode(), c.debug_input_buffer());
+        let _ = std::fs::remove_dir_all(&ov);
+        out
+    };
+    let off = run("full_off", false);
+    assert_eq!(
+        off.1,
+        Some("temp_pinyin"),
+        "前提：关闭时满码 + 反引号进临拼"
+    );
+    assert_eq!(run("full_on", true), off);
+}

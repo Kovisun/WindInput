@@ -154,12 +154,15 @@ impl Coordinator {
         {
             return false;
         }
-        let Some((vk, _)) = wildcard_key_vk(key) else {
+        let Some((vk, shift)) = wildcard_key_vk(key) else {
             return false;
         };
-        !self
-            .bound_action_with_source(vk)
-            .is_some_and(|(a, from_schema)| from_schema && a.is_enabled())
+        // 按键绑定只认无 Shift 的那一下（空缓冲分派的守卫），`?` 这类 Shift 形态碰不到
+        // `slash` 上的绑定 ⇒ 不拿它来挡。
+        shift
+            || !self
+                .bound_action_with_source(vk)
+                .is_some_and(|(a, from_schema)| from_schema && a.is_enabled())
     }
 
     /// 缓冲首字符是通配键，且首位按规则会让位 ⇒ 它是字面码元，整轮组码不作通配。
@@ -382,6 +385,25 @@ impl Coordinator {
                 key
             );
         }
+        if let Some(name) = self.wildcard_lead_overrides_global(key) {
+            warn!(
+                "通配键 {:?} 同时是全局「{}」的按键；本方案首位它作通配，该功能在本方案下按这个键进不去——如需保留，请换通配键或给该功能另配键",
+                key, name
+            );
+        }
+    }
+
+    /// 符号通配键在首位接管了哪一项**全局**绑定（`None` = 没有）。码元撞引导键时
+    /// `code_char_conflicts` 会报，通配接管同样要报，否则用户只看到「反引号进不了临拼了」。
+    fn wildcard_lead_overrides_global(&self, key: char) -> Option<String> {
+        if !self.wildcard_symbol_takes_lead(key) {
+            return None;
+        }
+        let (vk, _) = wildcard_key_vk(key)?;
+        match self.bound_action_with_source(vk)? {
+            (action, false) if action.is_enabled() => Some(format!("{action:?}")),
+            _ => None,
+        }
     }
 }
 
@@ -559,6 +581,17 @@ mod tests {
             Enter,
             "对照：字母键首位无绑定"
         );
+    }
+
+    /// 通配接管全局引导键时要能报出来（出厂反引号 = 临拼触发）；字母键与关闭通配时不报。
+    #[test]
+    fn wildcard_lead_override_of_global_binding_is_reported() {
+        let Some(c) = wubi_z(|cfg| cfg.schema.codetable.wildcard_key = "`".into()) else {
+            return;
+        };
+        assert!(c.wildcard_lead_overrides_global('`').is_some());
+        let Some(c) = wubi_z(|_| {}) else { return };
+        assert!(c.wildcard_lead_overrides_global('z').is_none());
     }
 
     /// 满码后通配键按字面：`aaaa` + `z` 让位，`aaaaz` 不是通配组码；按键裁决与 pattern
