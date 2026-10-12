@@ -251,11 +251,11 @@ addon 在主线程（经 EventDispatcher）按名只读打开 SHM、拷出一帧
   e2e `x_conn_lost_cases`（xkill 菜单窗口的连接、等空闲超时）验 fcitx5 存活并重连。本机 SDK 的
   Fcitx5 5.1.7 上，计时器回调里销毁自身经 ASan 实测不报错（最小复现与 ASan 版 addon 跑 e2e 均无报告），
   别的 Fcitx5 版本未验——修法不依赖哪个版本恰好容忍。
-- **入口**：候选窗右键 → `menu.open`（带工作区）；主菜单经候选菜单末行「更多…」。空闲时是两个
-  状态区动作（`activate` 时挂进 `StatusGroup::InputMethod`）：`windinput-settings`（「清风输入法设置」，
+- **入口**：候选窗右键 → `menu.open`（带工作区）；主菜单另走两个
+  状态区动作（不论组字与否）（`activate` 时挂进 `StatusGroup::InputMethod`）：`windinput-settings`（「清风输入法设置」，
   直接启动设置程序）与 `windinput-menu`（「清风输入法菜单」，`openMainMenuAtPointer`：主菜单弹在
   指针处——X11 按 `pointerPosition()`，Wayland 走屏幕菜单、落点等指针进入底板时取），取舍见设计文档 §5c。
-- e2e 的菜单用例都从组字中的「更多…」开主菜单，关掉后先 Esc 收组字再验打字；菜单用例把空闲超时
+- e2e 的菜单用例都经状态区「清风输入法菜单」开主菜单（`open_main_menu`，指针先挪到固定点）；菜单用例把空闲超时
   调到 5 秒以覆盖超时那条路。客户端扮演 kimpanel（持有 `org.kde.impanel`、发 `TriggerProperty`
   点状态区动作，听 `org.kde.kimpanel.inputmethod` 的 `UpdateProperty` 取当前输入法图标），故
   fcitx5 要 `--enable` 上 `kimpanel`。

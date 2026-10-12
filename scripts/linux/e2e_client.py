@@ -481,25 +481,21 @@ async def impanel(bus):
     return _IMPANEL
 
 
-async def open_main_menu(c, tries=1):
-    """功能主菜单的鼠标入口只剩组字时的候选窗：右键候选 → 候选菜单末行「更多…」→ 主菜单
-    （空闲时的状态区入口是「清风输入法设置」，不再开菜单）。返回主菜单窗口或 None。
-    组字（nihao）在菜单关掉后仍挂着，调用方用 end_composition 收掉再验打字。
+async def open_main_menu(c, tries=1, at=(300, 200)):
+    """功能主菜单的鼠标入口：Fcitx5 状态区动作「清风输入法菜单」（托盘菜单 / kimpanel 面板里
+    那一项），主菜单弹在指针处（先把指针挪到 at）。候选菜单里不再有「更多…」（见 linux-port.md
+    §5c）。返回主菜单窗口或 None。
 
     tries > 1：服务刚重启时 socket 先于整个服务就绪，menu.open 可能被当「未就绪」丢掉，重试。"""
+    panel = await impanel(c.bus)
     for _ in range(tries):
-        menu, _pt = await open_candidate_menu(c)
-        if menu and menu[5]:
-            last = await probe_row(menu, from_bottom=True)
-            if last is not None:
-                sh("xdotool", "mousemove", str(menu[1] + menu[3] // 3), str(last), "click", "1")
-                await asyncio.sleep(0.5)
-                main = await wait_window("wind-menu-0", True)
-                if main and main[5] and main[4] > menu[4]:
-                    return main
-        await c.key("Escape")  # 候选菜单若还开着，这一下收菜单；下面那下收组字
+        sh("xdotool", "mousemove", str(at[0]), str(at[1]))
+        panel.trigger("/Fcitx/windinput-menu")
+        main = await wait_window("wind-menu-0", True)
+        if main and main[5]:
+            return main
+        await c.key("Escape")
         await wait_menus_gone()
-        await end_composition(c)
     return None
 
 
@@ -658,17 +654,17 @@ async def menu_cases(bus, im):
     c.take()
     await typing_works(c, "字母关闭")
 
-    # d) 「更多…」→ 功能主菜单；主菜单比候选菜单高，截图看字形 / 勾选 / 分隔线 / 子菜单箭头。
+    # d) 候选菜单里没有通往主菜单的项（末行是「复制」，协调器单测钉内容）；主菜单走状态区入口。
+    #    主菜单比候选菜单高，截图看字形 / 勾选 / 分隔线 / 子菜单箭头。
     menu, pt = await open_candidate_menu(c)
-    main = None
-    if menu and menu[5]:
-        last = await probe_row(menu, from_bottom=True)
-        if last is not None:
-            sh("xdotool", "mousemove", str(menu[1] + menu[3] // 3), str(last), "click", "1")
-            await asyncio.sleep(0.5)
-            main = await wait_window("wind-menu-0", True)
-    ok = main is not None and main[5] and main[4] > (menu[4] if menu else 0)
-    check("菜单：候选菜单「更多…」→ 功能主菜单", ok, f"候选菜单={menu} 主菜单={main}")
+    cand_h = menu[4] if menu else 0
+    await c.key("Escape")
+    await wait_menus_gone()
+    await end_composition(c)
+    main = await open_main_menu(c)
+    ok = main is not None and main[5] and main[4] > cand_h
+    check("菜单：状态区「清风输入法菜单」→ 功能主菜单（比候选菜单高）", ok,
+          f"候选菜单={menu} 主菜单={main}")
     if ok:
         _, mx, my, mw, mh, _ = main
         path, n = window_has_content(main[0], "menu_main")
@@ -698,8 +694,7 @@ async def menu_cases(bus, im):
                   f"im={watch.im()!r}")
     await c.key("Escape")
     c.take()
-    # 空闲时没有主菜单入口了（状态区入口改成了「清风输入法设置」），主菜单都从组字时的
-    # 「更多…」进——英文态组不了字，先用 Shift 切回中文（顺带验按键这条来源的托盘图标）。
+    # 切回中文（顺带验按键这条来源的托盘图标）：下面点子菜单「全拼」要从中文态验起。
     await c.tap_shift()
     zh = await wait_until(lambda: watch.icon() == ICON_PIN, 2)
     check("托盘图标：Shift 切回中文 → 「拼」（全拼）", zh, f"im={watch.im()!r}")
@@ -708,7 +703,7 @@ async def menu_cases(bus, im):
     #    关掉菜单后组字还挂着，先收掉再验打字。
     main = await open_main_menu(c)
     ok = main is not None
-    check("菜单：组字中经「更多…」再开主菜单", ok, f"menu={main}")
+    check("菜单：状态区入口再开主菜单", ok, f"menu={main}")
     if ok:
         await probe_row(main)
         sub = await wait_window("wind-menu-1", True)
