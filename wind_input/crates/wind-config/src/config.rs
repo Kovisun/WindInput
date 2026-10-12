@@ -7016,6 +7016,19 @@ pub fn default_tooltip_sections() -> Vec<TooltipSection> {
     ]
 }
 
+/// 「释义」段加入之前（论坛 t282）的出厂段列表，**冻结**，只供
+/// [`Config::migrate_stale_factory_tooltip_sections_value`] 认出存量副本。出厂再变时不要改它。
+fn tooltip_sections_before_dict_all() -> Vec<TooltipSection> {
+    vec![
+        TooltipSection::new("完整原文", "", "${full_text}"),
+        TooltipSection::new("编码{(${code_source})}", "", "${word_code}"),
+        TooltipSection::new("拼音", "han", "${char}：${readings}"),
+        TooltipSection::new("拆字", "han", "${char}：${chaizi}{ [${chaizi_code}]}").disabled(),
+        TooltipSection::new("Unicode", "char", "${char}：${unicode}").disabled(),
+        TooltipSection::new("调试", "", "${debug}").disabled(),
+    ]
+}
+
 /// 旧版 `[ui.tooltip]` 的六个开关（缺省值即旧出厂值）。只供迁移使用。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LegacyTooltipFlags {
@@ -8414,6 +8427,33 @@ impl Config {
         Self::migrate_font_size_follow_theme_value(layer);
         Self::migrate_langbar_badge_colors_value(layer);
         Self::migrate_tooltip_sections_value(layer);
+        Self::migrate_stale_factory_tooltip_sections_value(layer);
+    }
+
+    /// 存量迁移（**层内**）：本层的 `ui.tooltip.sections` 与「释义」段加入之前的旧出厂 6 段
+    /// （论坛 t282）逐项相等时，视为冗余剪掉，让这层跟随新出厂。
+    ///
+    /// 以前这份副本会被 [`prune_redundant`] 当冗余删；出厂多了一段之后两边不再相等，它就成了
+    /// 删不掉的「自定义」，用户永远拿不到新段。比较按反序列化后的段（serde 缺省补齐），
+    /// 手写时省掉了 `promote = ""` 之类字段的同样认得；改过任何一处的不动。
+    fn migrate_stale_factory_tooltip_sections_value(layer: &mut toml::Value) {
+        let Some(tip) = layer
+            .get_mut("ui")
+            .and_then(|u| u.get_mut("tooltip"))
+            .and_then(toml::Value::as_table_mut)
+        else {
+            return;
+        };
+        let stale = tip
+            .get("sections")
+            .and_then(|v| v.clone().try_into::<Vec<TooltipSection>>().ok())
+            .is_some_and(|secs| secs == tooltip_sections_before_dict_all());
+        if stale {
+            tip.remove("sections");
+            info!(
+                "ui.tooltip.sections equals the pre-t282 factory list → dropped, following factory"
+            );
+        }
     }
 
     /// 存量迁移（**层内**、须在反序列化前跑）：`[ui.tooltip]` 的六个旧开关 → `sections`。
@@ -8781,6 +8821,7 @@ impl Config {
         Self::migrate_font_size_follow_theme_value(&mut root);
         Self::migrate_langbar_badge_colors_value(&mut root);
         Self::migrate_tooltip_sections_value(&mut root);
+        Self::migrate_stale_factory_tooltip_sections_value(&mut root);
         Self::migrate_comment_max_chars_value(&mut root);
         let migrated = usize::from(root != before);
         // 退役键（[`RETIRED_KEYS`]）先清：它们与出厂默认无关，**不能**被 preset 取不到时的
@@ -12029,6 +12070,56 @@ active = "x"
         let (secs, _) =
             tooltip_after_migration("[ui.tooltip]\ncode_enabled = false\ndebug_enabled = true\n");
         assert_eq!(enabled_labels(&secs), ["完整原文", "拼音", "释义", "调试"]);
+    }
+
+    /// 旧出厂 6 段（加「释义」之前，论坛 t282）原样躺在用户层的：视为冗余剪掉，跟随新出厂。
+    /// 以前 `prune_redundant` 会把它当冗余删，出厂一变它就成了删不掉的「自定义」。
+    /// 字段写得不全（serde 缺省补齐后相等）同样认；改过任何一处的不动。
+    #[test]
+    fn stale_factory_tooltip_sections_follow_new_factory() {
+        let old6 = r#"
+[[ui.tooltip.sections]]
+label = "完整原文"
+template = "${full_text}"
+[[ui.tooltip.sections]]
+label = "编码{(${code_source})}"
+template = "${word_code}"
+[[ui.tooltip.sections]]
+label = "拼音"
+each = "han"
+template = "${char}：${readings}"
+[[ui.tooltip.sections]]
+enabled = false
+label = "拆字"
+each = "han"
+template = "${char}：${chaizi}{ [${chaizi_code}]}"
+[[ui.tooltip.sections]]
+enabled = false
+label = "Unicode"
+each = "char"
+template = "${char}：${unicode}"
+[[ui.tooltip.sections]]
+enabled = false
+label = "调试"
+template = "${debug}"
+"#;
+        let (secs, user) = tooltip_after_migration(old6);
+        assert_eq!(secs, default_tooltip_sections(), "跟随新出厂（含「释义」）");
+        assert!(
+            get_nested(&user, &["ui", "tooltip", "sections"]).is_none(),
+            "本层的旧出厂副本被剪掉：{user:?}"
+        );
+        // 落盘那条路（prune_user_config 用的同一个迁移函数）同样剪。
+        let mut root: toml::Value = toml::from_str(old6).unwrap();
+        Config::migrate_stale_factory_tooltip_sections_value(&mut root);
+        assert!(get_nested(&root, &["ui", "tooltip", "sections"]).is_none());
+
+        // 改过一处（打开了调试段）= 用户自定义，原样保留。
+        let custom = old6.replacen("enabled = false\nlabel = \"调试\"", "label = \"调试\"", 1);
+        assert_ne!(custom, old6, "前提：确实改到了");
+        let (secs, user) = tooltip_after_migration(&custom);
+        assert!(get_nested(&user, &["ui", "tooltip", "sections"]).is_some());
+        assert_eq!(secs.len(), 6, "自定义列表不被加段");
     }
 
     /// 用户已写 `sections` 时以它为准，旧键只清不迁。
