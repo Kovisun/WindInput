@@ -8,7 +8,7 @@
 | 仓库 | microsoft/winget-pkgs，`WindInput.WindInput`（Moniker `windinput`） | ScoopInstaller/Nonportable，`windinput-np` |
 | 清单源 | `scripts/pkg-managers/winget-manifest.sh`（仅首次 / 补交） | `scripts/pkg-managers/scoop/windinput-np.json` |
 | 跟进新版 | `release-published.yml` 的 `winget` job（komac，以库里上一版为模板） | 桶的机器人按 `checkver` / `autoupdate` 自动更新 |
-| 下载地址 | `dl.windinput.com`（旧版由网关回落 GitHub） | GitHub Release |
+| 下载地址 | `dl.windinput.com`（旧版由网关回落 GitHub） | 同左 |
 
 ## 与安装器的契约（wind-installer）
 
@@ -51,6 +51,6 @@
    microsoft/winget-pkgs 提 PR（也可用 `wingetcreate submit`）。
 3. 配置 `secrets.WINGET_TOKEN`（classic PAT，`public_repo`），并在该账号下 fork winget-pkgs；
    此后每次 Release 发布由 CI 自动提 PR。
-4. Scoop：把 `windinput-np.json` 的 `version` / `url` / `hash` 更新到当前版本，向
-   ScoopInstaller/Nonportable 提 PR（`bucket/windinput-np.json`）。之后的版本由桶机器人跟进，
+4. Scoop：桶规定先开 Package Request issue、经维护者认可再提 PR。把 `windinput-np.json` 的
+   `version` / `url` / `hash` 更新到当前版本，向 ScoopInstaller/Nonportable 提 PR（`bucket/windinput-np.json`）。之后的版本由桶机器人跟进，
    本仓那份只作为源稿，**不会**自动同步到桶里——改它要另提 PR。
