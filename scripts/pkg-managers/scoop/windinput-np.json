@@ -15,8 +15,7 @@
     },
     "installer": {
         "script": [
-            "$proc = Start-Process -FilePath \"$dir\\$fname\" -ArgumentList '--silent' -Verb RunAs -Wait -PassThru",
-            "if ($proc.ExitCode -eq 3010) { warn 'Installed. Restart Windows to finish cleaning up files that were in use.' } elseif ($proc.ExitCode -ne 0) { abort \"Installer exited with code $($proc.ExitCode).\" }",
+            "if (!(Invoke-ExternalCommand \"$dir\\$fname\" -ArgumentList '--silent' -RunAs -Activity 'Running WindInput installer...' -ContinueExitCodes @{ 3010 = 'Installed. Restart Windows to finish cleaning up files that were in use.' })) { abort 'WindInput installer failed.' }",
             "Remove-Item -LiteralPath \"$dir\\$fname\" -Force -ErrorAction SilentlyContinue"
         ]
     },
@@ -25,8 +24,7 @@
             "if ($cmd -eq 'update') { return }",
             "$arp = Get-ItemProperty -LiteralPath 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\清风输入法' -ErrorAction SilentlyContinue",
             "if (!$arp -or !$arp.InstallLocation) { warn 'WindInput is not registered in Apps & Features, nothing to uninstall.'; return }",
-            "$proc = Start-Process -FilePath (Join-Path $arp.InstallLocation 'uninstall.exe') -ArgumentList '--silent', '--keep-user-data' -Verb RunAs -Wait -PassThru",
-            "if ($proc.ExitCode -eq 3010) { warn 'Uninstalled. Restart Windows to finish cleaning up files that were in use.' } elseif ($proc.ExitCode -ne 0) { abort \"Uninstaller exited with code $($proc.ExitCode).\" }"
+            "if (!(Invoke-ExternalCommand (Join-Path $arp.InstallLocation 'uninstall.exe') -ArgumentList @('--silent', '--keep-user-data') -RunAs -Activity 'Running WindInput uninstaller...' -ContinueExitCodes @{ 3010 = 'Uninstalled. Restart Windows to finish cleaning up files that were in use.' })) { abort 'WindInput uninstaller failed.' }"
         ]
     },
     "checkver": {

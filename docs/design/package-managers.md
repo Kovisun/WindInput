@@ -16,7 +16,11 @@
 
 - **提权**：`Setup.exe` 与 `uninstall.exe` 都内嵌 `requireAdministrator`，系统在进程启动前就弹
   UAC，调用方拿到的是提权后那个进程的句柄，能正常等待与取退出码 ⇒ winget 写
-  `ElevationRequirement: elevatesSelf`，Scoop 用 `Start-Process -Verb RunAs -Wait -PassThru`。
+  `ElevationRequirement: elevatesSelf`，Scoop 用 `Invoke-ExternalCommand -RunAs`。
+  ⚠️ Scoop 里**不能用 `Start-Process -Wait`**：PowerShell 5 的 `-Wait` 等的是整棵进程树，而安装器
+  装完会拉起常驻的 `wind_input.exe`，于是永远等不到、`scoop install` 卡在「Running installer
+  script...」。`Invoke-ExternalCommand` 只 `WaitForExit()` 安装器本身，并用 `-ContinueExitCodes`
+  把 3010 当成功。
   （安装器里另有一段「未提权就 `runas` 重启自身并 `exit(0)`」的兜底，有清单在就走不到。）
 - **开关**：`--silent` 完全无界面；`--quiet` 显示进度、成功且无需重启时自动关。winget 的
   `Silent` 与 `SilentWithProgress`（默认模式）**都映射到 `--silent`**：`--quiet` 在失败或需要
