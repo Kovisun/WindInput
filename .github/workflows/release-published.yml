@@ -417,7 +417,7 @@ jobs:
         if: steps.gate.outputs.skip != 'true'
         uses: vedantmgoyal9/winget-releaser@v2
         with:
-          identifier: huanfeng.WindInput
+          identifier: WindInput.WindInput
           version: ${{ steps.gate.outputs.version }}
           release-tag: ${{ env.TAG }}
           installers-regex: '^WindInput-Setup-[0-9.]+\.exe$'

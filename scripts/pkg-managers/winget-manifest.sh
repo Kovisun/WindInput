@@ -4,7 +4,7 @@
 # ----------------------------------------------------------------------------
 # 用法：scripts/pkg-managers/winget-manifest.sh <版本> [输出根目录]
 #   例：scripts/pkg-managers/winget-manifest.sh 0.126.0 /tmp/winget
-#   产出：<输出根目录>/manifests/h/huanfeng/WindInput/<版本>/ 下四个 yaml
+#   产出：<输出根目录>/manifests/w/WindInput/WindInput/<版本>/ 下四个 yaml
 #
 # 只在两种场合用它：
 #   1. 首次提交（winget-pkgs 里还没有这个包时，CI 的 komac update 无从更新）；
@@ -20,7 +20,7 @@ OUT_ROOT="${2:-.}"
 VERSION="${VERSION#v}"
 
 REPO="huanfeng/WindInput"
-ID="huanfeng.WindInput"
+ID="WindInput.WindInput"
 MANIFEST_VERSION="1.12.0"
 ASSET="WindInput-Setup-${VERSION}.exe"
 URL="https://github.com/${REPO}/releases/download/v${VERSION}/${ASSET}"
@@ -38,7 +38,7 @@ if [ "$SHA" != "$ACTUAL" ]; then
 fi
 RELEASE_DATE="$(gh release view "v${VERSION}" -R "$REPO" --json publishedAt -q '.publishedAt[0:10]')"
 
-DIR="$OUT_ROOT/manifests/h/huanfeng/WindInput/$VERSION"
+DIR="$OUT_ROOT/manifests/w/WindInput/WindInput/$VERSION"
 mkdir -p "$DIR"
 HEADER="# yaml-language-server: \$schema=https://aka.ms/winget-manifest"
 
@@ -101,7 +101,7 @@ PackageIdentifier: $ID
 PackageVersion: $VERSION
 PackageLocale: zh-CN
 Publisher: 清风输入法 项目
-PublisherUrl: https://github.com/huanfeng
+PublisherUrl: https://windinput.com
 PublisherSupportUrl: https://github.com/$REPO/issues
 Author: huanfeng
 PackageName: 清风输入法
@@ -135,7 +135,7 @@ PackageIdentifier: $ID
 PackageVersion: $VERSION
 PackageLocale: en-US
 Publisher: 清风输入法 项目
-PublisherUrl: https://github.com/huanfeng
+PublisherUrl: https://windinput.com
 PublisherSupportUrl: https://github.com/$REPO/issues
 Author: huanfeng
 PackageName: WindInput

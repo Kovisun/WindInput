@@ -5,7 +5,7 @@
 
 | | winget | Scoop |
 |---|---|---|
-| 仓库 | microsoft/winget-pkgs，`huanfeng.WindInput`（Moniker `windinput`） | ScoopInstaller/Nonportable，`windinput-np` |
+| 仓库 | microsoft/winget-pkgs，`WindInput.WindInput`（Moniker `windinput`） | ScoopInstaller/Nonportable，`windinput-np` |
 | 清单源 | `scripts/pkg-managers/winget-manifest.sh`（仅首次 / 补交） | `scripts/pkg-managers/scoop/windinput-np.json` |
 | 跟进新版 | `release-published.yml` 的 `winget` job（komac，以库里上一版为模板） | 桶的机器人按 `checkver` / `autoupdate` 自动更新 |
 | 下载地址 | GitHub Release | GitHub Release |
@@ -44,7 +44,7 @@
 
 ## 首次上架步骤
 
-1. 等一个**包含 `--keep-user-data` 修复**的正式版发布。
+1. 等一个**包含 `--keep-user-data` 修复**的正式版发布——即 0.126.0（此前各版未正式发布，不入库）。
 2. winget：`scripts/pkg-managers/winget-manifest.sh <版本> <输出目录>` → 在 Windows 上
    `winget validate --manifest <目录>`、`winget install --manifest <目录>` 实测 → 向
    microsoft/winget-pkgs 提 PR（也可用 `wingetcreate submit`）。
