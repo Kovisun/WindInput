@@ -185,6 +185,13 @@ if(WIND_TSF_TESTS)
     endif()
     add_test(NAME toggle_tap_policy COMMAND toggle_tap_policy_test)
 
+    add_executable(host_click_policy_test tests/host_click_policy_test.cpp)
+    target_include_directories(host_click_policy_test PRIVATE ${CMAKE_SOURCE_DIR}/include)
+    if(MSVC)
+        target_compile_options(host_click_policy_test PRIVATE /utf-8 /W4)
+    endif()
+    add_test(NAME host_click_policy COMMAND host_click_policy_test)
+
     add_executable(editable_context_policy_test tests/editable_context_policy_test.cpp)
     target_include_directories(editable_context_policy_test PRIVATE ${CMAKE_SOURCE_DIR}/include)
     if(MSVC)
