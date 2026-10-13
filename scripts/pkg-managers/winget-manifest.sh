@@ -23,7 +23,10 @@ REPO="huanfeng/WindInput"
 ID="WindInput.WindInput"
 MANIFEST_VERSION="1.12.0"
 ASSET="WindInput-Setup-${VERSION}.exe"
-URL="https://github.com/${REPO}/releases/download/v${VERSION}/${ASSET}"
+# 下载地址走官网下载网关（国内快）。它 302 到国内镜像或 R2；R2 只留最新一版，旧版由网关
+# 回落到 GitHub Releases 的同名资产（WindInputSite/worker），所以历史版本清单不会 404。
+# 三处出口是同一个文件，哈希一致；下面仍从 GitHub 取文件算哈希，再核对网关地址可达。
+URL="https://dl.windinput.com/${ASSET}"
 
 # 哈希取 Release 上的 .sha256 sidecar（与 R2 同步、在线升级同一口径），再对实物复核一遍：
 # sidecar 与安装包不符说明 Release 资产被动过（比如签名后只换了 exe），宁可失败也不提交错值。
@@ -34,6 +37,10 @@ SHA="$(awk '{print toupper($1)}' "$WORK/$ASSET.sha256")"
 ACTUAL="$(sha256sum "$WORK/$ASSET" | awk '{print toupper($1)}')"
 if [ "$SHA" != "$ACTUAL" ]; then
     echo "ERROR: sidecar($SHA) 与安装包实际哈希($ACTUAL) 不符" >&2
+    exit 1
+fi
+if ! curl -fsSL -o /dev/null -r 0-0 "$URL"; then
+    echo "ERROR: 下载网关地址不可达: $URL" >&2
     exit 1
 fi
 RELEASE_DATE="$(gh release view "v${VERSION}" -R "$REPO" --json publishedAt -q '.publishedAt[0:10]')"
@@ -52,6 +59,10 @@ ManifestType: version
 ManifestVersion: $MANIFEST_VERSION
 YAML
 
+# SilentWithProgress（winget 的默认模式）也映射到 --silent：安装器的 --quiet 在「需要重启」
+# 时会停在完成页等人关（应用内升级靠这一页提示重启），而原地升级时旧 DLL 被占用、几乎必然
+# 需要重启——winget 下就成了卡住不返回。--silent 无界面，需重启时返回 3010，由 winget 提示。
+#
 # ProductCode = ARP 子键名，wind-installer 以 [app] display_name 建键（config/app.toml）。
 # winget 靠它把「已安装的那份」与本清单对上号，upgrade / uninstall / list 都依赖它；
 # 改 display_name 会让存量安装与清单失联。
@@ -71,7 +82,7 @@ InstallModes:
 - silentWithProgress
 InstallerSwitches:
   Silent: --silent
-  SilentWithProgress: --quiet
+  SilentWithProgress: --silent
   InstallLocation: --dir "<INSTALLPATH>"
 ExpectedReturnCodes:
 - InstallerReturnCode: 1618

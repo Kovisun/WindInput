@@ -411,14 +411,29 @@ jobs:
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
 
-      # 下载地址用 GitHub Release 而不是 R2:R2 只留最新一版(见上面的清理步骤),
-      # winget-pkgs 的历史版本清单会定期回测 URL,指向 R2 的老清单会一个个变成 404 被下架。
+      # 下载地址用官网下载网关 dl.windinput.com(国内快):网关 302 到国内镜像或 R2;R2 只留最新
+      # 一版(见上面的清理步骤),R2 上已清掉的旧版由网关回落 GitHub Releases 的同名资产
+      # (WindInputSite/worker),所以 winget-pkgs 定期回测历史版本 URL 时不会 404。三处出口是
+      # 同一个文件,哈希一致。也因此本 job 不必等 R2 同步完成:还没传上去时网关同样回落 GitHub。
+      #
+      # 直接跑 komac 而不用 winget-releaser:后者只认 GitHub Release 资产的 URL。
+      # komac 下载这个地址算哈希,以库里上一版为模板生成清单,向 microsoft/winget-pkgs 提 PR
+      # (从 token 所属账号的 fork 发出,没有 fork 会自动建)。
       - name: 提交到 winget-pkgs
         if: steps.gate.outputs.skip != 'true'
-        uses: vedantmgoyal9/winget-releaser@v2
-        with:
-          identifier: WindInput.WindInput
-          version: ${{ steps.gate.outputs.version }}
-          release-tag: ${{ env.TAG }}
-          installers-regex: '^WindInput-Setup-[0-9.]+\.exe$'
-          token: ${{ secrets.WINGET_TOKEN }}
+        env:
+          KOMAC_VERSION: 2.16.0
+          KOMAC_SHA256: 7d2707fa6210f2789a3702de49fbd150b736dbf426ee0b9bc8e098736f9fd82d
+          GITHUB_TOKEN: ${{ secrets.WINGET_TOKEN }}
+          VERSION: ${{ steps.gate.outputs.version }}
+        run: |
+          set -euo pipefail
+          F="komac-${KOMAC_VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+          curl -fsSL -o "$F" "https://github.com/russellbanks/Komac/releases/download/v${KOMAC_VERSION}/$F"
+          echo "${KOMAC_SHA256}  $F" | sha256sum -c -
+          tar -xzf "$F" komac
+          ./komac update WindInput.WindInput \
+            --version "$VERSION" \
+            --urls "https://dl.windinput.com/WindInput-Setup-${VERSION}.exe" \
+            --release-notes-url "https://github.com/${{ github.repository }}/releases/tag/${TAG}" \
+            --submit

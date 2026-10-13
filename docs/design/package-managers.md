@@ -8,7 +8,7 @@
 | 仓库 | microsoft/winget-pkgs，`WindInput.WindInput`（Moniker `windinput`） | ScoopInstaller/Nonportable，`windinput-np` |
 | 清单源 | `scripts/pkg-managers/winget-manifest.sh`（仅首次 / 补交） | `scripts/pkg-managers/scoop/windinput-np.json` |
 | 跟进新版 | `release-published.yml` 的 `winget` job（komac，以库里上一版为模板） | 桶的机器人按 `checkver` / `autoupdate` 自动更新 |
-| 下载地址 | GitHub Release | GitHub Release |
+| 下载地址 | `dl.windinput.com`（旧版由网关回落 GitHub） | GitHub Release |
 
 ## 与安装器的契约（wind-installer）
 
@@ -18,8 +18,9 @@
   UAC，调用方拿到的是提权后那个进程的句柄，能正常等待与取退出码 ⇒ winget 写
   `ElevationRequirement: elevatesSelf`，Scoop 用 `Start-Process -Verb RunAs -Wait -PassThru`。
   （安装器里另有一段「未提权就 `runas` 重启自身并 `exit(0)`」的兜底，有清单在就走不到。）
-- **开关**：`--silent` 完全无界面；`--quiet` 显示进度、装完自动关（winget 默认走这条）。
-  失败或需要重启时 `--quiet` 的完成页会停住等人关——winget 前台运行时可以接受。
+- **开关**：`--silent` 完全无界面；`--quiet` 显示进度、成功且无需重启时自动关。winget 的
+  `Silent` 与 `SilentWithProgress`（默认模式）**都映射到 `--silent`**：`--quiet` 在失败或需要
+  重启时停在完成页等人关，而原地升级时旧 DLL 被占用、几乎必然需要重启，winget 就卡住不返回。
 - **退出码**：`3010` = 成功但需重启，`1618` = 另一实例在运行（没做任何事）。
 - **ARP**：键名 = `config/app.toml` 的 `[app] display_name`（「清风输入法」），即 winget 的
   `ProductCode`，也是 Scoop 卸载脚本找安装目录的入口。**改 display_name 会让存量安装与两边
