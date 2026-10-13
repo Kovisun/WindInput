@@ -2,6 +2,7 @@
 #include "DeferredCompositionPolicy.h"
 #include "HoldReplayPolicy.h"
 #include "NumberKeyPolicy.h"
+#include "SmartPunctPrevChar.h"
 #include "TextService.h"
 #include "IPCClient.h"
 #include "HotkeyManager.h"
@@ -910,11 +911,7 @@ STDAPI CKeyEventSink::OnTestKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM 
                 _LogKeyDecision(L"test_down", _pTextService->GetFocusSessionId(), wParam, modifiers, keyType,
                                 isChineseMode, hasComposition, _hasCandidates, hasInputSession, FALSE,
                                 L"chinese_punct_passthrough");
-                // 透传的是符号，光标前字符已不再是数字 —— 与函数末尾那处统一记账**同源**
-                // （`_DigitCharFromVk` 对 Shift+数字恒返回 0，正是「清零」语义）。
-                // 提前 return 会跳过末尾那处，不补的话「打 3 → 打 @ → 打 .」里的 `.` 会
-                // 继承到陈旧的 `3`，被「数字后智能标点」误判成数字后而直出半角。
-                _NotePassthroughKey(wParam, modifiers);
+                // 透传的是符号，输入序列由出口守卫清零（_NoteInputSequenceAtExit）。
                 return S_OK; // pfEaten 保持 FALSE → 同步透传
             }
             // Punctuation: always eat in Chinese mode.
@@ -956,24 +953,32 @@ STDAPI CKeyEventSink::OnTestKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM 
     }
     // else: not in Chinese mode and no input session — pass through
 
-    // Track digit pass-through for smart punctuation fallback.
-    // When digits pass through without reaching Go (no input session),
-    // record them so the next punctuation key sent to Go carries this info via prevChar.
-    // This handles editors (e.g., EverEdit) where ITfTextEditSink can't read text.
-    //
-    // 中文模式空缓冲下数字键（含小键盘，ClassifyInputKey 归 Number）不被吃，必经此处。
-    // 判据统一交给 _DigitCharFromVk：非数字键返回 0，正好落进「清零」语义。
-    if (*pfEaten == FALSE)
-    {
-        _NotePassthroughKey(wParam, modifiers);
-    }
-
+    // 中文模式空缓冲下数字键（含小键盘，ClassifyInputKey 归 Number）不被吃，从这里透传；
+    // 输入序列记账在出口守卫里做（_NoteInputSequenceAtExit）。
     return S_OK;
 }
 
-void CKeyEventSink::_NotePassthroughKey(WPARAM vk, uint32_t modifiers)
+void CKeyEventSink::_TrackCommittedTextForSmartPunct(const std::wstring& text)
 {
-    _lastPassthroughDigit = _DigitCharFromVk(vk, modifiers);
+    if (text.empty())
+        return;
+    WCHAR last = text.back();
+    _lastPassthroughDigit = (last >= L'0' && last <= L'9') ? last : 0;
+}
+
+void CKeyEventSink::_NoteInputSequenceAtExit(WPARAM vk, bool eaten, bool suppressed)
+{
+    if (!WindPassthrough::IsUserKeyIntoHost((uint32_t)vk, eaten, suppressed))
+        return;
+    // 判据统一交给 _DigitCharFromVk：非数字键返回 0，正好落进「清零」语义。
+    // 修饰键用 GetKeyState（与正在处理的这条按键消息同步），不用 GetCurrentModifiers：后者
+    // 掺了 GetAsyncKeyState 的实时值，宿主积压或「吃了又吐」隔着一次 IPC 时，用户可能已按下
+    // 下一个字符要用的 Shift，「3:」里的 3 会被判成 Shift+3 而漏记。
+    uint32_t mods = 0;
+    if (GetKeyState(VK_SHIFT) & 0x8000) mods |= KEYMOD_SHIFT;
+    if (GetKeyState(VK_CONTROL) & 0x8000) mods |= KEYMOD_CTRL;
+    if (GetKeyState(VK_MENU) & 0x8000) mods |= KEYMOD_ALT;
+    _lastPassthroughDigit = _DigitCharFromVk(vk, mods);
     _pTextService->InvalidateCachedPrevChar();
 }
 
@@ -1009,7 +1014,7 @@ STDAPI CKeyEventSink::OnKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM lPar
             //   · 组合态标志：入队到触发键抵达之间是有窗口的，用户在窗口里敲的键会让协调器
             //     回 UpdateComposition 重新开组合。在入队时清标志，就会出现「DLL 认为没有
             //     组合、文档里却有」的错位。
-            //   · 备用 prevChar：它记的是「已落进文档、光标紧邻的那个字符」，入队时那件事
+            //   · 输入序列记账：它记的是「已落进文档、光标紧邻的那个字符」，入队时那件事
             //     还没发生；窗口里插进来的数字键会把它改成相反的值。
             //   · 配对收尾：左移是注入给宿主的真实方向键，宿主按它自己的插入点解释，而那份
             //     插入点只有在编辑真的落定之后才是新的。
@@ -1500,8 +1505,7 @@ STDAPI CKeyEventSink::OnKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM lPar
         }
         else if (numberPassthrough)
         {
-            // 与 OnTestKeyDown 末尾同一记账：宿主自己出的数字，供下一个标点的数字后智能标点用。
-            _NotePassthroughKey(wParam, modifiers);
+            // 宿主自己出的数字：输入序列由出口守卫记下（_NoteInputSequenceAtExit）。
             _LogKeyDecision(L"down", _pTextService->GetFocusSessionId(), wParam, modifiers, HotkeyType::Number,
                             isChineseMode, hasComposition, _hasCandidates, hasInputSession, FALSE, L"number_passthrough");
         }
@@ -1678,19 +1682,8 @@ STDAPI CKeyEventSink::OnKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM lPar
         return S_OK;
     }
 
-    // 数字键"吃了又吐"缺口修复：有候选时数字键被 TSF eat（pfEaten=TRUE）发给 coordinator，
-    // coordinator 返回 PassThrough → OnKeyDown 返 FALSE。此时 OnTestKeyDown 里
-    // _lastPassthroughDigit 未设置（因彼时 pfEaten=TRUE 跳过了设置代码）。
-    // 在此补设，确保数字后智能标点备用路径在 OnEndEdit 不触发的应用中仍能正确获取 prevChar。
-    // 这里只补设不清零：非数字键的清零由 _SendKeyToService 那处负责（它能看到所有
-    // 送往服务端的键，包括本处 pfEaten 为真、根本不进这个分支的那些）。
-    if (!(*pfEaten))
-    {
-        if (_DigitCharFromVk(wParam, modifiers))
-        {
-            _NotePassthroughKey(wParam, modifiers);
-        }
-    }
+    // 数字键"吃了又吐"（有候选时被吃、coordinator 回 PassThrough）：OnKeyDown 返 FALSE，
+    // 输入序列由出口守卫记下（_NoteInputSequenceAtExit），无须在此补设。
 
     // Ctrl/Alt combo during active session: decide pass-through based on Go's response.
     // If Go handled the key as a candidate operation (pin/delete) and the composition
@@ -2282,19 +2275,19 @@ BOOL CKeyEventSink::_SendKeyToService(uint32_t keyCode, uint32_t modifiers, uint
     // when we pass keys through to the system (e.g., Ctrl+S for save).
     // Using stale _modsState causes all subsequent keys to appear as having Ctrl held.
 
-    // Get character before caret for smart punctuation:
-    // 1. Prefer ITfTextEditSink::OnEndEdit cache (works in Notepad, browsers, etc.)
-    //    Consume (clear) to prevent stale values in apps where OnEndEdit fires late (e.g., WeChat)
-    // 2. Fallback to digit pass-through tracking (for editors like EverEdit where TSF text access fails)
-    uint16_t prevChar = (uint16_t)_pTextService->ConsumeCachedPrevChar();
-    // 备用通路的消费判据：**任何标点键**都如实带上 prevChar，不在这里挑「哪些标点算数」。
+    // prevChar 怎么取见 SmartPunctPrevChar.h：数字后智能标点**只认输入序列**
+    // （_lastPassthroughDigit），TSF 现读值里的 ASCII 数字一律抹掉；非数字的现读值照常上报，
+    // 供智能符号 press2 守卫比对。现读值仍要 Consume（清空），防微信这类 OnEndEdit 晚到的
+    // 宿主拿到上一键的旧值。
+    //
+    // 序列值的消费判据：**任何标点键**都如实带上，不在这里挑「哪些标点算数」。
     //
     // ★ 这里曾硬编码 `keyCode == VK_OEM_PERIOD || VK_OEM_COMMA`，等于把服务端的
     // `input.punct.smart_list` 抄了一份到 DLL——而出厂默认就是 ".,:"，冒号从设计上就
-    // 拿不到备用值，且会落进下面的 else 把已记的数字**清零**（连带毁掉紧随其后的句号）。
+    // 拿不到序列值，且会落进下面的清零（连带毁掉紧随其后的句号）。
     // 用户自定义 `?` `!` 等更是全军覆没。同一语义判据写在两处，必然漂移。
     //
-    // 分工边界：DLL 只上报**事实**（光标前一个字符是什么），服务端 wind-punct 的
+    // 分工边界：DLL 只上报**事实**（最近一笔输入是不是数字），服务端 wind-punct 的
     // `is_smart_punct_after_digit` 持有全部**策略**（smart_after_digit 总开关 +
     // smart_list 成员判定 + 0x30..=0x39 数字判定）。多报一个标点键的 prevChar 不会
     // 有副作用：不在 smart_list 里的标点，服务端自己会判 false。
@@ -2303,24 +2296,27 @@ BOOL CKeyEventSink::_SendKeyToService(uint32_t keyCode, uint32_t modifiers, uint
     //
     // 用 ClassifyInputKey 而非 IsPunctuationKey：前者额外覆盖 Shift+主键盘数字
     // （`!` `@` `#`…，见 HotkeyManager.cpp 的 Number 分支），后者只列 11 个 OEM 键。
+    //
+    // 只有 keydown 消费/清零序列：keyup 不产出输入（单击 Shift 切中英、CapsLock 抬起也走这里），
+    // 让它清零会把「3 → 单击 Shift → .」里的数字吃掉。
+    const bool isKeyDown = (eventType == KEY_EVENT_DOWN);
     const BOOL isPunctKey =
         (CHotkeyManager::ClassifyInputKey(keyCode, modifiers) == HotkeyType::Punctuation);
-    if (prevChar == 0 && _lastPassthroughDigit != 0 && isPunctKey)
+    const uint16_t prevChar = WindSmartPunct::ResolvePrevChar(
+        (uint16_t)_pTextService->ConsumeCachedPrevChar(), (uint16_t)_lastPassthroughDigit,
+        isKeyDown && isPunctKey != FALSE);
+    if (isKeyDown && _lastPassthroughDigit != 0)
     {
-        prevChar = (uint16_t)_lastPassthroughDigit;
-        _lastPassthroughDigit = 0;  // 已消费，清除以避免后续标点误判
-        // 真机验证锚点：读不回文档的宿主（EverEdit 等）走到这里才说明备用通路生效。
-        // 主路径能读回时本分支不执行——两者症状相同、成因不同，只有这条日志分得开。
-        // 刻意不打字符内容（那是用户输入），只标记路径与键码。
-        WIND_LOG_DEBUG_FMT(L"smart_punct_digit_fallback: prevChar from passthrough digit, vk=0x%02X\n",
-                           keyCode);
-    }
-    // Clear stale digit passthrough when any non-punctuation key is sent to the service.
-    // Without this, _lastPassthroughDigit persists through eaten keys (composition,
-    // candidate selection, etc.), causing e.g. "58的。" to incorrectly use digit
-    // fallback and output "." instead of "。" in non-TSF apps.
-    else if (_lastPassthroughDigit != 0 && !isPunctKey)
-    {
+        if (isPunctKey)
+        {
+            // 真机验证锚点：只有这条日志能证明「数字后」是由序列判出来的。
+            // 刻意不打字符内容（那是用户输入），只标记路径与键码。
+            WIND_LOG_DEBUG_FMT(L"smart_punct_after_digit: prevChar from input sequence, vk=0x%02X\n",
+                               keyCode);
+        }
+        // 标点键：已消费，清除以避免后续标点误判。
+        // 非标点键：_lastPassthroughDigit 会穿过被吃掉的键（组字、选候选等）残留，不清的话
+        // 「58的。」里的 `。` 会继承到 `8` 而出成 `.`。
         _lastPassthroughDigit = 0;
     }
 
@@ -2456,7 +2452,7 @@ BOOL CKeyEventSink::_HandleServiceResponse()
                 _pTextService->CommitText(response.text, FALSE, response.replacingHeld ? TRUE : FALSE);
                 QueryPerformanceCounter(&ctMid1);
 
-                // 上屏文本末位即新的「光标前一字符」，据此维护备用 prevChar（见 header 注释）。
+                // 上屏文本末位即新的「光标前一字符」，据此维护输入序列记账（见 header 注释）。
                 // 只在这条「提交后不留组合」的分支记：restartComposition 分支提交后立刻又起了
                 // 组合，光标前是组合内容而非 response.text 末位，记了就是错的。
                 _TrackCommittedTextForSmartPunct(response.text);
@@ -2575,7 +2571,7 @@ BOOL CKeyEventSink::_HandleServiceResponse()
         {
             WIND_LOG_DEBUG(L"Processing InsertTextWithCursor response\n");
             _pTextService->CommitText(response.text);
-            // 备用 prevChar：cursorOffset==0 时末位就是光标前一字符；cursorOffset>0（配对
+            // 输入序列记账：cursorOffset==0 时末位就是光标前一字符；cursorOffset>0（配对
             // 插入后光标回退到中间）时光标前其实是左符号，末位取的是右符号——但两者都是
             // 配对符号、都不是数字，结论同为清零，故无须为配对单独分支。
             _TrackCommittedTextForSmartPunct(response.text);
@@ -2673,6 +2669,8 @@ BOOL CKeyEventSink::_HandleServiceResponse()
                                response.text.c_str(), response.newComposition.c_str(),
                                response.holdTimeoutMs);
             _pTextService->CommitText(response.text);
+            // 不记输入序列：余码组合随后就开，光标前是组合内容而非 response.text 末位
+            // （同 restartComposition 分支的理由）。
             _isComposing = FALSE;
             _hasCandidates = FALSE;
             _pTextService->NotifyCandidatesVisibilityChanged(FALSE);
@@ -3160,6 +3158,8 @@ void CKeyEventSink::_HandleCommitResult(uint16_t barrierSeq, const std::wstring&
     {
         // No new composition: atomic commit (end composition + insert text)
         _pTextService->CommitText(text);
+        // 输入序列记账（见 header）。只在不留组合时记，理由同 _HandleServiceResponse 那处。
+        _TrackCommittedTextForSmartPunct(text);
         _isComposing = FALSE;
         _hasCandidates = FALSE;
     }

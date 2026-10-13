@@ -266,7 +266,8 @@ public:
 
     // 有键透传进宿主 ⇒ 缓存的是按键**之前**的文档快照，已过期，作废。
     // 能读文档的宿主随后会触发 OnEndEdit 重新填上真实值；Tabby（xterm.js）这类不把输入写进
-    // TSF 文档的宿主不会触发，作废后 prevChar 落空，才轮得到 _lastPassthroughDigit 备用通路。
+    // TSF 文档的宿主不会触发，作废后 prevChar 落空（智能符号 press2 守卫按「读不回」处理）。
+    // 数字后智能标点不读这个缓存，只认输入序列，见 SmartPunctPrevChar.h。
     void InvalidateCachedPrevChar() { _cachedPrevChar = 0; }
 
     // Get and send caret position to Go Service

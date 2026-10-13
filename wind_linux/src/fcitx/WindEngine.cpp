@@ -528,8 +528,8 @@ void WindEngine::sendCaretUpdate(fcitx::InputContext* ic)
 
 uint16_t WindEngine::prevCharFor(fcitx::InputContext* ic)
 {
-    // 主通路：宿主支持 surrounding text 就如实报光标前那个字符（对位 Windows TSF 现读文档）。
-    // 读不到才退回本端记账（对位 macOS 唯一的备用通路）。
+    // 「数字后」只认本端记账，宿主光标前字符只在非数字时照报（取舍见 DigitTracker::resolve）。
+    uint16_t hostChar = 0;
     if (ic->capabilityFlags().test(fcitx::CapabilityFlag::SurroundingText)) {
         const auto& st = ic->surroundingText();
         if (st.isValid() && st.cursor() > 0 && st.anchor() == st.cursor()) {
@@ -539,11 +539,11 @@ uint16_t WindEngine::prevCharFor(fcitx::InputContext* ic)
                 auto it = fcitx::utf8::nextNChar(text.begin(), st.cursor() - 1);
                 uint32_t cp = fcitx::utf8::getChar(it, text.end());
                 // 服务端的 prev_char 是 UTF-16 码元：BMP 外的字符报不出，按「不可用」处理。
-                return cp < 0x10000 && cp != fcitx::utf8::INVALID_CHAR ? uint16_t(cp) : 0;
+                hostChar = cp < 0x10000 && cp != fcitx::utf8::INVALID_CHAR ? uint16_t(cp) : 0;
             }
         }
     }
-    return router_.digitTracker().prevChar();
+    return router_.digitTracker().resolve(hostChar);
 }
 
 bool WindEngine::applyResponse(fcitx::InputContext* ic, const Frame& resp, bool hostShortcut)
