@@ -4,6 +4,7 @@ name: Release Published
 #   1. notify-docs  通知文档仓同步更新记录 → data/releases.json → 驱动 /changelog 与 /download
 #   2. sync-to-r2   把安装包与在线升级元数据推到 Cloudflare R2(dl.windinput.com)
 #   3. winget       向 microsoft/winget-pkgs 提交新版本清单(`winget install windinput`)
+#   4. scoop        通知 huanfeng/scoop-bucket 把 windinput-np 升到新版(`scoop install huanfeng/windinput-np`)
 #
 # 两平台各一套元数据:latest.json(exeUrl,Windows)与 latest-mac.json(pkgUrl,macOS)。
 # 键名故意不同,好让「客户端读到另一平台的元数据」在解析阶段就被拒 —— 客户端侧对应实现见
@@ -20,6 +21,7 @@ name: Release Published
 #     CLOUDFLARE_API_TOKEN   具备 R2 Edit 权限的 Token
 #     CLOUDFLARE_ACCOUNT_ID  Cloudflare 账户 ID
 #     WINGET_TOKEN           classic PAT(public_repo),其所有者名下要有 microsoft/winget-pkgs 的 fork
+#     SCOOP_TOKEN            对 huanfeng/scoop-bucket 有 contents:write 的 PAT(与 wind-dict 等姊妹项目同名)
 #
 # ⚠️ 依赖 release.yml 的 draft: true。GitHub 不会为 GITHUB_TOKEN 发起的动作触发新 workflow
 # (防递归),若把 release.yml 改成直接发布正式版,release:published 事件不会产生,本工作流
@@ -382,8 +384,6 @@ jobs:
             echo "Linux: 无需清理(本次同步=${LINUX_SYNCED:-false}, 前一版本=${PREV_LINUX:-<none>})"
           fi
 
-  # Scoop 不在这里:windinput-np 在官方 Nonportable 桶,由桶的机器人按清单里的
-  # checkver/autoupdate 自动跟进新版,本仓无需推送(清单源见 scripts/pkg-managers/scoop/)。
   winget:
     name: 提交 winget 清单
     runs-on: ubuntu-latest
@@ -437,3 +437,37 @@ jobs:
             --urls "https://dl.windinput.com/WindInput-Setup-${VERSION}.exe" \
             --release-notes-url "https://github.com/${{ github.repository }}/releases/tag/${TAG}" \
             --submit
+
+  # 自有桶 huanfeng/scoop-bucket 的 Excavator 定时任务已被 GitHub 以长期无活动停用,不能指望它按
+  # checkver 自动跟进,故由这里主动通知。对端 update-installer-manifest.yml 只改 version/url/hash:
+  # URL 按桶内清单自己的 autoupdate 模板生成,哈希由对端下载后自算,这里只报版本号。
+  # 官方 Nonportable 桶(若收录)由其机器人按 checkver/autoupdate 跟进,与此无关。
+  scoop:
+    name: 通知 Scoop 桶
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+      PRERELEASE: ${{ github.event.release.prerelease || false }}
+      TOKEN: ${{ secrets.SCOOP_TOKEN }}
+    steps:
+      - name: 发送 repository_dispatch
+        run: |
+          set -euo pipefail
+          VERSION="${TAG#v}"
+          if [ -z "$TOKEN" ]; then
+            echo "::warning::未配置 secrets.SCOOP_TOKEN,跳过 Scoop 桶更新。"
+            exit 0
+          fi
+          # 与 winget 同一条判据:Scoop 同样没有渠道概念,预发布不进桶。
+          if [ "$PRERELEASE" = "true" ] || [[ "$VERSION" == *-* ]]; then
+            echo "::notice::$TAG 是预发布版本,不更新 Scoop 桶。"
+            exit 0
+          fi
+          jq -n --arg version "$VERSION" \
+            '{event_type: "update-installer-manifest", client_payload: {app: "windinput-np", version: $version}}' \
+            | curl -fsS -X POST \
+                -H "Accept: application/vnd.github+json" \
+                -H "Authorization: Bearer $TOKEN" \
+                "https://api.github.com/repos/huanfeng/scoop-bucket/dispatches" \
+                --data-binary @-
+          echo "已通知 huanfeng/scoop-bucket 更新 windinput-np 到 $VERSION"

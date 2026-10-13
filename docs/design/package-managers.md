@@ -1,13 +1,14 @@
 # 包管理器分发（winget / Scoop）
 
-目标：`winget install windinput`、`scoop install windinput-np`。两者都只是**调用标准安装包**
+目标：`winget install windinput`、`scoop install windinput-np`（目前在自有桶：先
+`scoop bucket add huanfeng https://github.com/huanfeng/scoop-bucket`）。两者都只是**调用标准安装包**
 `WindInput-Setup-<版本>.exe`，不另出产物；输入法要注册 TSF、写 HKLM，没有真正的便携形态。
 
 | | winget | Scoop |
 |---|---|---|
-| 仓库 | microsoft/winget-pkgs，`WindInput.WindInput`（Moniker `windinput`） | ScoopInstaller/Nonportable，`windinput-np` |
+| 仓库 | microsoft/winget-pkgs，`WindInput.WindInput`（Moniker `windinput`） | 自有桶 huanfeng/scoop-bucket，`windinput-np`；官方 Nonportable 待收录（[#647](https://github.com/ScoopInstaller/Nonportable/issues/647)） |
 | 清单源 | `scripts/pkg-managers/winget-manifest.sh`（仅首次 / 补交） | `scripts/pkg-managers/scoop/windinput-np.json` |
-| 跟进新版 | `release-published.yml` 的 `winget` job（komac，以库里上一版为模板） | 桶的机器人按 `checkver` / `autoupdate` 自动更新 |
+| 跟进新版 | `release-published.yml` 的 `winget` job（komac，以库里上一版为模板） | `release-published.yml` 的 `scoop` job 发 dispatch，桶内 `update-installer-manifest.yml` 按清单的 `autoupdate` 模板改 version/url/hash（桶的 Excavator 已停用）；Nonportable 由其机器人按 `checkver` 跟进 |
 | 下载地址 | `dl.windinput.com`（旧版由网关回落 GitHub） | 同左 |
 
 ## 与安装器的契约（wind-installer）
@@ -55,6 +56,9 @@
    microsoft/winget-pkgs 提 PR（也可用 `wingetcreate submit`）。
 3. 配置 `secrets.WINGET_TOKEN`（classic PAT，`public_repo`），并在该账号下 fork winget-pkgs；
    此后每次 Release 发布由 CI 自动提 PR。
-4. Scoop：桶规定先开 Package Request issue、经维护者认可再提 PR。把 `windinput-np.json` 的
-   `version` / `url` / `hash` 更新到当前版本，向 ScoopInstaller/Nonportable 提 PR（`bucket/windinput-np.json`）。之后的版本由桶机器人跟进，
-   本仓那份只作为源稿，**不会**自动同步到桶里——改它要另提 PR。
+4. Scoop：
+   - 自有桶：`windinput-np.json` 原样放进 huanfeng/scoop-bucket 的 `bucket/`；WindInput 的
+     `secrets.SCOOP_TOKEN`（对该桶 contents:write）配好后，每次 Release 由 `scoop` job 自动升版。
+   - 官方 Nonportable：桶规定先开 Package Request issue、经维护者认可再提 PR
+     （`bucket/windinput-np.json`），之后由桶机器人跟进。
+   - 本仓那份只作为源稿，**不会**自动同步到任何桶——改安装/卸载脚本要另去两个桶各改一次。
