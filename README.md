@@ -11,6 +11,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/platform-Windows%2010%2F11-brightgreen" alt="Platform">
   <img src="https://img.shields.io/badge/macOS-12%2B-blue" alt="macOS">
+  <img src="https://img.shields.io/badge/Linux-Fcitx5%20%28preview%29-orange" alt="Linux">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="License">
 </p>
 
@@ -32,7 +33,7 @@
 - **图形设置** — 配套设置工具，配置可视化调整，修改即时生效
 - **亮暗主题** — 支持亮色和暗色主题，可随系统自动切换
 - **轻量运行** — Rust 实现，资源占用低，启动迅速
-- **跨平台** — 同一套核心引擎，支持 Windows 10/11 与 macOS 12+
+- **跨平台** — 同一套核心引擎，支持 Windows 10/11、macOS 12+ 与 Linux（Fcitx5，预览版）
 
 ## 安装
 
@@ -41,6 +42,10 @@
 - **Windows 10/11（64 位）** — 安装版或便携版，安装后按 `Win + Space` 切换到清风输入法
 - **macOS 12+** — `.pkg` 通用安装包（Apple Silicon / Intel），安装后在
   「系统设置 → 键盘 → 文本输入 → 编辑」中添加清风输入法，再从输入法菜单切换
+- **Linux（预览版）** — `.deb` 安装包（amd64 / arm64，Ubuntu 22.04+、Debian 系发行版），以
+  Fcitx5 输入法引擎的形式工作；`sudo apt install ./WindInput-*.deb` 安装后，在「Fcitx5 配置」中
+  把清风输入法加入输入法列表。系统输入法框架需为 Fcitx5，KDE Plasma 等桌面的额外设置与已知限制见
+  [wind_linux/README.md](wind_linux/README.md)
 
 Windows 版的程序文件与安装包已做数字签名；SmartScreen 需要下载量积累信誉，新版本发布初期
 仍可能拦截，按提示「更多信息 → 仍要运行」继续即可。macOS 版尚未做苹果签名与公证，被
@@ -71,7 +76,7 @@ Gatekeeper 拦下时到「系统设置 → 隐私与安全性」放行。
 | wind-setting | Rust | 图形设置程序 | 暂未开源 |
 
 其中 wind-installer 与 wind-portable 只用于 Windows；macOS 的 `.pkg` 安装包由本仓库的
-`scripts/mac/dev.sh pkg` 直接打包，无需额外仓库。
+`scripts/mac/dev.sh pkg` 直接打包，Linux 的 `.deb` 由 `scripts/linux/package-deb.sh` 打包，均无需额外仓库。
 
 这些配套项目都是可选的：与本仓库放在同级目录时构建脚本会一并构建，缺失则自动跳过，
 核心输入法本身可独立构建和运行。完整成品请从[下载页](https://windinput.com/download)获取。
