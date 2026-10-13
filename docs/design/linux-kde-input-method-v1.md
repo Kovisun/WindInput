@@ -1,6 +1,8 @@
 # Linux：KDE Plasma（input-method-v1）候选窗适配
 
-> 状态：**方案定稿，未实施**（2026-10-12）。验证环境：PVE 上新建 Plasma 6 虚拟机（待建）。
+> 状态：**已实施并真机验证**（2026-10-12，分支 `feat/kde-im-v1`）。验证环境：PVE 虚拟机
+> Kubuntu 26.04.1 / KWin 6.6.6 / Fcitx5 5.1.19（`admin@192.168.5.51`）。
+> 实施中追加：Wayland 下候选窗右键菜单改开在屏幕坐标系（v1 / v2 共用），见 §5。
 > 起因：GH#192——KDE Plasma 6 / Wayland 下 Wayland 原生应用（Konsole、Kate、KRunner、启动器）
 > 没有候选窗。KWin 只实现 input-method-v1，`WaylandCandidatePanel` 只接了 v2。
 > 关联：`wind_linux/src/fcitx/WaylandPanel.{h,cpp}`、`wind_linux/src/fcitx/WindEngine.cpp`、
@@ -74,7 +76,22 @@ registry 绑定。
 - [ ] 回归：XWayland 应用（Chrome / VS Code）走 X11 不变；treeland（192.168.5.50）v2 不变；
       既有 e2e 全过
 
-## 4. 文档与收尾
+## 4. 真机结果（2026-10-12）
+
+- 修复前（main 打的包）：Konsole 候选窗钉在左上角、约 1 秒延迟（服务端等光标坐标超时）。
+- 修复后：Konsole / Kate / KRunner / 启动器候选窗跟随光标、无延迟；屏幕底部翻到上方；鼠标点选、
+  滚轮、悬停正常；反复 Ctrl+Space 触发 classicui 提示后候选窗照常出现；退役 15 个 surface 全部
+  销毁，待销毁峰值 1。
+- 新应用默认不是清风：Fcitx5 默认 `ShareInputState=No` / `ActiveByDefault=False`（Deepin 出厂
+  `ShareInputState=All` 所以看不出）。定为 Fcitx5 行为，只写文档。
+
+## 5. 追加：候选窗右键菜单开在屏幕坐标系
+
+原来候选右键菜单合成进候选窗同一张位图：菜单一大位图跟着变大，合成器重摆整块，候选窗被挤走
+（KWin、treeland 同此）。改为复用状态气泡菜单的屏幕菜单——全屏透明 layer 底板，落点取指针进入
+底板时的输出坐标，候选窗不动，并补上「候选菜单点外部不收」。没有 layer-shell 时退回旧路径。
+
+## 6. 文档与收尾
 - `wind_linux/AGENTS.md` 差距表、`wind_linux/README.md`「已知限制」、文档站 linux 页：去掉
   KDE 限制，补上「虚拟键盘选 Fcitx 5」的配置步骤。
 - 回复 GH#192，请反馈者用测试分支复测。

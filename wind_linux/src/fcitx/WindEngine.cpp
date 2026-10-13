@@ -225,7 +225,7 @@ WindEngine::WindEngine(fcitx::Instance* instance) : instance_(instance)
     }
     // 输出缩放变了（改系统缩放 / 换屏）：焦点正在 Wayland 应用里就重新上报，服务端下一帧起按新缩放画。
     wlPanel_->setOnScaleChanged([this]() {
-        if (fcitx::InputContext* ic = focusedIC(); ic && WaylandCandidatePanel::handles(ic)) {
+        if (fcitx::InputContext* ic = focusedIC(); ic && wlPanel_->handles(ic)) {
             sendHostDisplay(ic);
         }
     });
@@ -236,6 +236,11 @@ WindEngine::WindEngine(fcitx::Instance* instance) : instance_(instance)
     settingsAction_.connect<fcitx::SimpleAction::Activated>(
         [this](fcitx::InputContext*) { launchSettings({}); });
     instance_->userInterfaceManager().registerAction("windinput-settings", &settingsAction_);
+    menuAction_.setShortText("清风输入法菜单");
+    menuAction_.setIcon("application-menu");
+    menuAction_.connect<fcitx::SimpleAction::Activated>(
+        [this](fcitx::InputContext*) { openMainMenuAtPointer(); });
+    instance_->userInterfaceManager().registerAction("windinput-menu", &menuAction_);
 
     // Fcitx5 出厂 AltTriggerKeys=Shift_L：它在 InputMethod 阶段先于引擎处理按键，按下即把 Shift
     // 过滤掉、松开时切到组里第一个输入法——「Shift 切中英」永远到不了本引擎。用户不该为此去改
@@ -477,12 +482,12 @@ void WindEngine::sendHostDisplay(fcitx::InputContext* ic)
     bool caretFree = false;
     double scale = panel_->hostScale();
 #ifdef WIND_HAVE_WAYLAND
-    if (wlPanel_ && WaylandCandidatePanel::handles(ic)) {
+    if (wlPanel_ && wlPanel_->handles(ic)) {
         caretFree = true;
         scale = wlPanel_->scale();
     }
     if (wlPanel_) {
-        wlPanel_->setReportedScale(WaylandCandidatePanel::handles(ic) ? scale : 1.0);
+        wlPanel_->setReportedScale(wlPanel_->handles(ic) ? scale : 1.0);
     }
 #endif
     // 光标可信恒为真：Linux 的光标矩形来自应用自己上报（没有 Windows 那种跨窗口光标冒充插入点
@@ -614,6 +619,7 @@ void WindEngine::activate(const fcitx::InputMethodEntry&, fcitx::InputContextEve
     currentIC_ = ic->watch();
     // 状态区入口：InputMethod 组在切换输入法时由 Fcitx5 自己清空，每次激活挂一次。
     ic->statusArea().addAction(fcitx::StatusGroup::InputMethod, &settingsAction_);
+    ic->statusArea().addAction(fcitx::StatusGroup::InputMethod, &menuAction_);
     // 光标前字符的记账只对「这一个文本框里我们自己打出去的东西」有效，换焦点即作废。
     router_.reset();
     tap_.reset();
@@ -912,7 +918,7 @@ void WindEngine::onRenderFrame(const HostRenderFramePayload& p)
     }
 #ifdef WIND_HAVE_WAYLAND
     // Wayland 原生应用：cursorRect 是窗口相对坐标，没法自己摆；交给合成器按 popup surface 摆位。
-    if (wlPanel_ && WaylandCandidatePanel::handles(focusedIC())) {
+    if (wlPanel_ && wlPanel_->handles(focusedIC())) {
         panel_->hide();
         wlPanel_->show(focusedIC(), f);
         return;
@@ -1025,7 +1031,7 @@ void WindEngine::onOverlayFrame(const OverlayFramePayload& p)
     // Wayland 原生应用：浮层的屏幕坐标没有意义，并进 popup 与候选一起由合成器摆位。
     // 按屏幕摆的（Toast、屏幕锚点 / 固定位置的气泡）在 Wayland 会话里一律走 layer-shell，与焦点
     // 在哪种应用无关：焦点在 XWayland 应用（或没有焦点）时若走 X11 窗口，treeland 会把它压在任务栏下面。
-    if (wlPanel_ && (WaylandCandidatePanel::handles(focusedIC()) || wlPanel_->wantsLayer(p.kind, p))) {
+    if (wlPanel_ && (wlPanel_->handles(focusedIC()) || wlPanel_->wantsLayer(p.kind, p))) {
         panel_->hideOverlay(p.kind);
         wlPanel_->showOverlay(focusedIC(), p.kind, f, p);
         return;
@@ -1058,7 +1064,7 @@ void WindEngine::onMenuFrame(uint32_t level, const OverlayFramePayload& p)
         return;
     }
 #ifdef WIND_HAVE_WAYLAND
-    if (wlPanel_ && (wlPanel_->screenMenuActive() || WaylandCandidatePanel::handles(focusedIC()))) {
+    if (wlPanel_ && (wlPanel_->screenMenuActive() || wlPanel_->handles(focusedIC()))) {
         panel_->hideMenuLevel(level);
         wlPanel_->showMenuLevel(focusedIC(), level, f, p);
         return;
@@ -1257,12 +1263,33 @@ void WindEngine::requestMenu(int32_t target, int32_t x, int32_t y)
     Rect wa = panel_->screenWorkArea().value_or(Rect{});
 #ifdef WIND_HAVE_WAYLAND
     // Wayland 应用：x y 是 popup 位图里的坐标，工作区也在这套坐标系里
-    if (wlPanel_ && WaylandCandidatePanel::handles(focusedIC())) {
+    if (wlPanel_ && wlPanel_->handles(focusedIC())) {
         wa = wlPanel_->virtualWorkArea();
     }
 #endif
     WIND_DEBUG() << "请求打开菜单 target=" << target << " @(" << x << "," << y << ")";
     sendAndDrain(encodeMenuOpenFrame(target, x, y, wa.x, wa.y, wa.x + wa.w, wa.y + wa.h));
+}
+
+void WindEngine::openMainMenuAtPointer()
+{
+    if (!ensureConnected()) {
+        WIND_WARN() << "清风输入法菜单：服务不在，打不开";
+        return;
+    }
+#ifdef WIND_HAVE_WAYLAND
+    // Wayland 会话：点的是托盘菜单，它在屏幕上的位置不可知；不论焦点在哪种应用都走屏幕菜单
+    if (wlPanel_ && wlPanel_->openMenuAtPointer(MENU_TARGET_MAIN)) {
+        return;
+    }
+#endif
+    // X11：托盘菜单这时可能还抓着指针，抓取由 X11 菜单自己重试（见 X11CandidatePanel::grabPointer）
+    const auto p = panel_->pointerPosition();
+    if (!p) {
+        WIND_WARN() << "清风输入法菜单：取不到指针位置，打不开";
+        return;
+    }
+    requestMenu(MENU_TARGET_MAIN, p->first, p->second);
 }
 
 } // namespace windlinux

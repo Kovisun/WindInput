@@ -32,6 +32,7 @@ add_library(windcore STATIC
     src/core/Menu.cpp
     src/core/OverlayInput.cpp
     src/core/ResponseRouter.cpp
+    src/core/RetiredSurfaces.cpp
     src/core/ServiceLauncher.cpp
     src/core/SettingsLauncher.cpp
     src/core/ShmFrame.cpp
@@ -46,7 +47,8 @@ target_link_libraries(windcore PUBLIC Threads::Threads)
 # ── 单测 ──
 enable_testing()
 foreach(t codec_test keymap_test router_test bridge_test protocol_sync_test shm_test launcher_test
-        settings_launcher_test menu_test host_ui_test overlay_input_test keysynth_test)
+        settings_launcher_test menu_test host_ui_test overlay_input_test keysynth_test
+        retired_surfaces_test)
     add_executable(${t} tests/${t}.cpp)
     target_link_libraries(${t} PRIVATE windcore)
     target_compile_definitions(${t} PRIVATE
@@ -96,6 +98,7 @@ if(WIND_BUILD_ADDON)
         HINTS ${FCITX_CORE_INC}/../Module/fcitx-module/wayland
         PATH_SUFFIXES Fcitx5/Module/fcitx-module/wayland)
     if(WAYLAND_CLIENT_FOUND AND WAYLAND_SCANNER AND FCITX_WAYLAND_INC)
+        # input-method-v1 只用其中的 zwp_input_panel_v1（KWin 的 overlay 面板）。
         # 协议文件随仓（MIT；input-method-v2 在 wayland-protocols 1.3x 起不再随包提供，viewporter /
         # xdg-output 一并随仓，免得各发行版的 wayland-protocols 版本与是否安装成为构建变量）。
         # wlr-layer-shell 来自 wlr-protocols（屏幕锚定的浮层用）；它的 get_popup 引用 xdg_popup，
@@ -103,7 +106,7 @@ if(WIND_BUILD_ADDON)
         set(WL_GEN ${CMAKE_CURRENT_BINARY_DIR}/wayland-gen)
         file(MAKE_DIRECTORY ${WL_GEN})
         set(WL_GEN_SRC)
-        foreach(proto input-method-unstable-v2 viewporter xdg-output-unstable-v1
+        foreach(proto input-method-unstable-v1 input-method-unstable-v2 viewporter xdg-output-unstable-v1
                       wlr-layer-shell-unstable-v1 xdg-shell
                       relative-pointer-unstable-v1)
             set(xml ${CMAKE_CURRENT_SOURCE_DIR}/protocols/${proto}.xml)

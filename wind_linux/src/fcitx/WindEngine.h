@@ -123,6 +123,9 @@ private:
     // ── 自绘菜单 ──
     /// 请服务端打开菜单（`menu.open`）：target ≥ 0 候选右键菜单，-1 主菜单；(x, y) 锚点。
     void requestMenu(int32_t target, int32_t x, int32_t y);
+    /// 状态区「清风输入法菜单」：在指针处开主菜单。Wayland 会话开在屏幕坐标系（落点等指针进入
+    /// 底板时取），X11 按指针的根窗口坐标。
+    void openMainMenuAtPointer();
 
     // ── 命令直通车按键合成（CMD_KEY_TAP / SEQ / HOLD / RELEASE）──
     /// 经 `forwardKey` 交给焦点 IC 的应用：不进输入法引擎，不会回流成组字。
@@ -167,8 +170,10 @@ private:
     std::unique_ptr<WaylandCandidatePanel> wlPanel_;
 #endif
     /// 「清风输入法设置」：挂进 Fcitx5 状态区（托盘菜单 / kimpanel 面板），点了打开设置程序。
-    /// 主菜单不从这里进（组字时候选窗右键 / 候选菜单「更多…」）。
     fcitx::SimpleAction settingsAction_;
+    /// 「清风输入法菜单」：同挂状态区，点了在指针处弹出主菜单（Linux 没有工具栏，不组字时
+    /// 别无入口；对位 Windows 托盘 / 工具栏的右键菜单）。
+    fcitx::SimpleAction menuAction_;
     std::unique_ptr<fcitx::HandlerTableEntry<fcitx::EventHandler>> shiftClaim_;
     std::unique_ptr<fcitx::HandlerTableEntry<fcitx::EventHandler>> capabilityWatch_;
     ModeIndicator mode_;
