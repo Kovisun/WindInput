@@ -24,6 +24,7 @@
 
 <p align="center">
   <a href="https://hellogithub.com/repository/huanfeng/WindInput" target="_blank"><img src="https://api.hellogithub.com/v1/widgets/recommend.svg?rid=565ab2afe06642d3825156e0ec556428&claim_uid=3OseFoEribJzy5D&theme=neutral" alt="Featured｜HelloGitHub" style="width: 250px; height: 54px;" width="250" height="54" /></a>
+  <a href="https://atomgit.com/huanfengf/WindInput" target="_blank"><img src="https://atomgit.com/huanfengf/WindInput/star/new_badge.svg" alt="AtomGit" height="54" /></a>
 </p>
 
 ## 特性
