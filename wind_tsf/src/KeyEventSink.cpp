@@ -188,21 +188,24 @@ STDAPI_(ULONG) CKeyEventSink::Release()
     return cr;
 }
 
-// 鼠标键（左/右/中）此刻是否按着。左右键都查：系统可能交换了主副键，VK_LBUTTON 反映的是物理键。
-static bool AnyMouseButtonDown()
+// 鼠标键（左/右/中）的异步状态：此刻是否按着、自上次调用以来是否被按下过。
+// 左右键都查：系统可能交换了主副键，VK_LBUTTON 反映的是物理键。
+// ⚠️ 两位必须**一次调用**取：GetAsyncKeyState 每次调用都清「按下过」位，与调用方看哪一位
+// 无关。曾经先调一次取「按着」、再调一次取「按下过」，后者恒为 0（论坛 t257 靶机实测）。
+// ⚠️ 「按下过」位微软明说不可依赖（别的进程调用也会清它），只作补充信号，见 ToggleTapPolicy.h。
+struct MouseAsyncState
 {
-    return ((GetAsyncKeyState(VK_LBUTTON) | GetAsyncKeyState(VK_RBUTTON) | GetAsyncKeyState(VK_MBUTTON)) & 0x8000) != 0;
-}
+    bool down = false;
+    bool pressedSinceLastCall = false;
+};
 
-// 自上一次调用以来鼠标键是否被按下过（GetAsyncKeyState 的最低位）。
-// ⚠️ 微软明说不可依赖这一位：它是否被别的调用方清掉不可控。这里只作**补充信号**，
-// 主判据是选区变化与按着状态（见 ToggleTapPolicy.h）。读取本身会清位，故三键都要读。
-static bool AnyMousePressedSinceLastCall()
+static MouseAsyncState ReadMouseAsyncState()
 {
-    SHORT l = GetAsyncKeyState(VK_LBUTTON);
-    SHORT r = GetAsyncKeyState(VK_RBUTTON);
-    SHORT m = GetAsyncKeyState(VK_MBUTTON);
-    return ((l | r | m) & 0x0001) != 0;
+    const SHORT bits = GetAsyncKeyState(VK_LBUTTON) | GetAsyncKeyState(VK_RBUTTON) | GetAsyncKeyState(VK_MBUTTON);
+    MouseAsyncState st;
+    st.down = (bits & 0x8000) != 0;
+    st.pressedSinceLastCall = (bits & 0x0001) != 0;
+    return st;
 }
 
 void CKeyEventSink::NoteSelectionChangedDuringToggle()
@@ -211,11 +214,10 @@ void CKeyEventSink::NoteSelectionChangedDuringToggle()
         return;
     // OnEndEdit 是异步通知，快速单击时鼠标键可能已经抬起，故除「此刻按着」外还要看
     // 「按下过」位；读位会清它，命中就并入 mousePressedSincePress，keyup 时不丢。
-    const bool down = AnyMouseButtonDown();
-    const bool pressed = AnyMousePressedSinceLastCall();
-    if (pressed)
+    const MouseAsyncState mouse = ReadMouseAsyncState();
+    if (mouse.pressedSinceLastCall)
         _pendingTapSignals.mousePressedSincePress = true;
-    if (down || pressed)
+    if (mouse.down || mouse.pressedSinceLastCall)
         _pendingTapSignals.selectionChanged = true;
 }
 
@@ -268,11 +270,10 @@ void CKeyEventSink::_MarkPendingToggleKey(WPARAM wParam, uint32_t modifiers)
     _pendingKeyUpModifiers = modifiers;
     _pendingKeyDownTime = GetTickCount();
 
-    // 鼠标记账（论坛 t257）：首次记 pending 时重置，并把「按下过」位清掉，
+    // 鼠标记账（论坛 t257）：首次记 pending 时重置，读一次异步状态顺带清掉「按下过」位，
     // 好让 _DispatchPendingToggleKeyUp 读到的只是按住期间发生的点击。
     _pendingTapSignals = {};
-    _pendingTapSignals.mouseDownAtPress = AnyMouseButtonDown();
-    AnyMousePressedSinceLastCall();
+    _pendingTapSignals.mouseDownAtPress = ReadMouseAsyncState().down;
 }
 
 // 取消待切换。热键分支（keydown 白名单 / chinese-only / session / Ctrl+Space）都是
@@ -2120,8 +2121,9 @@ BOOL CKeyEventSink::_DispatchPendingToggleKeyUp(WPARAM wParam)
     // 按住期间有鼠标操作（Shift+点击 / 拖选）⇒ 不是单击，不切换（论坛 t257）。
     // 放在时长判定之后：长按本来就不切，日志也不必重复报。
     wind::toggletap::TapSignals signals = _pendingTapSignals;
-    signals.mouseDownAtRelease = AnyMouseButtonDown();
-    signals.mousePressedSincePress = AnyMousePressedSinceLastCall();
+    const MouseAsyncState mouse = ReadMouseAsyncState();
+    signals.mouseDownAtRelease = mouse.down;
+    signals.mousePressedSincePress = signals.mousePressedSincePress || mouse.pressedSinceLastCall;
     _pendingTapSignals = {};
     if (wind::toggletap::IsTapCancelledByMouse(signals))
     {
@@ -2130,6 +2132,7 @@ BOOL CKeyEventSink::_DispatchPendingToggleKeyUp(WPARAM wParam)
             signals.mouseDownAtRelease, signals.mousePressedSincePress);
         return TRUE;
     }
+    WIND_LOG_DEBUG_FMT(L"Toggle key tap accepted: vk=0x%02X held=%lums\n", pendingKey, pressDuration);
 
     if (pendingKey != VK_CAPITAL)
     {
