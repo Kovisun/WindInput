@@ -2526,7 +2526,6 @@ dependencies = [
  "toml 0.8.23",
  "tracing",
  "wind-candidate",
- "wind-store",
  "wind-utils",
  "wind-wdict",
  "windows",
@@ -2679,7 +2678,9 @@ dependencies = [
  "thiserror",
  "tracing",
  "uuid",
+ "wind-candidate",
  "wind-cmdbar",
+ "wind-dict",
  "wind-utils",
  "wind-wdict",
 ]

@@ -3,11 +3,11 @@
 //! 见 docs/redesign/dict.md §3。词频/shadow 不在此（词频是排序独立维度 frequency.md；
 //! shadow 是 ShadowProvider，引擎排序后应用）——本文件只负责"用户词/临时词作为查询层"。
 
-use crate::layer::{DictLayer, LayerType};
+use crate::Store;
+use crate::user_words::UserWordRecord;
 use std::sync::Arc;
 use wind_candidate::{Candidate, better};
-use wind_store::Store;
-use wind_store::user_words::UserWordRecord;
+use wind_dict::{DictLayer, LayerType};
 
 /// 把用户/临时词记录映射为候选；`is_temp` 决定 meta 标记，`is_prefix` 标记前缀补全。
 ///
@@ -59,9 +59,9 @@ fn sort_trunc(mut v: Vec<Candidate>, limit: usize) -> Vec<Candidate> {
     v
 }
 
-/// 通配结果的排序截断：等长档在前（[`crate::layer::cmp_pattern`]）。
+/// 通配结果的排序截断：等长档在前（[`wind_dict::layer::cmp_pattern`]）。
 fn sort_trunc_pattern(mut v: Vec<Candidate>, pattern_len: usize, limit: usize) -> Vec<Candidate> {
-    v.sort_by(|a, b| crate::layer::cmp_pattern(pattern_len, a, b));
+    v.sort_by(|a, b| wind_dict::layer::cmp_pattern(pattern_len, a, b));
     if limit > 0 {
         v.truncate(limit);
     }
@@ -88,7 +88,7 @@ fn pattern_from_records(
     let n = pattern.chars().count();
     let cands = recs
         .into_iter()
-        .filter(|r| crate::layer::pattern_matches(pattern, wildcard, &r.code, with_prefix))
+        .filter(|r| wind_dict::layer::pattern_matches(pattern, wildcard, &r.code, with_prefix))
         .map(|r| {
             let longer = r.code.chars().count() > n;
             record_to_candidate(r, is_temp, longer)
@@ -208,7 +208,7 @@ impl DictLayer for StoreUserLayer {
         if pattern.is_empty() || limit == 0 {
             return Vec::new();
         }
-        let lit = crate::layer::literal_prefix(pattern, wildcard);
+        let lit = wind_dict::layer::literal_prefix(pattern, wildcard);
         let recs = self
             .store
             .search_user_words_prefix(&self.schema_id, lit, 0)
@@ -314,7 +314,7 @@ impl DictLayer for StoreTempLayer {
         if pattern.is_empty() || limit == 0 {
             return Vec::new();
         }
-        let lit = crate::layer::literal_prefix(pattern, wildcard);
+        let lit = wind_dict::layer::literal_prefix(pattern, wildcard);
         let recs = self
             .store
             .search_temp_words_prefix(&self.schema_id, lit, 0)
@@ -403,7 +403,7 @@ impl DictLayer for StoreDraftLayer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::composite::CompositeDict;
+    use wind_dict::CompositeDict;
 
     fn store(name: &str) -> Arc<Store> {
         let p = std::env::temp_dir().join(format!("wind_storelayer_{name}.redb"));
@@ -422,7 +422,7 @@ mod tests {
         s.learn_temp_word("wb", "bb", "丁", 30, 0).unwrap();
         s.add_drafts("wb", &[("ad".to_string(), "草".to_string())])
             .unwrap();
-        let slot = crate::layer::WILDCARD_SLOT;
+        let slot = wind_dict::layer::WILDCARD_SLOT;
         let p = format!("a{slot}");
 
         let ul = StoreUserLayer::new(s.clone(), "wb");
@@ -561,7 +561,7 @@ mod tests {
         s.add_user_word("py", "zaijian", "再见", 700, 0b1001)
             .unwrap();
 
-        let dm = crate::manager::DictManager::new();
+        let dm = wind_dict::DictManager::new();
         dm.register_layer(Box::new(StoreUserLayer::new(s.clone(), "py")));
         dm.register_layer(Box::new(StoreTempLayer::new(s.clone(), "py")));
 
@@ -585,7 +585,7 @@ mod tests {
     /// 静默的全表扫正是简拼卡顿的根因，让它召不回、在测试里立刻暴露，好过悄悄慢下去。
     #[test]
     fn layers_without_an_index_yield_nothing_rather_than_scanning() {
-        use crate::layer::{DictLayer, LayerType};
+        use wind_dict::{DictLayer, LayerType};
         struct Bare;
         impl DictLayer for Bare {
             fn name(&self) -> &str {

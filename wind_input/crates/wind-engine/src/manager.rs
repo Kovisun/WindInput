@@ -6362,11 +6362,11 @@ impl EngineManager {
             //
             // 注册顺序 User → Temp → System 与码表分支一致（用户词在前）。
             if let Some(store) = &store {
-                dm.register_layer(Box::new(wind_dict::StoreUserLayer::new(
+                dm.register_layer(Box::new(wind_store::StoreUserLayer::new(
                     store.clone(),
                     schema_id,
                 )));
-                dm.register_layer(Box::new(wind_dict::StoreTempLayer::new(
+                dm.register_layer(Box::new(wind_store::StoreTempLayer::new(
                     store.clone(),
                     schema_id,
                 )));
@@ -6556,11 +6556,11 @@ impl EngineManager {
             // 存储归属统一为 "pinyin"，使全拼/双拼方案共享同一份用户词与临时词。
             if let Some(store) = &store {
                 let dm = wind_dict::DictManager::new();
-                dm.register_layer(Box::new(wind_dict::StoreUserLayer::new(
+                dm.register_layer(Box::new(wind_store::StoreUserLayer::new(
                     store.clone(),
                     PINYIN_DATA_SCHEMA,
                 )));
-                dm.register_layer(Box::new(wind_dict::StoreTempLayer::new(
+                dm.register_layer(Box::new(wind_store::StoreTempLayer::new(
                     store.clone(),
                     PINYIN_DATA_SCHEMA,
                 )));
@@ -6632,11 +6632,11 @@ impl EngineManager {
             // 注入 redb Store 时，注册用户词/临时词层（按 schema 隔离），让用户词进候选合并。
             let dm = wind_dict::DictManager::new();
             if let Some(store) = &store {
-                dm.register_layer(Box::new(wind_dict::StoreUserLayer::new(
+                dm.register_layer(Box::new(wind_store::StoreUserLayer::new(
                     store.clone(),
                     schema_id,
                 )));
-                dm.register_layer(Box::new(wind_dict::StoreTempLayer::new(
+                dm.register_layer(Box::new(wind_store::StoreTempLayer::new(
                     store.clone(),
                     schema_id,
                 )));
@@ -6650,7 +6650,7 @@ impl EngineManager {
                 // 重建，故不另设通路；真要做成热更新，得给层一个共享的原子值，
                 // 为一个内部字段不值得。
                 if codetable_cfg.auto_phrase.enabled {
-                    dm.register_layer(Box::new(wind_dict::StoreDraftLayer::new(
+                    dm.register_layer(Box::new(wind_store::StoreDraftLayer::new(
                         store.clone(),
                         schema_id,
                         i64::from(codetable_cfg.auto_phrase.draft_ttl_hours) * 3600,

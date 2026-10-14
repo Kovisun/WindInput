@@ -20,8 +20,10 @@ pub mod shadow;
 pub mod stat_collector;
 pub mod stats;
 pub mod store;
+pub mod store_layer;
 pub mod temp_words;
 pub mod user_words;
 pub use wind_wdict as wdict;
 
 pub use store::Store;
+pub use store_layer::{StoreDraftLayer, StoreTempLayer, StoreUserLayer};
