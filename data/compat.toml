@@ -389,3 +389,8 @@ classes = [
 process = "WINWORD.EXE"
 comment = "Microsoft Word：文档存储的段落边界是 CR，LF 落进去不构成段落（2026-08-23 真机实测）。⚠ 同现场实测『记事本与 WPS 文字正常分段』，故 wps.exe 刻意不在此列——按『富文本模型』推理会想当然地把它加进来，实测说的是反话"
 style = "cr"
+
+[[commit_newline]]
+process = "QQ.exe"
+comment = "QQNT 聊天框：LF 换行的多行文本会乱序，CR 会丢换行，CRLF 正常"
+style = "crlf"
