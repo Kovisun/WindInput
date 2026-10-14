@@ -1373,6 +1373,9 @@ pub struct Coordinator {
     pub(crate) engine_mgr: EngineManager,
     /// redb 持久化存储（用户词/临时词/词频/影子规则）；None=无持久化（headless 测试）。
     pub(crate) store: Option<Arc<Store>>,
+    /// 只读模式的原因（用户数据设计 §7.1 降级保护：meta.toml 版本高于本版本 / 读不出）；
+    /// `None` = 正常读写。只读时 `store` 恒 None。
+    pub(crate) storage_readonly: Option<String>,
     /// 标点转换器（引号左右状态）
     pub(crate) punct: Mutex<PunctuationConverter>,
     /// 智能符号模式待命态（同键连按删中文标点改英文）
@@ -2417,6 +2420,11 @@ impl Coordinator {
             .store(!supported, std::sync::atomic::Ordering::Relaxed);
     }
 
+    /// 只读模式的原因（用户数据设计 §7.1 降级保护）；`None` = 正常读写。
+    pub fn storage_readonly_reason(&self) -> Option<&str> {
+        self.storage_readonly.as_deref()
+    }
+
     pub(crate) fn build(
         config: Config,
         data_dir: Option<&Path>,
@@ -2425,6 +2433,29 @@ impl Coordinator {
         user_dir: Option<std::path::PathBuf>,
         store: Option<Arc<Store>>,
         override_dir: Option<std::path::PathBuf>,
+    ) -> Arc<Self> {
+        Self::build_with_readonly(
+            config,
+            data_dir,
+            push_server,
+            ui_tx,
+            user_dir,
+            store,
+            override_dir,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn build_with_readonly(
+        config: Config,
+        data_dir: Option<&Path>,
+        push_server: Arc<PushServer>,
+        ui_tx: crate::UiSender,
+        user_dir: Option<std::path::PathBuf>,
+        store: Option<Arc<Store>>,
+        override_dir: Option<std::path::PathBuf>,
+        storage_readonly: Option<String>,
     ) -> Arc<Self> {
         // 注入 redb Store：码表引擎注册用户词/临时词层，用户词进候选合并。
         // override_dir 为 None 时由 EngineManager 取默认（用户配置目录下的 schema_overrides）。
@@ -2800,6 +2831,7 @@ impl Coordinator {
             ui_tx,
             engine_mgr,
             store,
+            storage_readonly,
             punct: Mutex::new(punct_conv),
             capslock_hook: Mutex::new(None),
             capslock_press_tx,

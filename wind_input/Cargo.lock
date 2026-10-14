@@ -2468,6 +2468,7 @@ dependencies = [
  "toml 0.8.23",
  "tracing",
  "unicode-segmentation",
+ "uuid",
  "wind-quick-input",
  "wind-utils",
 ]
@@ -2769,6 +2770,21 @@ dependencies = [
  "smallvec",
  "wind-bridge",
  "wind-theme",
+]
+
+[[package]]
+name = "wind-userdata"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "crc32fast",
+ "memmap2",
+ "serde",
+ "toml 0.8.23",
+ "tracing",
+ "uuid",
+ "wind-candidate",
+ "wind-dict",
 ]
 
 [[package]]

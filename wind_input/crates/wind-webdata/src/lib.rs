@@ -470,6 +470,13 @@ fn web_data_dispatch<H: WebDataRpc + ?Sized>(
         }
         // 内存诊断（只读，设置端「高级 → 性能 → 内存占用」与「复制诊断信息」）。
         "system.memoryStats" => Ok(memory_stats_json(h)),
+        // 存储状态（设置页提示「只读模式」）：用户数据设计 §7.1 降级保护。
+        "system.storageStatus" => Ok(json!({
+            "readonly": h.storage_readonly_reason().is_some(),
+            "reason": h.storage_readonly_reason(),
+            "format_version": wind_config::user_meta::KNOWN_FORMAT_VERSION,
+            "known_format_version": wind_config::user_meta::KNOWN_FORMAT_VERSION,
+        })),
         // 桌面提示（CLI `wind_input ui toast`、外部脚本）：toast 只能由 core 进程
         // 自己的 UI 线程渲染，别的进程除了转交没有第二条路。
         //
@@ -10414,8 +10421,10 @@ mod memory_stats_tests {
     use wind_store::Store;
 
     /// 一个自造码表方案 `zm1` 的数据目录 + store（不依赖 build_dev，不会静默跳过）。
-    fn coord() -> Arc<Coordinator> {
-        let base = std::env::temp_dir().join(format!("wind_memstats-{}", std::process::id()));
+    /// `tag` 让并行的用例各用各的夹具目录——redb 是独占锁，两条用例同时开同一个 `s.redb`
+    /// 必有一条失败。
+    fn coord(tag: &str) -> Arc<Coordinator> {
+        let base = std::env::temp_dir().join(format!("wind_memstats-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         let schemas = base.join("schemas");
         std::fs::create_dir_all(schemas.join("zm1")).unwrap();
@@ -10438,9 +10447,28 @@ mod memory_stats_tests {
         Coordinator::new_headless_with_store(cfg, Some(&base), store)
     }
 
+    /// 用户数据设计 §7.1：`system.storageStatus` 报只读标志、原因与格式版本。正常构造的
+    /// 协调器不是只读；只读路径（meta.toml 版本更高）由 wind-coordinator 的
+    /// `tests/storage_readonly.rs` 验（trait 在那边不可调，这里验的是 RPC 的形状）。
+    #[test]
+    fn storage_status_reports_readonly_flag_and_versions() {
+        let c = coord("storage_status_reports_r");
+        let v = c.web_data_rpc("system.storageStatus", &json!({})).unwrap();
+        assert_eq!(v["readonly"], false);
+        assert!(v["reason"].is_null());
+        assert_eq!(
+            v["format_version"],
+            wind_config::user_meta::KNOWN_FORMAT_VERSION
+        );
+        assert_eq!(
+            v["known_format_version"],
+            wind_config::user_meta::KNOWN_FORMAT_VERSION
+        );
+    }
+
     #[test]
     fn memory_stats_reports_process_schemas_and_structures() {
-        let c = coord();
+        let c = coord("memory_stats_reports_pro");
         let v = c.web_data_rpc("system.memoryStats", &json!({})).unwrap();
 
         let p = &v["process"];

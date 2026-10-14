@@ -23,6 +23,9 @@ use crate::coordinator::Coordinator;
 /// 方法与 Coordinator 固有方法同名时固有优先；转发 impl 内一律用完全限定路径
 /// `Coordinator::xxx(self)` 消歧，否则就是自调递归。
 pub trait WebDataHost {
+    /// 只读模式的原因（用户数据设计 §7.1 降级保护）；`None` = 正常读写。
+    fn storage_readonly_reason(&self) -> Option<String>;
+
     fn engine_mgr(&self) -> &EngineManager;
     fn user_store(&self) -> Option<&Arc<Store>>;
     fn stat_collector(&self) -> Option<&StatCollector>;
@@ -234,6 +237,10 @@ pub trait WebDataHost {
 }
 
 impl WebDataHost for Coordinator {
+    fn storage_readonly_reason(&self) -> Option<String> {
+        Coordinator::storage_readonly_reason(self).map(str::to_string)
+    }
+
     fn template_sample(
         &self,
         template: &str,

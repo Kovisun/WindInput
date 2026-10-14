@@ -9,7 +9,7 @@ use std::sync::Arc;
 // debug! 只在 desktop-ui 门内的 `new` 用到；headless 形态下无引用。
 #[cfg(feature = "desktop-ui")]
 use tracing::debug;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use wind_bridge::push::{PushConfig, PushServer};
 use wind_config::Config;
@@ -81,8 +81,8 @@ impl Coordinator {
         let user_dir =
             Config::user_config_dir().or_else(|| data_dir.as_deref().map(|d| d.to_path_buf()));
         // redb 用户数据库（用户偏好数据：词频、自定义词、shadow 规则，应随用户漫游）。
-        let store = user_dir.as_deref().and_then(Self::open_user_store);
-        let coordinator = Self::build(
+        let (store, storage_readonly) = Self::open_user_store_checked(user_dir.as_deref());
+        let coordinator = Self::build_with_readonly(
             config,
             data_dir.as_deref(),
             push_server,
@@ -90,6 +90,7 @@ impl Coordinator {
             user_dir,
             store,
             None, // 生产路径：override 目录由 EngineManager 取用户配置目录下的默认值
+            storage_readonly,
         );
 
         // 鼠标事件处理线程：候选窗的点击/悬停/滚轮经此回到协调器
@@ -334,11 +335,44 @@ impl Coordinator {
             write_timeout_ms: 30_000,
         }));
         let user_dir = user_dir.map(|d| d.to_path_buf());
-        let store = user_dir.as_deref().and_then(Self::open_user_store);
+        let (store, storage_readonly) = Self::open_user_store_checked(user_dir.as_deref());
         (
-            Self::build(config, data_dir, push_server, ui_tx, user_dir, store, None),
+            Self::build_with_readonly(
+                config,
+                data_dir,
+                push_server,
+                ui_tx,
+                user_dir,
+                store,
+                None,
+                storage_readonly,
+            ),
             rx,
         )
+    }
+
+    /// 先查 `meta.toml` 的格式版本（用户数据设计 §7.1）：高于本版本或读不出 ⇒ 只读模式，
+    /// 不打开 redb、不写任何用户数据；否则照常打开。
+    pub(crate) fn open_user_store_checked(
+        dir: Option<&Path>,
+    ) -> (Option<Arc<Store>>, Option<String>) {
+        let Some(d) = dir else { return (None, None) };
+        match wind_config::user_meta::load_or_init(d) {
+            wind_config::user_meta::MetaCheck::Ok(_) => (Self::open_user_store(d), None),
+            wind_config::user_meta::MetaCheck::Incompatible { found, known } => {
+                let reason = format!(
+                    "用户数据由更新版本写入（格式 {found}，本版本只认识 {known}）：已进入只读模式，\
+                     不会修改任何用户数据。请升级到新版本，或从备份还原。"
+                );
+                error!("{reason}");
+                (None, Some(reason))
+            }
+            wind_config::user_meta::MetaCheck::Unreadable(e) => {
+                let reason = format!("用户目录的 meta.toml 读不出（{e}）：按只读模式运行。");
+                error!("{reason}");
+                (None, Some(reason))
+            }
+        }
     }
 
     /// 打开用户目录下的 redb（缺目录时创建）。失败只 warn：store 不可用时协调器
