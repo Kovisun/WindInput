@@ -15,7 +15,8 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use wind_store::Store;
 use wind_store::completion::CompletionKind;
 
-/// 负载用补全历史表：P2 / P3 起用户词与短语都不在 redb，页缓存机制要拿仍在 redb 的表来测。
+/// 负载用旧补全历史表（`legacy_*` 写读器直接走 redb）：P2–P4a 起运行期数据都不在 redb，页缓存
+/// 机制要拿仍能读写的 redb 表来测；P4b 随 redb 一起删。
 const K: CompletionKind = CompletionKind::UrlHistory;
 
 fn store(tag: &str) -> (Arc<Store>, std::path::PathBuf) {
@@ -25,23 +26,12 @@ fn store(tag: &str) -> (Arc<Store>, std::path::PathBuf) {
 }
 
 fn fill(s: &Store, n: usize) {
-    let jsonl: String = (0..n)
-        .map(|i| {
-            format!(
-                "{{\"kind\":\"url_history\",\"text\":\"a{i:04}\",\"count\":1,\"last_used\":0}}\n"
-            )
-        })
-        .collect();
-    s.import_completions_jsonl(&jsonl).expect("导入");
+    let rows: Vec<_> = (0..n).map(|i| (K, format!("a{i:04}"), 1, 0)).collect();
+    s.legacy_put_completions(&rows).expect("导入");
 }
 
-fn listed(s: &Store) -> Vec<(String, u32)> {
-    s.list_completions(K, "", 0, 0)
-        .expect("扫")
-        .0
-        .into_iter()
-        .map(|(t, r)| (t, r.count))
-        .collect()
+fn listed(s: &Store) -> Vec<String> {
+    s.legacy_scan_completions(K, "", 0).expect("扫")
 }
 
 /// 丢缓存不得丢数据——它换掉的只是 `Database` 实例，库文件原封不动。
@@ -59,7 +49,8 @@ fn dropping_the_cache_keeps_every_row() {
     assert!(!s.is_paused(), "结束时不得停在暂停态");
 
     // 还能继续写。
-    s.record_completion(K, "zz").expect("写");
+    s.legacy_put_completions(&[(K, "zz".into(), 1, 0)])
+        .expect("写");
     assert_eq!(listed(&s).len(), 501);
 
     let _ = std::fs::remove_file(&p);
@@ -96,7 +87,7 @@ fn concurrent_reads_survive_a_cache_drop() {
             );
             std::thread::spawn(move || {
                 while !stop.load(Ordering::Relaxed) {
-                    match s.list_completions(K, "a01", 0, 10) {
+                    match s.legacy_scan_completions(K, "a01", 10) {
                         Ok(_) => reads.fetch_add(1, Ordering::Relaxed),
                         Err(_) => failures.fetch_add(1, Ordering::Relaxed),
                     };

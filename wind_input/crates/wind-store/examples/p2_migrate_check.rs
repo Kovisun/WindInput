@@ -2,7 +2,7 @@
 //! 目录 `<redb>.user/`），逐方案逐条比对旧 `USER_WORDS` 表与迁移后读回的 (文本, 权重, 边界)，
 //! 同码多词的相对先后也要一致。
 //! 用法：cargo run --release -p wind-store --example p2_migrate_check -- <userdata.redb 副本>
-//! 不带参数：合成一份 19 万词的旧库做演练。
+//! 不带参数：合成一份 19 万词的旧库做演练（含边界未知的单字）。
 fn main() -> anyhow::Result<()> {
     let p = match std::env::args().nth(1) {
         Some(p) => std::path::PathBuf::from(p),
@@ -14,7 +14,7 @@ fn main() -> anyhow::Result<()> {
     let s = wind_store::Store::open(&p)?;
     println!("打开 + 迁移: {:.0} ms", t.elapsed().as_secs_f64() * 1000.0);
     assert!(s.migrated_p2(), "迁移未完成");
-    let mut bad = 0usize;
+    let (mut bad, mut tolerated) = (0usize, 0usize);
     for (schema, rows) in s.legacy_user_rows()? {
         let mut by_code: std::collections::BTreeMap<String, Vec<(String, i32, u64)>> =
             Default::default();
@@ -31,11 +31,21 @@ fn main() -> anyhow::Result<()> {
                 .into_iter()
                 .map(|r| (r.text, r.weight, r.boundary))
                 .collect();
-            // 边界：旧表单音节 0b1 只对单个汉字保真；其余单音节退化为 0 属已知，单独计
+            // 边界：旧表单音节 0b1 只对单个汉字保真，其余退化为 0；反过来单个汉字旧边界 0
+            // 读回 0b1（解析时补的单音节边界）。两者都属已知，单独计
             let ok = got.len() == want.len()
                 && got.iter().zip(want).all(|(g, w)| {
-                    g.0 == w.0 && g.1 == w.1 && (g.2 == w.2 || (w.2 == 0b1 && g.2 == 0))
+                    g.0 == w.0
+                        && g.1 == w.1
+                        && (g.2 == w.2
+                            || (w.2 == 0b1 && g.2 == 0)
+                            || (w.2 == 0 && g.2 == 0b1 && g.0.chars().count() == 1))
                 });
+            tolerated += got
+                .iter()
+                .zip(want)
+                .filter(|(g, w)| g.0 == w.0 && g.2 != w.2)
+                .count();
             if !ok {
                 bad += 1;
                 if bad <= 5 {
@@ -45,6 +55,7 @@ fn main() -> anyhow::Result<()> {
         }
         println!("{schema}: {} 条 / {} 个码", rows.len(), by_code.len());
     }
+    println!("边界按已知规则变化的词: {tolerated}");
     println!("不一致的码: {bad}");
     if bad > 0 {
         std::process::exit(1);
@@ -79,6 +90,10 @@ fn synth() -> anyhow::Result<std::path::PathBuf> {
             _ => format!("词{i}"),
         };
         s.legacy_put_user("pinyin", &code, &text, (i % 500) as i32, b, i / 3)?;
+    }
+    // 单个汉字边界未知（旧库 0）：迁移后读回 0b1
+    for (i, ch) in ["我", "你", "他"].iter().enumerate() {
+        s.legacy_put_user("pinyin", "zz", ch, i as i32, 0, 190_000 + i as u32)?;
     }
     println!("合成旧库 19 万词: {:.1} s", t.elapsed().as_secs_f64());
     drop(s);

@@ -90,6 +90,8 @@ struct Inner {
     meta: StatsMeta,
     dirty: bool,
     last_commit: Option<DateTime<Local>>,
+    /// 挂起（备份还原期间）：任何 flush（含后台定时那次）都不落盘，`resume` 清掉。
+    suspended: bool,
 }
 
 /// 采集器与后台线程共享的状态。
@@ -133,6 +135,7 @@ impl StatCollector {
             meta: store.get_stats_meta().unwrap_or_default(),
             dirty: false,
             last_commit: None,
+            suspended: false,
         };
         if inner.meta.first_day.is_empty() {
             inner.meta.first_day = today;
@@ -213,6 +216,23 @@ impl StatCollector {
         inner.last_commit = None;
     }
 
+    /// 挂起：先把内存里的落盘，之后任何 flush 都不写，直到 [`Self::resume`]。备份还原统计期间用——
+    /// 不挂起的话，后台 30 秒那次 flush 可能恰在「还原写完、resume 之前」把旧的今天与总计写回去。
+    pub fn suspend(&self) {
+        let mut inner = self.shared.inner.lock().unwrap_or_else(|e| e.into_inner());
+        self.shared.flush_locked(&mut inner);
+        inner.suspended = true;
+    }
+
+    /// 解除挂起但不重载（还原没碰统计时用：内存里攒的照常落盘）。
+    pub fn unsuspend(&self) {
+        self.shared
+            .inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .suspended = false;
+    }
+
     /// 暂停：flush 后由调用方释放 store（Windows 热替换）。
     pub fn pause(&self) {
         self.flush();
@@ -231,6 +251,7 @@ impl StatCollector {
         }
         inner.dirty = false;
         inner.last_commit = None;
+        inner.suspended = false;
     }
 }
 
@@ -344,7 +365,8 @@ impl Shared {
     }
 
     fn flush_locked(&self, inner: &mut Inner) {
-        if !inner.dirty || self.store.is_paused() {
+        // P4a 起统计落本机状态文件，不再受 redb 暂停影响；备份还原期间挂起不写
+        if !inner.dirty || inner.suspended {
             return;
         }
         if let Err(e) = self.store.put_daily_stat(&inner.today_date, &inner.today) {
@@ -686,5 +708,32 @@ mod tests {
         } // Drop 应 flush
         let today = store.get_daily_stat(&today_string()).unwrap();
         assert_eq!(today.total(), 7, "Drop 时应持久化未落库数据");
+    }
+
+    /// 审查 I-5：还原期间收集器挂起，任何 flush（含后台 30 秒那次）都不落盘；resume 后按库里的值重载。
+    #[test]
+    fn suspended_collector_never_flushes() {
+        let store = mem_store();
+        let sc = StatCollector::new(store.clone(), 1.0);
+        sc.suspend();
+        sc.record(StatEvent {
+            chinese: 100,
+            ..Default::default()
+        });
+        sc.flush();
+        assert_eq!(store.get_daily_stat(&today_string()).unwrap().chinese, 0);
+        sc.resume();
+        sc.flush();
+        assert_eq!(store.get_daily_stat(&today_string()).unwrap().chinese, 0);
+        sc.record(StatEvent {
+            chinese: 1,
+            ..Default::default()
+        });
+        sc.flush();
+        assert_eq!(
+            store.get_daily_stat(&today_string()).unwrap().chinese,
+            1,
+            "resume 后照常"
+        );
     }
 }

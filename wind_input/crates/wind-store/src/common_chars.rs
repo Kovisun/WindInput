@@ -29,9 +29,9 @@
 //! 右键菜单的文案要把这个差异说出来（「设为生僻字（全局）」对「隐藏此候选」），
 //! 否则用户会两个都试一遍，再困惑于为什么表现不一样。
 
-use crate::store::{COMMON_CHARS, Store};
-use redb::ReadableTable;
+use crate::store::Store;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// 一条用户覆盖。
 ///
@@ -55,54 +55,131 @@ pub struct CommonCharOverride {
 /// 只有一个字段却仍用结构体而非裸 bool：将来要加「来源」（右键点的 / 导入的）或
 /// 「时间」时，裸 `true` 无处扩展，而多一层对象是向后兼容的。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-struct CommonCharRecord {
-    common: bool,
+/// 旧 redb 表的 value 形态（P4a 迁移解码 / 测试造旧库用）。
+pub(crate) struct CommonCharRecord {
+    pub(crate) common: bool,
+}
+
+/// 文件形态：`common: [字…]`、`uncommon: [字…]`（P4a 起真源 `<text_dir>/common_chars.yaml`）。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct CommonFile {
+    #[serde(default)]
+    common: Vec<String>,
+    #[serde(default)]
+    uncommon: Vec<String>,
+}
+
+const COMMON_HEADER: &str =
+    "# 常用字覆盖（WindInput 维护，可手改）：common = 强制常用，uncommon = 强制生僻\n";
+
+fn parse_common(s: &str) -> anyhow::Result<BTreeMap<String, bool>> {
+    if s.trim().is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let f: CommonFile =
+        serde_yaml::from_str(s).map_err(|e| anyhow::anyhow!("常用字覆盖文件解析失败：{e}"))?;
+    let mut m = BTreeMap::new();
+    for c in f.uncommon {
+        if !c.is_empty() {
+            m.insert(c, false);
+        }
+    }
+    for c in f.common {
+        if !c.is_empty() {
+            m.insert(c, true);
+        }
+    }
+    Ok(m)
+}
+
+fn render_common(m: &BTreeMap<String, bool>) -> String {
+    let f = CommonFile {
+        common: m
+            .iter()
+            .filter(|(_, v)| **v)
+            .map(|(k, _)| k.clone())
+            .collect(),
+        uncommon: m
+            .iter()
+            .filter(|(_, v)| !**v)
+            .map(|(k, _)| k.clone())
+            .collect(),
+    };
+    format!(
+        "{COMMON_HEADER}{}",
+        serde_yaml::to_string(&f).unwrap_or_default()
+    )
 }
 
 impl Store {
+    pub fn common_chars_path(&self) -> std::path::PathBuf {
+        self.user_text_dir().join("common_chars.yaml")
+    }
+
+    pub(crate) fn common_doc(&self) -> &wind_userdata::text::doc::TextDoc {
+        self.common_doc
+            .get_or_init(|| wind_userdata::text::doc::TextDoc::open(self.common_chars_path()))
+    }
+
+    fn common_map(&self) -> BTreeMap<String, bool> {
+        match self.common_doc().get() {
+            None => BTreeMap::new(),
+            Some(s) => parse_common(&s).unwrap_or_else(|e| {
+                tracing::warn!("{e:#}（按空表提供）");
+                BTreeMap::new()
+            }),
+        }
+    }
+
+    /// 读改写全部覆盖，一次提交；全空则删文件。文件解析不了 ⇒ Err、不覆盖。
+    fn modify_common(&self, f: &mut dyn FnMut(&mut BTreeMap<String, bool>)) -> anyhow::Result<()> {
+        let mut err = None;
+        self.common_doc().modify(&mut |cur| {
+            let mut m = match cur.map(parse_common).transpose() {
+                Ok(v) => v.unwrap_or_default(),
+                Err(e) => {
+                    err = Some(e);
+                    return cur.map(String::from);
+                }
+            };
+            f(&mut m);
+            (!m.is_empty()).then(|| render_common(&m))
+        })?;
+        match err {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
+    }
+
     /// 写一条覆盖（同字重复写即改写方向）。
     pub fn set_common_char_override(&self, key: &str, common: bool) -> anyhow::Result<()> {
-        let bytes = serde_json::to_vec(&CommonCharRecord { common })?;
-        self.with_db(|db| {
-            let txn = db.begin_write()?;
-            {
-                let mut t = txn.open_table(COMMON_CHARS)?;
-                t.insert(key, bytes.as_slice())?;
-            }
-            txn.commit()?;
-            Ok(())
+        self.modify_common(&mut |m| {
+            m.insert(key.to_string(), common);
         })
     }
 
-    /// **一个事务**写一批覆盖：`Some(common)` 写入、`None` 删除。返回真正写入的条数。
+    /// **一次提交**写一批覆盖：`Some(common)` 写入、`None` 删除。返回真正写入的条数。
     ///
-    /// 整类批量（按 Unicode 块设常用/生僻）用它。逐条走 [`Self::set_common_char_override`]
-    /// 的话，一个块几百上千个字符就是几百上千次 fsync 提交，而调用方每写一条还要回灌一次
-    /// 运行时镜像（全表重读 + 取写锁），那把锁正是候选过滤每次按键都要拿的。
+    /// 整类批量（按 Unicode 块设常用/生僻）用它：调用方每写一条还要回灌一次运行时镜像，
+    /// 那把锁正是候选过滤每次按键都要拿的，逐条写会把它拿上几百次。
     pub fn apply_common_char_overrides(
         &self,
         items: &[(String, Option<bool>)],
     ) -> anyhow::Result<usize> {
         let mut written = 0usize;
-        self.with_db(|db| {
-            let txn = db.begin_write()?;
-            {
-                let mut t = txn.open_table(COMMON_CHARS)?;
-                for (key, dir) in items {
-                    match dir {
-                        Some(common) => {
-                            let bytes = serde_json::to_vec(&CommonCharRecord { common: *common })?;
-                            t.insert(key.as_str(), bytes.as_slice())?;
-                            written += 1;
-                        }
-                        None => {
-                            t.remove(key.as_str())?;
-                        }
+        self.modify_common(&mut |m| {
+            written = 0;
+            for (key, dir) in items {
+                match dir {
+                    Some(common) => {
+                        m.insert(key.clone(), *common);
+                        written += 1;
+                    }
+                    None => {
+                        m.remove(key);
                     }
                 }
             }
-            txn.commit()?;
-            Ok(())
         })?;
         Ok(written)
     }
@@ -110,82 +187,31 @@ impl Store {
     /// 撤销某字的覆盖，回到出厂判定。`false` = 本就没有覆盖。
     ///
     /// 与「设为常用字」**不是**一回事：出厂判生僻的字，撤销覆盖后仍是生僻。
-    /// 设置页因此把两者分成两个动作（「恢复出厂」对「设为常用字」）；候选右键只有一项，
-    /// 靠「切到出厂方向即删覆盖」把恢复合并了进去（见 `Coordinator::apply_common_target`）。
     pub fn remove_common_char_override(&self, key: &str) -> anyhow::Result<bool> {
-        self.with_db(|db| {
-            let txn = db.begin_write()?;
-            let existed;
-            {
-                let mut t = txn.open_table(COMMON_CHARS)?;
-                existed = t.remove(key)?.is_some();
-            }
-            txn.commit()?;
-            Ok(existed)
-        })
+        let mut existed = false;
+        self.modify_common(&mut |m| existed = m.remove(key).is_some())?;
+        Ok(existed)
     }
 
     /// 某字是否有覆盖，以及方向。`None` = 未覆盖（由基表判定）。
     pub fn get_common_char_override(&self, key: &str) -> anyhow::Result<Option<bool>> {
-        self.with_db(|db| {
-            let txn = db.begin_read()?;
-            let t = txn.open_table(COMMON_CHARS)?;
-            Ok(t.get(key)?.and_then(|g| {
-                serde_json::from_slice::<CommonCharRecord>(g.value())
-                    .ok()
-                    .map(|r| r.common)
-            }))
-        })
+        Ok(self.common_map().get(key).copied())
     }
 
-    /// 全部覆盖，按字的码位升序（redb 键序 = UTF-8 字节序，对单字符即码位序）。
-    ///
-    /// 量级是「用户手工点出来的」，几十条到几百条，全量返回无压力——这正是稀疏存储
-    /// 换来的：界面直接列「我的调整」，而不是让用户在 8104 个字里翻页找。
+    /// 全部覆盖，按字的 UTF-8 字节序升序（对单字符即码位序）。
     pub fn list_common_char_overrides(&self) -> anyhow::Result<Vec<CommonCharOverride>> {
-        self.with_db(|db| {
-            let txn = db.begin_read()?;
-            let t = txn.open_table(COMMON_CHARS)?;
-            let mut out = Vec::new();
-            for item in t.iter()? {
-                let (k, v) = item?;
-                // 键是一个字素簇，多码位合法（`👨‍👩‍👧` 5 个码位）。只有空键才是脏数据
-                // （手工改库、旧版本残留），跳过而非报错——一条坏记录不该让整个列表打不开。
-                let ch = k.value().to_string();
-                if ch.is_empty() {
-                    continue;
-                }
-                let Ok(rec) = serde_json::from_slice::<CommonCharRecord>(v.value()) else {
-                    continue;
-                };
-                out.push(CommonCharOverride {
-                    ch,
-                    common: rec.common,
-                });
-            }
-            Ok(out)
-        })
+        Ok(self
+            .common_map()
+            .into_iter()
+            .map(|(ch, common)| CommonCharOverride { ch, common })
+            .collect())
     }
 
     /// 清空全部覆盖（词库管理界面的「全部恢复出厂」）。返回清掉的条数。
     pub fn clear_common_char_overrides(&self) -> anyhow::Result<usize> {
-        self.with_db(|db| {
-            let txn = db.begin_write()?;
-            let n;
-            {
-                let mut t = txn.open_table(COMMON_CHARS)?;
-                let keys: Vec<String> = t
-                    .iter()?
-                    .filter_map(|it| it.ok().map(|(k, _)| k.value().to_string()))
-                    .collect();
-                n = keys.len();
-                for k in &keys {
-                    t.remove(k.as_str())?;
-                }
-            }
-            txn.commit()?;
-            Ok(n)
-        })
+        let n = self.common_map().len();
+        self.common_doc().replace(None)?;
+        Ok(n)
     }
 
     /// 导出为 JSONL（备份 / 迁移）。每行 `{"ch":"槮","common":true}`。
@@ -204,6 +230,7 @@ impl Store {
         let normalized = wind_utils::text::normalize_input(text);
         let text = normalized.as_ref();
         let mut n = 0usize;
+        let mut items = Vec::new();
         for line in text.lines() {
             let line = line.trim();
             if line.is_empty() {
@@ -212,9 +239,10 @@ impl Store {
             let Ok(o) = serde_json::from_str::<CommonCharOverride>(line) else {
                 continue;
             };
-            self.set_common_char_override(&o.ch, o.common)?;
+            items.push((o.ch, Some(o.common)));
             n += 1;
         }
+        self.apply_common_char_overrides(&items)?;
         Ok(n)
     }
 }
@@ -304,5 +332,42 @@ mod tests {
             "{\"ch\":\"槮\",\"common\":true}\n不是 json\n\n{\"ch\":\"的\",\"common\":false}\n";
         assert_eq!(s.import_common_chars_jsonl(text).unwrap(), 2);
         assert_eq!(s.list_common_char_overrides().unwrap().len(), 2);
+    }
+
+    /// 常用字覆盖落用户目录文件。
+    #[test]
+    fn common_chars_live_in_user_dir() {
+        let s = store("file");
+        s.set_common_char_override("槮", true).unwrap();
+        s.set_common_char_override("的", false).unwrap();
+        let f = std::fs::read_to_string(s.common_chars_path()).unwrap();
+        assert!(
+            f.contains("common:") && f.contains("槮") && f.contains("uncommon:"),
+            "{f}"
+        );
+        assert_eq!(s.get_common_char_override("的").unwrap(), Some(false));
+    }
+
+    /// 编辑器正在改文件（复核前被改）⇒ 程序这次写入报错、不覆盖；sync 后再写成功。
+    #[test]
+    fn override_write_refuses_when_file_changed_underneath() {
+        let s = store("race");
+        s.set_common_char_override("槮", true).unwrap();
+        let f = s.common_chars_path();
+        let f2 = f.clone();
+        let me = std::thread::current().id();
+        wind_userdata::text::fold::set_before_rename_hook(Some(Box::new(move || {
+            if std::thread::current().id() == me {
+                std::fs::write(&f2, "common: [甲]\nuncommon: []\n").unwrap();
+            }
+        })));
+        let r = s.set_common_char_override("乙", true);
+        wind_userdata::text::fold::set_before_rename_hook(None);
+        assert!(r.is_err());
+        assert!(std::fs::read_to_string(&f).unwrap().contains("甲"));
+        s.sync_user_texts();
+        s.set_common_char_override("乙", true).unwrap();
+        let f = std::fs::read_to_string(&f).unwrap();
+        assert!(f.contains("甲") && f.contains("乙"), "{f}");
     }
 }

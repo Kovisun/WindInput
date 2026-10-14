@@ -15,7 +15,8 @@ use wind_store::Store;
 use wind_store::completion::CompletionKind;
 use wind_store::store::SCAN_RECLAIM_MIN_ROWS;
 
-/// 负载用补全历史表：P2 / P3 起用户词与短语都不在 redb，页缓存机制要拿仍在 redb 的表来测。
+/// 负载用旧补全历史表（`legacy_*` 写读器直接走 redb）：P2–P4a 起运行期数据都不在 redb，页缓存
+/// 机制要拿仍能读写的 redb 表来测；P4b 随 redb 一起删。
 const K: CompletionKind = CompletionKind::UrlHistory;
 
 const TICK: Duration = Duration::from_millis(20);
@@ -54,7 +55,7 @@ fn large_background_scan_is_reclaimed_after_a_short_idle_not_at_once() {
     let (calls, hook) = counting_hook();
     s.spawn_idle_cache_reclaimer_then(NEVER, SCAN_IDLE, TICK, hook);
 
-    s.list_completions(K, "", 0, 0).expect("扫").1;
+    s.legacy_scan_completions(K, "", 0).expect("扫").len();
     s.mark_scan_pending_rows(SCAN_RECLAIM_MIN_ROWS);
     assert_eq!(s.page_cache_drops(), 0, "不在建索引线程上当场关库重开");
     assert_eq!(calls.load(Ordering::SeqCst), 0);
@@ -65,7 +66,9 @@ fn large_background_scan_is_reclaimed_after_a_short_idle_not_at_once() {
     assert_eq!(s.page_cache_drops(), 1);
     assert_eq!(calls.load(Ordering::SeqCst), 1, "钩子恰好调一次");
     assert_eq!(
-        s.list_completions(K, "", 0, 0).expect("回收后照常可用").1,
+        s.legacy_scan_completions(K, "", 0)
+            .expect("回收后照常可用")
+            .len(),
         0
     );
     let _ = std::fs::remove_file(&p);
@@ -77,7 +80,7 @@ fn small_background_scan_is_not_marked() {
     let (s, p) = store("small");
     let (calls, hook) = counting_hook();
     s.spawn_idle_cache_reclaimer_then(NEVER, SCAN_IDLE, TICK, hook);
-    s.list_completions(K, "", 0, 0).expect("扫").1;
+    s.legacy_scan_completions(K, "", 0).expect("扫").len();
     s.mark_scan_pending_rows(SCAN_RECLAIM_MIN_ROWS - 1);
     std::thread::sleep(SCAN_IDLE * 4);
     assert_eq!(s.page_cache_drops(), 0);
@@ -93,7 +96,7 @@ fn repeated_background_scans_while_typing_reclaim_once_after_typing_stops() {
     let t0 = std::time::Instant::now();
     let mut i = 0;
     while t0.elapsed() < SCAN_IDLE * 6 {
-        let _ = s.list_completions(K, "", 0, 0).expect("按键查库").1;
+        let _ = s.legacy_scan_completions(K, "", 0).expect("按键查库").len();
         if i % 10 == 0 {
             s.mark_scan_pending_rows(SCAN_RECLAIM_MIN_ROWS); // 自动造词 ⇒ 重建 ⇒ 标记
         }
@@ -114,7 +117,7 @@ fn marked_scan_is_reclaimed_once_after_a_short_idle() {
     let (calls, hook) = counting_hook();
     s.spawn_idle_cache_reclaimer_then(NEVER, SCAN_IDLE, TICK, hook);
 
-    s.list_completions(K, "", 0, 0).expect("扫").1;
+    s.legacy_scan_completions(K, "", 0).expect("扫").len();
     s.mark_scan_pending();
     assert_eq!(s.page_cache_drops(), 0, "只标记，不立刻回收");
 
@@ -137,11 +140,11 @@ fn marked_scan_waits_while_the_store_is_busy() {
     let (s, p) = store("busy");
     s.spawn_idle_cache_reclaimer(NEVER, SCAN_IDLE, TICK);
 
-    s.list_completions(K, "", 0, 0).expect("扫").1;
+    s.legacy_scan_completions(K, "", 0).expect("扫").len();
     s.mark_scan_pending();
     let t0 = std::time::Instant::now();
     while t0.elapsed() < SCAN_IDLE * 5 {
-        let _ = s.list_completions(K, "", 0, 0).expect("查").1;
+        let _ = s.legacy_scan_completions(K, "", 0).expect("查").len();
         std::thread::sleep(TICK / 4);
     }
     assert_eq!(s.page_cache_drops(), 0, "持续访问期间不该回收");
@@ -160,7 +163,7 @@ fn without_a_mark_only_the_long_idle_applies() {
     let (s, p) = store("unmarked");
     s.spawn_idle_cache_reclaimer(IDLE, SCAN_IDLE, TICK);
 
-    s.list_completions(K, "", 0, 0).expect("扫").1;
+    s.legacy_scan_completions(K, "", 0).expect("扫").len();
     std::thread::sleep(SCAN_IDLE * 3);
     assert_eq!(s.page_cache_drops(), 0, "没标记，短档不该生效");
 
@@ -177,7 +180,7 @@ fn after_a_reclaim_without_access_or_mark_it_does_not_spin() {
     let (s, p) = store("spin");
     s.spawn_idle_cache_reclaimer(NEVER, SCAN_IDLE, TICK);
 
-    s.list_completions(K, "", 0, 0).expect("扫").1;
+    s.legacy_scan_completions(K, "", 0).expect("扫").len();
     s.mark_scan_pending();
     assert!(wait_until(SCAN_IDLE * 20, || s.page_cache_drops() >= 1));
 
@@ -191,7 +194,7 @@ fn after_a_reclaim_without_access_or_mark_it_does_not_spin() {
 fn a_mark_alone_counts_as_access() {
     let (s, p) = store("markalone");
     s.spawn_idle_cache_reclaimer(NEVER, SCAN_IDLE, TICK);
-    s.list_completions(K, "", 0, 0).expect("扫").1;
+    s.legacy_scan_completions(K, "", 0).expect("扫").len();
     s.mark_scan_pending();
     assert!(wait_until(SCAN_IDLE * 20, || s.page_cache_drops() >= 1));
 
@@ -209,7 +212,7 @@ fn a_paused_store_is_not_reclaimed_and_the_hook_is_not_run() {
     let (s, p) = store("paused");
     let (calls, hook) = counting_hook();
     s.spawn_idle_cache_reclaimer_then(NEVER, SCAN_IDLE, TICK, hook);
-    s.list_completions(K, "", 0, 0).expect("扫").1;
+    s.legacy_scan_completions(K, "", 0).expect("扫").len();
     s.pause().expect("暂停");
     s.mark_scan_pending();
     std::thread::sleep(SCAN_IDLE * 5);
@@ -230,14 +233,14 @@ fn a_mark_wakes_an_idle_reclaimer() {
     const SLOW_TICK: Duration = Duration::from_millis(100); // 闲置慢拍 = 1 s
     let (s, p) = store("wake");
     s.spawn_idle_cache_reclaimer(NEVER, SCAN_IDLE, SLOW_TICK);
-    s.list_completions(K, "", 0, 0).expect("扫").1;
+    s.legacy_scan_completions(K, "", 0).expect("扫").len();
     s.mark_scan_pending();
     assert!(wait_until(Duration::from_secs(5), || s.page_cache_drops() >= 1));
     // 回收之后闲置：线程进入慢拍。等它睡下。
     std::thread::sleep(SLOW_TICK * 3);
 
     let t0 = std::time::Instant::now();
-    s.list_completions(K, "", 0, 0).expect("再扫").1;
+    s.legacy_scan_completions(K, "", 0).expect("再扫").len();
     s.mark_scan_pending();
     assert!(wait_until(Duration::from_secs(5), || s.page_cache_drops() >= 2));
     let took = t0.elapsed();

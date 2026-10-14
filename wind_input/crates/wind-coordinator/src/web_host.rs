@@ -35,6 +35,8 @@ pub trait WebDataHost {
     // `theme_search_dirs()` 的第二份实现。加 data_custom 层时两份各改各的就会分叉。
     // 需要主题目录一律走 `theme_search_dirs()`（已按层序展开）。
     fn rebuild_phrases(&self);
+    /// 用户文本重新载入后，按变了的项（`Store::sync_user_texts` 的返回值）重建对应的内存镜像。
+    fn apply_user_text_changes(&self, changed: &[String]);
     fn restore_missing_system_phrases(&self, reason: &str);
     fn restore_system_phrases(&self) -> usize;
     fn sync_comment_dicts(&self);
@@ -265,6 +267,9 @@ impl WebDataHost for Coordinator {
     }
     fn rebuild_phrases(&self) {
         Coordinator::rebuild_phrases(self);
+    }
+    fn apply_user_text_changes(&self, changed: &[String]) {
+        Coordinator::apply_user_text_changes(self, changed);
     }
     fn restore_missing_system_phrases(&self, reason: &str) {
         Coordinator::restore_missing_system_phrases(self, reason);

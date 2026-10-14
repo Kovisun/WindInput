@@ -24,7 +24,10 @@
 | `src/migrate_p3.rs` | Shadow 打开时迁（标记 `migrated-p3-shadow`）；短语在首次 `set_system_phrases` 时迁（要 TOML 区分系统行改没改过，标记 `migrated-p3-phrases`）；`format_version_reached` 汇总 1–4 |
 | `src/freq.rs` | `FreqRecord`；门面委托 `Runtime`；`FreqProfile` 拼音衰减分；legacy `FreqTracker`（过渡期文件式，待移除）；`dec_freq` 只剩迁移读旧表用 |
 | `src/migration.rs` | 版本迁移框架；当前 `CURRENT_VERSION=1`，全新库直接打版本号 |
-| `src/stat_collector.rs` / `src/stats.rs` | 每日打字统计，写 `STATS_DAILY` table |
+| `src/stat_collector.rs` / `src/stats.rs` | 每日打字统计：P4a 起按月落 `<state>/stats/YYYY-MM.json`，元数据 `stats/meta.json`；收集器 30 秒写一次 |
+| `src/quick_format.rs` / `src/common_chars.rs` / `src/charsets.rs` | 覆盖表：P4a 起真源是用户目录 `user/quick_format.yaml`、`user/common_chars.yaml`、`user/charsets/<key>.yaml`（`TextDoc` 持有，写入带指纹复核；字符集直接读写文件） |
+| `src/completion.rs` | 补全历史（邮箱后缀 / 网址 / 快捷输入）：P4a 起内存持有、去抖 2 秒落 `<state>/completion.json`，`Store` 释放时同步落盘 |
+| `src/migrate_p4.rs` | 剩余旧表迁成文件（每类目标已存在即跳过），标记 `migrated-p4`；`legacy_put_*` 测试造旧库用 |
 
 ## For AI Agents
 
@@ -34,7 +37,7 @@
 - **状态目录**：`Store::open(path)` 把引擎状态放在 `<path>.state/`，redb 文件此前不存在时先清空它（测试反复用同一路径不串数据）；生产走 `Store::open_with_state(path, StateLoc)`（协调器传 `Config::state_dir()/runtime/<dir_id>`——按用户目录分开，换目录不串数据），从不清空。迁移**合并**而非替换：重做时引擎已有条目为准、count 取大，上一轮失败后的写入不丢；`migrated_p1()` 为真协调器才升 `format_version`。
 - **迁移以标记为准**：`state/migrated-p1` / `migrated-p2` 在就不迁；不在就整体重做（合并，重跑不翻倍）。P1 完成升 `format_version` 到 2，P1 + P2 都完成升到 3，旧版本随之只读。
 - **用户词文本位置**：`StateLoc.text_dir`（生产 `<userdata>/user`，派生模式 `<redb>.user/`，随新库清空）。`Store` 打开时把「目录下有文本的 ∪ 引擎里有用户词的」方案都 `bind_text`；其余在首次访问时 `ensure_user_text` 按需绑定（文本隔离 / 读不了只 WARN，绑定照样登记）。`lowercase` 恒 false，`syllable_codes` = 方案为 `pinyin`。改动停手 30 秒由后台节拍（`spawn_userdata_ticker`，协调器起）写回；手改文件在切方案 / 配置重载 / `dict.reload` 时 `sync`，变了推进代次。
-- **redb 只剩覆盖表 / 小文件 / META**（P4 处理）：页缓存回收那套测试（`drop_page_cache.rs` 等）用补全历史表 `COMPLETION` 做负载。
+- **P4a 起运行期不再写 redb**：它只供 P1–P4a 的迁移读旧表（以及 `schema_version`）。页缓存回收那套机制与测试（`drop_page_cache.rs` 等，负载用 `legacy_put_completions` / `legacy_scan_completions`）原样保留到 P4b 删 redb 时一起删。
 - **小表写入是同步的整文件提交**（几毫秒）：短语 / Shadow 都是用户逐条的显式动作；批量（导入、还原、迁移）在内存里攒好再**一次**提交，别逐条调 `pin_shadow` / `add_phrase`。手改文件经 `sync_user_texts`（返回值含 `"phrases"` 时协调器重建短语层）生效。
 
 - **所有读写必须经 `Store::with_db`**：不要直接访问 `Store.db` 字段。`with_db` 持 `Mutex` 锁并检查暂停态——`pause()` 后 `with_db` 返回 `"store is paused"` 错误，绕过它会破坏 pause/resume 语义或导致 panic。

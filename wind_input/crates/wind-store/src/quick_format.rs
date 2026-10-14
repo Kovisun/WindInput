@@ -34,8 +34,7 @@
 //! 规则的「应用」由调用方完成（`wind_quick_input::FormatAdjust`），本模块只管存取——
 //! 与 shadow 同一条纪律：store 不依赖业务类型。
 
-use crate::store::{QUICK_FORMAT, Store};
-use redb::ReadableTable;
+use crate::store::Store;
 use serde::{Deserialize, Serialize};
 
 /// 一条移动规则：把格式 `id` 固定到组内下标 `position`（0 = 首位）。
@@ -163,31 +162,81 @@ impl QuickFormatRecord {
     }
 }
 
+/// 文件形态：`kinds: {<kind>: QuickFormatRecord}`。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct QuickFile {
+    #[serde(default)]
+    kinds: std::collections::BTreeMap<String, QuickFormatRecord>,
+}
+
+const QUICK_HEADER: &str = "# 快捷格式调整（WindInput 维护，可手改）\n";
+
+fn parse_quick(s: &str) -> anyhow::Result<QuickFile> {
+    if s.trim().is_empty() {
+        return Ok(QuickFile::default());
+    }
+    serde_yaml::from_str(s).map_err(|e| anyhow::anyhow!("快捷格式文件解析失败：{e}"))
+}
+
 impl Store {
-    /// 读改写一类格式的调整；改完为空则删除该键（单写事务）。
+    /// 快捷格式调整的真源：`<text_dir>/quick_format.yaml`（P4a 起）。
+    pub fn quick_format_path(&self) -> std::path::PathBuf {
+        self.user_text_dir().join("quick_format.yaml")
+    }
+
+    pub(crate) fn quick_doc(&self) -> &wind_userdata::text::doc::TextDoc {
+        self.quick_doc
+            .get_or_init(|| wind_userdata::text::doc::TextDoc::open(self.quick_format_path()))
+    }
+
+    fn quick_file(&self) -> QuickFile {
+        match self.quick_doc().get() {
+            None => QuickFile::default(),
+            Some(s) => parse_quick(&s).unwrap_or_else(|e| {
+                tracing::warn!("{e:#}（按空表提供）");
+                QuickFile::default()
+            }),
+        }
+    }
+
+    /// 读改写整份快捷格式调整；全表为空则删文件。文件解析不了 ⇒ Err、不覆盖。
+    fn modify_quick_file(&self, f: &mut dyn FnMut(&mut QuickFile)) -> anyhow::Result<()> {
+        let mut err = None;
+        self.quick_doc().modify(&mut |cur| {
+            let mut qf = match cur.map(parse_quick).transpose() {
+                Ok(v) => v.unwrap_or_default(),
+                Err(e) => {
+                    err = Some(e);
+                    return cur.map(String::from);
+                }
+            };
+            f(&mut qf);
+            qf.kinds.retain(|_, r| !r.is_empty());
+            if qf.kinds.is_empty() {
+                return None;
+            }
+            Some(format!(
+                "{QUICK_HEADER}{}",
+                serde_yaml::to_string(&qf).unwrap_or_default()
+            ))
+        })?;
+        match err {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
+    }
+
+    /// 读改写一类格式的调整；改完为空则删除该类。
     fn modify_quick_format(
         &self,
         kind: &str,
         f: impl FnOnce(&mut QuickFormatRecord),
     ) -> anyhow::Result<()> {
-        self.with_db(|db| {
-            let txn = db.begin_write()?;
-            {
-                let mut t = txn.open_table(QUICK_FORMAT)?;
-                let mut rec: QuickFormatRecord = t
-                    .get(kind)?
-                    .and_then(|g| serde_json::from_slice(g.value()).ok())
-                    .unwrap_or_default();
-                f(&mut rec);
-                if rec.is_empty() {
-                    t.remove(kind)?;
-                } else {
-                    let bytes = serde_json::to_vec(&rec)?;
-                    t.insert(kind, bytes.as_slice())?;
-                }
+        let mut f = Some(f);
+        self.modify_quick_file(&mut |qf| {
+            if let Some(f) = f.take() {
+                f(qf.kinds.entry(kind.to_string()).or_default());
             }
-            txn.commit()?;
-            Ok(())
         })
     }
 
@@ -252,42 +301,54 @@ impl Store {
     /// 留着旧的自定义条目会得到「文件里的 + 我原有的」，那不叫替换。
     /// 面向用户的「恢复默认」一律走 [`Self::reset_quick_format_kind`]。
     pub fn clear_quick_format_kind(&self, kind: &str) -> anyhow::Result<()> {
-        self.with_db(|db| {
-            let txn = db.begin_write()?;
-            {
-                let mut t = txn.open_table(QUICK_FORMAT)?;
-                t.remove(kind)?;
+        self.modify_quick_file(&mut |qf| {
+            qf.kinds.remove(kind);
+        })
+    }
+
+    /// 导出整份快捷格式调整（备份用；没有调整 ⇒ 空串）。
+    pub fn export_quick_format_yaml(&self) -> anyhow::Result<String> {
+        Ok(self
+            .quick_doc()
+            .get()
+            .map(|s| s.to_string())
+            .unwrap_or_default())
+    }
+
+    /// 从备份导入：`replace` ⇒ 整份替换；否则只补本地没有的类（本地已调整的类以本地为准）。
+    pub fn import_quick_format_yaml(&self, text: &str, replace: bool) -> anyhow::Result<usize> {
+        let qf = parse_quick(text)?;
+        let rows: Vec<_> = qf.kinds.into_iter().collect();
+        let n = rows.len();
+        self.import_quick_format_rows(rows, replace)?;
+        Ok(n)
+    }
+
+    /// 批量写入若干类的调整，一次提交（迁移 / 备份还原用）。
+    pub(crate) fn import_quick_format_rows(
+        &self,
+        rows: Vec<(String, QuickFormatRecord)>,
+        replace: bool,
+    ) -> anyhow::Result<()> {
+        let mut rows = Some(rows);
+        self.modify_quick_file(&mut |qf| {
+            if replace {
+                qf.kinds.clear();
             }
-            txn.commit()?;
-            Ok(())
+            for (k, r) in rows.take().unwrap_or_default() {
+                qf.kinds.entry(k).or_insert(r);
+            }
         })
     }
 
     /// 取某类的调整（无则 `None`）。
     pub fn get_quick_format(&self, kind: &str) -> anyhow::Result<Option<QuickFormatRecord>> {
-        self.with_db(|db| {
-            let txn = db.begin_read()?;
-            let t = txn.open_table(QUICK_FORMAT)?;
-            Ok(t.get(kind)?
-                .and_then(|g| serde_json::from_slice(g.value()).ok()))
-        })
+        Ok(self.quick_file().kinds.remove(kind))
     }
 
     /// 列出全部类别的调整（设置页与启动装载用），按 kind 升序。
     pub fn list_quick_format(&self) -> anyhow::Result<Vec<(String, QuickFormatRecord)>> {
-        self.with_db(|db| {
-            let txn = db.begin_read()?;
-            let t = txn.open_table(QUICK_FORMAT)?;
-            let mut out = Vec::new();
-            for item in t.iter()? {
-                let (k, v) = item?;
-                if let Ok(rec) = serde_json::from_slice::<QuickFormatRecord>(v.value()) {
-                    out.push((k.value().to_string(), rec));
-                }
-            }
-            out.sort_by(|a, b| a.0.cmp(&b.0));
-            Ok(out)
-        })
+        Ok(self.quick_file().kinds.into_iter().collect())
     }
 }
 
@@ -529,5 +590,25 @@ mod tests {
         assert!(rec.is_empty());
         rec.add_entry("date.u1", "$Y");
         assert!(!rec.is_empty(), "★ 否则加完一条就被当空记录删掉");
+    }
+
+    /// 快捷格式调整落用户目录文件；重开读回。
+    #[test]
+    fn quick_format_lives_in_user_dir() {
+        let p = std::env::temp_dir().join(format!("wind_qf_file_{}.redb", std::process::id()));
+        let _ = std::fs::remove_file(&p);
+        {
+            let s = Store::open(&p).unwrap();
+            s.add_quick_format("date", "my", "yyyy").unwrap();
+            s.set_quick_format_enabled("date", "iso", false).unwrap();
+            let f = std::fs::read_to_string(s.quick_format_path()).unwrap();
+            assert!(f.contains("my") && f.contains("iso"), "{f}");
+        }
+        let s = Store::open(&p).unwrap();
+        let r = s.get_quick_format("date").unwrap().unwrap();
+        assert_eq!(r.added[0].id, "my");
+        assert_eq!(r.disabled, vec!["iso".to_string()]);
+        s.clear_quick_format_kind("date").unwrap();
+        assert!(s.get_quick_format("date").unwrap().is_none());
     }
 }

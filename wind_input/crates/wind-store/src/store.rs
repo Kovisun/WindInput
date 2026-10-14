@@ -52,6 +52,9 @@ pub const RECLAIM_TICK: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// 用户数据后台节拍：文本目标（用户词）空闲折回不依赖下一次写入，停手后这么久之内一定写回。
 pub const USERDATA_TICK: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// 小文件（补全历史）去抖落盘的节拍（设计 §2.4：2 秒）。
+pub const SMALL_FILE_FLUSH: std::time::Duration = std::time::Duration::from_secs(2);
 /// 闲置慢拍 = `tick` × 本值。
 const IDLE_TICK_FACTOR: u32 = 10;
 /// [`Store::mark_scan_pending_rows`] 的门槛：后台扫描走过的行数不到它就不标记。
@@ -191,6 +194,17 @@ pub struct Store {
     /// 用户词文本根目录（P2 起用户词的真源）。
     text_dir: PathBuf,
     /// 各方案的 Shadow 规则表（P3 起真源是 `user/<schema>/shadow.dict.yaml`），首次访问时载入。
+    /// 每日统计文件读改写的串行化（收集器 flush 与设置页查询 / 清理并发）。
+    pub(crate) stats_io: Mutex<()>,
+    /// 补全历史（P4a 起内存持有，去抖落盘到状态目录）。
+    pub(crate) completions: Mutex<crate::completion::CompletionState>,
+    /// 补全历史落盘的串行化（落盘在数据锁外做）。
+    pub(crate) completion_io: Mutex<()>,
+    /// 快捷格式调整 / 常用字覆盖的真源文件（P4a 起，首次访问时载入）。
+    pub(crate) quick_doc: std::sync::OnceLock<wind_userdata::text::doc::TextDoc>,
+    pub(crate) common_doc: std::sync::OnceLock<wind_userdata::text::doc::TextDoc>,
+    /// 字符集用户层目录的上次指纹（`None` = 还没取过）。
+    pub(crate) charsets_fp: Mutex<Option<String>>,
     /// 系统短语（来自 TOML，协调器交进来；P3 起不落库）。
     pub(crate) phrase_sys: std::sync::RwLock<std::sync::Arc<Vec<crate::phrases::SystemPhrase>>>,
     /// 用户短语文件表（首次访问时载入）。
@@ -242,6 +256,15 @@ pub struct Store {
     words_gen_by_schema: std::sync::Mutex<std::collections::HashMap<String, u64>>,
     /// 不分方案的写入（`resume` 换了整个文件）推进的纪元；`words_generation_of` 把它并进返回值。
     words_epoch: std::sync::atomic::AtomicU64,
+}
+
+impl Drop for Store {
+    /// 释放前把还没落盘的小文件写掉（进程正常退出、测试、工具不起落盘线程时靠它）。
+    fn drop(&mut self) {
+        if let Err(e) = self.flush_small_files() {
+            warn!("释放时小文件落盘失败：{e:#}");
+        }
+    }
 }
 
 impl Store {
@@ -301,6 +324,12 @@ impl Store {
             text_dir: loc.text_dir.clone(),
             shadows: Mutex::new(std::collections::HashMap::new()),
             phrase_sys: Default::default(),
+            completions: Mutex::new(Default::default()),
+            completion_io: Mutex::new(()),
+            stats_io: Mutex::new(()),
+            quick_doc: std::sync::OnceLock::new(),
+            common_doc: std::sync::OnceLock::new(),
+            charsets_fp: Mutex::new(None),
             phrase_table: std::sync::OnceLock::new(),
             db: Mutex::new(Some(db)),
             cache_bytes,
@@ -328,6 +357,11 @@ impl Store {
         if let Err(e) = store.migrate_p3_shadow_if_needed(&state_dir) {
             warn!("P3 Shadow 迁移失败，下次启动重试：{e}");
         }
+        if let Err(e) = store.migrate_p4_if_needed(&state_dir) {
+            warn!("P4a 迁移失败，下次启动重试：{e}");
+        }
+        // 字符集用户层的基线指纹：没有它，启动后第一次手改 sync 时比不出变化
+        store.remember_charsets_fp();
         info!(
             "Store opened: {} (v{})",
             store.path.display(),
@@ -403,6 +437,27 @@ impl Store {
     /// 起用户数据后台节拍（生产由协调器起；测试 / 工具不起，靠显式折回）。只读实例不起。
     pub fn spawn_userdata_ticker(&self, every: std::time::Duration) {
         let _ = self.runtime.data().spawn_ticker(every);
+    }
+
+    /// 小文件（补全历史，P4a）有改动就落盘。去抖落盘线程、`Store` 释放、`dict.flush` 调。
+    pub fn flush_small_files(&self) -> anyhow::Result<()> {
+        self.flush_completions()
+    }
+
+    /// 小文件去抖落盘线程（生产由协调器起；测试 / 工具靠 `Drop` 落盘）。只持 `Weak`。
+    pub fn spawn_small_file_flusher(self: &std::sync::Arc<Self>, every: std::time::Duration) {
+        let weak = std::sync::Arc::downgrade(self);
+        let _ = std::thread::Builder::new()
+            .name("store-small-files".into())
+            .spawn(move || {
+                loop {
+                    std::thread::sleep(every);
+                    let Some(me) = weak.upgrade() else { return };
+                    if let Err(e) = me.flush_small_files() {
+                        warn!("小文件落盘失败：{e:#}");
+                    }
+                }
+            });
     }
 
     pub(crate) fn state_dir(&self) -> &Path {
@@ -548,7 +603,7 @@ impl Store {
         })
     }
 
-    /// 写 META 表的字符串值。
+    /// 写 META 表的字符串值（P4a 起只剩迁移测试造旧库用）。
     pub(crate) fn meta_set(&self, key: &str, val: &str) -> anyhow::Result<()> {
         self.with_db(|db| {
             let txn = db.begin_write()?;

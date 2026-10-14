@@ -401,13 +401,29 @@ impl Store {
         self.put_phrase_rows(vec![((code.into(), text.into()), Some(row))])
     }
 
-    /// TOML 内容哈希标记（判断是否需要重新同步系统短语）。
+    /// 系统短语同步哈希的文件：`<text_dir>/phrases.sys_hash`。它描述的是「短语文件里的修改行
+    /// 已按哪一版系统 TOML 归一过」，所以跟着短语文件（用户目录）走——放本机状态目录的话，换机 /
+    /// 清 state 后哈希缺失会触发一次同步，把用户对系统短语的修改重置回出厂。
+    pub fn phrase_sys_hash_path(&self) -> std::path::PathBuf {
+        self.user_text_dir().join("phrases.sys_hash")
+    }
+
+    /// TOML 内容哈希标记（判断是否需要重新同步系统短语），见 [`Self::phrase_sys_hash_path`]。
     pub fn phrase_sys_hash(&self) -> anyhow::Result<Option<String>> {
-        self.meta_get("phrase_sys_hash")
+        let p = self.phrase_sys_hash_path();
+        Ok(wind_userdata::text::fold::read_text(&p)?
+            .map(|(b, _)| String::from_utf8_lossy(&b).trim().to_string())
+            .filter(|s| !s.is_empty()))
     }
 
     pub fn set_phrase_sys_hash(&self, h: &str) -> anyhow::Result<()> {
-        self.meta_set("phrase_sys_hash", h)
+        let p = self.phrase_sys_hash_path();
+        wind_userdata::text::fold::commit_text(&p, format!("{h}\n").as_bytes(), None)
+    }
+
+    /// 旧 META 里的 `phrase_sys_hash`（P4a 迁移用）。
+    pub(crate) fn legacy_phrase_sys_hash(&self) -> anyhow::Result<Option<String>> {
+        self.meta_get("phrase_sys_hash")
     }
 
     /// 系统短语 TOML 变了：设定新的系统条目；修改行的 weight / position / category 回到 TOML 值、
@@ -1472,5 +1488,38 @@ mod tests {
             !all.iter().find(|p| p.code == "b").unwrap().enabled,
             "对系统条目的修改保留"
         );
+    }
+
+    /// phrase_sys_hash 离开 redb：落用户目录（跟着短语文件走），重开读回。
+    #[test]
+    fn phrase_sys_hash_lives_beside_phrases_file() {
+        let p = tmp("wind_ph_hash_state.redb");
+        {
+            let s = Store::open(&p).unwrap();
+            s.set_phrase_sys_hash("h1").unwrap();
+            assert!(s.phrase_sys_hash_path().is_file());
+            assert_eq!(s.phrase_sys_hash_path().parent(), Some(s.user_text_dir()));
+        }
+        let s = Store::open(&p).unwrap();
+        assert_eq!(s.phrase_sys_hash().unwrap().as_deref(), Some("h1"));
+    }
+
+    /// 审查 I-4：系统短语同步哈希随用户目录走——本机状态目录是新的（换机 / 清 state）时不得丢失，
+    /// 否则会触发一次同步、把用户对系统短语的修改重置回出厂。
+    #[test]
+    fn phrase_sys_hash_roams_with_user_dir() {
+        let base = std::env::temp_dir().join(format!("wind_ph_hash_roam_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let loc = |st: &str| crate::store::StateLoc {
+            state_dir: base.join(st),
+            dir_id: "d".into(),
+            text_dir: base.join("user"),
+        };
+        {
+            let s = Store::open_with_state(base.join("a.redb"), loc("state1")).unwrap();
+            s.set_phrase_sys_hash("h1").unwrap();
+        }
+        let s = Store::open_with_state(base.join("b.redb"), loc("state2")).unwrap();
+        assert_eq!(s.phrase_sys_hash().unwrap().as_deref(), Some("h1"));
     }
 }

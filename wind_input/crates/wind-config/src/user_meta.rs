@@ -7,8 +7,9 @@ use std::path::Path;
 
 /// 本版本认识的格式版本。1 = 纯 redb；2 = P1：临时词 / 草稿 / 词频 / 联想历史在运行时引擎
 /// （`local_dir()/state/`）；3 = P2：用户词在 `user/<schema>/user.dict.yaml`；4 = P3：短语与 Shadow
-/// 在 `user/phrases.dict.yaml` / `user/<schema>/shadow.dict.yaml`。每个 P 阶段迁移完成 +1。
-pub const KNOWN_FORMAT_VERSION: u32 = 4;
+/// 在 `user/phrases.dict.yaml` / `user/<schema>/shadow.dict.yaml`；5 = P4a：快捷格式 / 常用字 /
+/// 字符集用户层在用户目录，补全历史 / 统计在本机状态目录。每个 P 阶段迁移完成 +1。
+pub const KNOWN_FORMAT_VERSION: u32 = 5;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct UserMeta {

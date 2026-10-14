@@ -48,7 +48,8 @@
 use wind_store::Store;
 use wind_store::completion::CompletionKind;
 
-/// 负载用补全历史表：P2 / P3 起用户词与短语都不在 redb，页缓存机制要拿仍在 redb 的表来测。
+/// 负载用旧补全历史表（`legacy_*` 写读器直接走 redb）：P2–P4a 起运行期数据都不在 redb，页缓存
+/// 机制要拿仍能读写的 redb 表来测；P4b 随 redb 一起删。
 const K: CompletionKind = CompletionKind::UrlHistory;
 
 const N: usize = 190_000;
@@ -70,13 +71,9 @@ fn rss_mb() -> f64 {
 
 /// 原 `perf_cache_size.rs`（已随 P2b 删除）同款夹具：2~4 音节轮换，贴近真实拼音词库的键分布。
 /// 换成等长串会让页的填充率失真，库大小跟着失真。
-fn jsonl(data: &[(String, String)]) -> String {
+fn legacy_rows(data: &[(String, String)]) -> Vec<(CompletionKind, String, u32, i64)> {
     data.iter()
-        .map(|(code, _)| {
-            format!(
-                "{{\"kind\":\"url_history\",\"text\":\"{code}\",\"count\":1,\"last_used\":0}}\n"
-            )
-        })
+        .map(|(code, _)| (K, code.clone(), 1, 0))
         .collect()
 }
 
@@ -105,7 +102,7 @@ fn the_page_cache_is_a_high_water_mark() {
             let _ = std::fs::remove_file(&db);
             let data = rows();
             let s = Store::open(&db).expect("开库");
-            s.import_completions_jsonl(&jsonl(&data)).expect("导入");
+            s.legacy_put_completions(&legacy_rows(&data)).expect("导入");
             let mb = std::fs::metadata(&db)
                 .map(|m| m.len() as f64 / 1048576.0)
                 .unwrap();
@@ -128,7 +125,7 @@ fn the_page_cache_is_a_high_water_mark() {
             let data = rows();
             let ready = rss_mb();
             let s = Store::open(&db).expect("开库");
-            s.import_completions_jsonl(&jsonl(&data)).expect("导入");
+            s.legacy_put_completions(&legacy_rows(&data)).expect("导入");
             let imported = rss_mb();
             drop(data);
             let dropped = rss_mb();
@@ -145,20 +142,20 @@ fn the_page_cache_is_a_high_water_mark() {
             let resumed = rss_mb();
             println!("[import] pause（丢弃 db）   RSS {paused:.1} MB  ← 缓存在这一步被释放");
             println!("[import] resume（重开）     RSS {resumed:.1} MB");
-            let n = s.list_completions(K, "ai", 0, 30).expect("查").0.len();
+            let n = s.legacy_scan_completions(K, "ai", 30).expect("查").len();
             println!("[import] 重开后仍可查（{n} 条）RSS {:.1} MB", rss_mb());
         }
         Ok("scan") => {
             let before = rss_mb();
             let s = Store::open(&db).expect("开库");
             let opened = rss_mb();
-            let n = s.list_completions(K, "", 0, 0).expect("全表扫").1;
+            let n = s.legacy_scan_completions(K, "", 0).expect("全表扫").len();
             let scanned = rss_mb();
             // 结果立刻丢弃：留下的只可能是缓存，不是结果本身。
             println!("[scan]  开库             RSS {before:.1} → {opened:.1} MB");
             println!("[scan]  全表扫 {n} 条  RSS {opened:.1} → {scanned:.1} MB");
             for i in 0..3 {
-                let _ = s.list_completions(K, "", 0, 0).expect("再扫");
+                let _ = s.legacy_scan_completions(K, "", 0).expect("再扫");
                 println!("[scan]  再扫第 {} 次       RSS {:.1} MB", i + 1, rss_mb());
             }
             println!("[scan]  ↑ 只涨不落即为高水位");
@@ -177,7 +174,7 @@ fn the_page_cache_is_a_high_water_mark() {
             const PROBE: usize = 40 * 1024 * 1024;
             let s = Store::open(&db).expect("开库");
             for _ in 0..3 {
-                let _ = s.list_completions(K, "", 0, 0).expect("全表扫");
+                let _ = s.legacy_scan_completions(K, "", 0).expect("全表扫");
             }
             let filled = rss_mb();
             if mode == "evict" {
@@ -205,7 +202,7 @@ fn the_page_cache_is_a_high_water_mark() {
             );
             if mode == "evict" {
                 s.resume().expect("恢复");
-                let n = s.list_completions(K, "ai", 0, 30).expect("查").0.len();
+                let n = s.legacy_scan_completions(K, "ai", 30).expect("查").len();
                 println!("[evict] resume 后仍可查（{n} 条）");
             }
         }
@@ -219,7 +216,7 @@ fn the_page_cache_is_a_high_water_mark() {
             let s = Store::open(&db).expect("开库");
             let opened = rss_mb();
             for _ in 0..3 {
-                let _ = s.list_completions(K, "", 0, 0).expect("全表扫");
+                let _ = s.legacy_scan_completions(K, "", 0).expect("全表扫");
             }
             let filled = rss_mb();
             s.drop_page_cache().expect("回收");
@@ -251,7 +248,7 @@ fn the_page_cache_is_a_high_water_mark() {
                 },
             );
             let opened = rss_mb();
-            let n = s.list_completions(K, "", 0, 0).expect("全表扫").1;
+            let n = s.legacy_scan_completions(K, "", 0).expect("全表扫").len();
             let scanned = rss_mb();
             if n < wind_store::store::SCAN_RECLAIM_MIN_ROWS {
                 println!(
@@ -269,7 +266,10 @@ fn the_page_cache_is_a_high_water_mark() {
             // 回收与钩子在同一拍里先后执行：drops 变了之后再给钩子一拍的时间。
             std::thread::sleep(Duration::from_millis(100));
             let reclaimed = rss_mb();
-            let again = s.list_completions(K, "", 0, 0).expect("回收后再查").1;
+            let again = s
+                .legacy_scan_completions(K, "", 0)
+                .expect("回收后再查")
+                .len();
             println!(
                 "[scanreclaim] 开库 {before:.1} → {opened:.1} → 全表扫 {n} 条 {scanned:.1} → \
                  标记后 {marked:.1} → 空闲 {:?} 后回收（含 malloc_trim）{reclaimed:.1} MB；\

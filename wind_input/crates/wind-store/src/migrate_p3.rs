@@ -28,13 +28,19 @@ impl Store {
         Ok(())
     }
 
-    /// 按迁移进度应达到的 `format_version`：P1 → 2，P1 + P2 → 3，P1 + P2 + P3 → 4；P1 都没迁完
+    /// 按迁移进度应达到的 `format_version`：P1 → 2，+P2 → 3，+P3 → 4，+P4a → 5；P1 都没迁完
     /// ⇒ None（不升）。协调器打开库时、设定系统短语（触发短语迁移）之后各升一次。
     pub fn format_version_reached(&self) -> Option<u32> {
-        match (self.migrated_p1(), self.migrated_p2(), self.migrated_p3()) {
-            (true, true, true) => Some(4),
-            (true, true, false) => Some(3),
-            (true, false, _) => Some(2),
+        match (
+            self.migrated_p1(),
+            self.migrated_p2(),
+            self.migrated_p3(),
+            self.migrated_p4(),
+        ) {
+            (true, true, true, true) => Some(5),
+            (true, true, true, false) => Some(4),
+            (true, true, false, _) => Some(3),
+            (true, false, _, _) => Some(2),
             _ => None,
         }
     }

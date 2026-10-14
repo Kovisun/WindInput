@@ -1164,10 +1164,8 @@ pub trait WebDataRpc: WebDataHost {
             }
             None => store.sync_user_texts(),
         };
-        // 短语文件变了 ⇒ 输入期短语层随之重建（Shadow 按键路径直接读表，不用）
-        if reloaded.iter().any(|c| c == "phrases") {
-            self.rebuild_phrases();
-        }
+        // 变了的项重建对应的内存镜像（短语层、快捷格式、常用字、字符集）
+        self.apply_user_text_changes(&reloaded);
         Ok(json!({ "reloaded": reloaded }))
     }
 
@@ -2206,13 +2204,27 @@ pub trait WebDataRpc: WebDataHost {
             user_themes_dir: themes_dir.as_deref(),
             state_file: state_file.as_deref(),
         };
-        let r = restore_backup(
+        // 还原期间挂起统计收集器：它后台 30 秒那次 flush 若落在「还原写完、resume 之前」，会把
+        // 还原前的今天与总计写回去（P4a 审查 I-5）。还原失败也要解除挂起。
+        let collector = self.stat_collector();
+        if let Some(c) = collector {
+            c.suspend();
+        }
+        let r = match restore_backup(
             std::path::Path::new(path),
             store,
             &targets,
             strategy,
             sections.as_deref(),
-        )?;
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                if let Some(c) = collector {
+                    c.unsuspend();
+                }
+                return Err(e);
+            }
+        };
         // 刷新:config 域生效、短语重建、涉及方案失效缓存(未加载时安全 no-op)。
         let touched_config = r.restored.iter().any(|p| p.starts_with("config/"));
         let touched_phrase = r.restored.iter().any(|p| p == "userdata/phrases.wdict");
@@ -2258,6 +2270,24 @@ pub trait WebDataRpc: WebDataHost {
         }
         if touched_charsets {
             self.reload_charsets();
+        }
+        // 常用字 / 快捷格式的内存镜像、统计收集器都要跟着还原后的数据重载：收集器不 resume 的话，
+        // 它下一次写盘会把还原前的「今天」和总计写回去（P4a Review Focus 4）。
+        let touched = |p: &str| r.restored.iter().any(|x| x == p);
+        let mut changed = Vec::new();
+        if touched("userdata/common_chars.jsonl") {
+            changed.push("common_chars".to_string());
+        }
+        if touched("userdata/quick_format.yaml") {
+            changed.push("quick_format".to_string());
+        }
+        self.apply_user_text_changes(&changed);
+        if let Some(c) = collector {
+            if touched("userdata/stats.jsonl") || touched("userdata/stats_meta.json") {
+                c.resume();
+            } else {
+                c.unsuspend();
+            }
         }
         Ok(json!({
             "restored": r.restored,
@@ -9845,6 +9875,58 @@ short_code_yield_level = 2
             c.web_data_rpc("scheme.previewImportText", &json!({}))
                 .is_err()
         );
+    }
+
+    /// P4a Review Focus 4：Replace 还原统计后，收集器下一次写盘不覆盖还原值。
+    #[test]
+    fn restore_stats_resets_collector() {
+        use wind_store::stat_collector::StatEvent;
+        let c = coord("restore_stats");
+        let store = c.user_store().cloned().unwrap();
+        let col = c.stat_collector().expect("采集器");
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        store
+            .put_daily_stat(
+                &today,
+                &wind_store::stats::DailyStats {
+                    chinese: 5,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        col.resume();
+        let out =
+            std::env::temp_dir().join(format!("wind_restore_stats_{}.zip", std::process::id()));
+        let _ = std::fs::remove_file(&out);
+        c.web_data_rpc(
+            "backup.create",
+            &json!({ "path": out.to_string_lossy(), "includeStats": true }),
+        )
+        .unwrap();
+        col.record(StatEvent {
+            timestamp: chrono::Local::now(),
+            chinese: 100,
+            english: 0,
+            punct: 0,
+            other: 0,
+            code_len: 2,
+            candidate_pos: 0,
+            keystrokes: 2,
+            schema_id: "wb".into(),
+            source: Default::default(),
+        });
+        c.web_data_rpc(
+            "backup.restore",
+            &json!({ "path": out.to_string_lossy(), "sections": ["stats"], "strategy": "replace" }),
+        )
+        .unwrap();
+        col.flush();
+        assert_eq!(
+            store.get_daily_stat(&today).unwrap().chinese,
+            5,
+            "收集器不得覆盖还原值"
+        );
+        let _ = std::fs::remove_file(&out);
     }
 
     #[test]

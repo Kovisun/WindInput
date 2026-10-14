@@ -4803,9 +4803,7 @@ impl Coordinator {
                     if !changed.is_empty() {
                         info!("用户文本已重新载入：{} 项", changed.len());
                     }
-                    if changed.iter().any(|c| c == "phrases") {
-                        self.rebuild_phrases();
-                    }
+                    self.apply_user_text_changes(&changed);
                 }
                 // 语言栏图标的呈现参数同理跟随全局配置（`[ui.langbar]`），也不属 schema。
                 // 少了这一步，改角标形状/配色要重启才生效——「改了没反应、重启就好」正是
@@ -9484,6 +9482,24 @@ impl Coordinator {
     }
 
     /// 从 store 重建短语层（短语类 RPC 改动后调用，使输入期即时生效）。
+    /// 用户文本重新载入后，按变了的项重建内存镜像：短语层、快捷格式调整、常用字覆盖、字符集
+    /// 注册表。用户词与 Shadow 由引擎 / 按键路径直接读表，不用重建。
+    pub(crate) fn apply_user_text_changes(&self, changed: &[String]) {
+        let has = |k: &str| changed.iter().any(|c| c == k);
+        if has("phrases") {
+            self.rebuild_phrases();
+        }
+        if has("quick_format") {
+            self.reload_quick_adjust();
+        }
+        if has("common_chars") {
+            self.reload_common_chars();
+        }
+        if has("charsets") {
+            self.reload_charsets();
+        }
+    }
+
     pub(crate) fn rebuild_phrases(&self) {
         let recs: Vec<wind_phrase::PhraseSeed> = match self.store.as_ref() {
             Some(store) => store

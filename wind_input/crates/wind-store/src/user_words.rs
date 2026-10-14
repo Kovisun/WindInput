@@ -417,6 +417,15 @@ impl Store {
         if self.sync_phrases() {
             changed.push("phrases".into());
         }
+        if self.quick_doc().sync() {
+            changed.push("quick_format".into());
+        }
+        if self.common_doc().sync() {
+            changed.push("common_chars".into());
+        }
+        if self.sync_charsets() {
+            changed.push("charsets".into());
+        }
         changed
     }
 
@@ -427,6 +436,9 @@ impl Store {
         use std::path::{Component, Path};
         enum Target {
             Phrases,
+            Quick,
+            Common,
+            Charsets,
             Words(String),
             Shadow(String),
         }
@@ -438,6 +450,19 @@ impl Store {
             let t = match comps.get(base.len()..) {
                 Some([Component::Normal(f)]) if inside && *f == "phrases.dict.yaml" => {
                     Target::Phrases
+                }
+                Some([Component::Normal(f)]) if inside && *f == "quick_format.yaml" => {
+                    Target::Quick
+                }
+                Some([Component::Normal(f)]) if inside && *f == "common_chars.yaml" => {
+                    Target::Common
+                }
+                Some([Component::Normal(d), Component::Normal(f)])
+                    if inside
+                        && *d == "charsets"
+                        && Path::new(f).extension().and_then(|x| x.to_str()) == Some("yaml") =>
+                {
+                    Target::Charsets
                 }
                 Some([Component::Normal(s), Component::Normal(f)]) if inside => {
                     let s = s.to_string_lossy().into_owned();
@@ -457,6 +482,9 @@ impl Store {
         for t in targets {
             let name = match t {
                 Target::Phrases => self.sync_phrases().then(|| "phrases".to_string()),
+                Target::Quick => self.quick_doc().sync().then(|| "quick_format".to_string()),
+                Target::Common => self.common_doc().sync().then(|| "common_chars".to_string()),
+                Target::Charsets => self.sync_charsets().then(|| "charsets".to_string()),
                 Target::Words(s) => self.sync_user_text(&s).then_some(s),
                 Target::Shadow(s) => self.shadow_table_synced(&s).then_some(s),
             };
@@ -471,7 +499,8 @@ impl Store {
 
     /// `dict.flush`：折回全部待处理操作（文本目标写回文件），再压实日志。
     pub fn flush_user_data(&self) -> anyhow::Result<()> {
-        self.runtime().data().compact()
+        self.runtime().data().compact()?;
+        self.flush_small_files()
     }
 
     /// 导出某方案的全部用户词为 wdict 文本(仅 code/text/weight,不含个人 count/created_at)。

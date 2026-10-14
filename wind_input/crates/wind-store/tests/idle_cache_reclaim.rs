@@ -16,7 +16,8 @@ use std::time::Duration;
 use wind_store::Store;
 use wind_store::completion::CompletionKind;
 
-/// 负载用补全历史表：P2 / P3 起用户词与短语都不在 redb，页缓存机制要拿仍在 redb 的表来测。
+/// 负载用旧补全历史表（`legacy_*` 写读器直接走 redb）：P2–P4a 起运行期数据都不在 redb，页缓存
+/// 机制要拿仍能读写的 redb 表来测；P4b 随 redb 一起删。
 const K: CompletionKind = CompletionKind::UrlHistory;
 
 const TICK: Duration = Duration::from_millis(20);
@@ -46,7 +47,8 @@ fn an_idle_store_gives_its_page_cache_back() {
     let (s, p) = store("reclaims");
     s.spawn_idle_cache_reclaimer(IDLE, IDLE, TICK);
 
-    s.record_completion(K, "ni").expect("写");
+    s.legacy_put_completions(&[(K, "ni".into(), 1, 0)])
+        .expect("写");
     assert_eq!(s.page_cache_drops(), 0, "刚访问完不该立刻丢");
 
     assert!(
@@ -55,7 +57,7 @@ fn an_idle_store_gives_its_page_cache_back() {
         s.page_cache_drops()
     );
     // 回收之后数据还在、还能用。
-    assert_eq!(s.list_completions(K, "", 0, 0).expect("计数").1, 1);
+    assert_eq!(s.legacy_scan_completions(K, "", 0).expect("计数").len(), 1);
 
     let _ = std::fs::remove_file(&p);
 }
@@ -69,7 +71,7 @@ fn a_busy_store_is_never_reclaimed() {
     // 持续访问，跨度远超空闲阈值。
     let t0 = std::time::Instant::now();
     while t0.elapsed() < IDLE * 4 {
-        let _ = s.list_completions(K, "", 0, 0).expect("查").1;
+        let _ = s.legacy_scan_completions(K, "", 0).expect("查").len();
         std::thread::sleep(TICK / 2);
     }
     assert_eq!(
@@ -120,7 +122,9 @@ fn the_after_hook_runs_once_per_reclaim() {
 
     // 开库那一笔访问引发第一次回收（同 a_never_used_store_is_not_reclaimed_on_a_timer）。
     assert!(wait_until(IDLE * 10, || calls.load(Ordering::SeqCst) >= 1));
-    s.list_completions(K, "", 0, 0).expect("再访问一次").1;
+    s.legacy_scan_completions(K, "", 0)
+        .expect("再访问一次")
+        .len();
     assert!(
         wait_until(IDLE * 10, || calls.load(Ordering::SeqCst) >= 2),
         "第二次回收后该再调一次"

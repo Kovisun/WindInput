@@ -497,6 +497,8 @@ impl Coordinator {
                 );
                 // 用户词改动停手 30 秒后写回 user.dict.yaml：没有后续写入也要有人来折回。
                 s.spawn_userdata_ticker(wind_store::store::USERDATA_TICK);
+                // 补全历史等小文件只改内存，这里每 2 秒把改动落盘一次（设计 §2.4 去抖）。
+                s.spawn_small_file_flusher(wind_store::store::SMALL_FILE_FLUSH);
                 Some(s)
             }
             Err(e) => {
@@ -656,9 +658,9 @@ mod p1_meta_tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
-    /// P3 迁完（短语迁移要等 set_system_phrases）后升到 4。
+    /// P3 迁完（短语迁移要等 set_system_phrases）后升到最新（P4a 在打开时已迁完 ⇒ 5）。
     #[test]
-    fn format_version_reaches_4_after_phrase_migration() {
+    fn format_version_reaches_latest_after_phrase_migration() {
         let d = std::env::temp_dir().join(format!("wind_p3_fv-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         let (store, _) = Coordinator::open_user_store_checked(Some(&d), StateChoice::Derived);
@@ -666,12 +668,12 @@ mod p1_meta_tests {
         assert!(!s.migrated_p3(), "短语迁移要等系统短语");
         s.set_system_phrases(&[]).unwrap();
         assert!(s.migrated_p3());
-        assert_eq!(s.format_version_reached(), Some(4));
+        assert_eq!(s.format_version_reached(), Some(5));
         drop(s);
         let (store, _) = Coordinator::open_user_store_checked(Some(&d), StateChoice::Derived);
         drop(store);
         let text = std::fs::read_to_string(d.join("meta.toml")).unwrap();
-        assert!(text.contains("format_version = 4"), "{text}");
+        assert!(text.contains("format_version = 5"), "{text}");
         let _ = std::fs::remove_dir_all(&d);
     }
 
