@@ -799,6 +799,19 @@ initial_mode = "chinese"
         assert_eq!(pushed_multiline(&cap_other), Some(false));
     }
 
+    /// 出厂规则：微信推 paste。
+    #[test]
+    fn shipped_rules_push_paste_to_weixin() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../../data/compat.toml");
+        let text = std::fs::read_to_string(path).expect("仓库 data/compat.toml 必须在");
+        let c = coord_with_rules("multiline_shipped", &text);
+        c.pid_names.lock().unwrap().insert(42, "weixin.exe".into());
+        let t = (42u64 << 32) | 1;
+        let cap = c.push_server.attach_capture_client(t);
+        c.push_multiline_commit_config(t);
+        assert_eq!(pushed_multiline(&cap), Some(true));
+    }
+
     /// 进入类字段只在「命中的带窗口条件的**进入类**规则集合」变了时重算：只管占位的类名规则
     /// 命中与否（VS Code 里弹出原生对话框）不算切进来，进程规则配的 initial_mode 不得冲掉手切。
     #[test]

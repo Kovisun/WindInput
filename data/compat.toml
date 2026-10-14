@@ -152,6 +152,9 @@
 #                         出厂按窗口类名给 Chromium（含所有 Electron 应用）与 Firefox 开（见下方
 #                         两条 class 规则）。不要给 WPS 等软件改：它们靠那个空格才能给出有效的
 #                         光标位置。支持 process = "*" 通配与 class / title 窗口条件。
+#   multiline_commit:     含换行的上屏文本怎么交给软件："commit" | "paste"｜不写=commit（直接上屏）。
+#                         "paste" 先结束组合，再把文本写入剪贴板并模拟 Ctrl+V 粘贴；只影响含换行的上屏。
+#                         ⚠ 会覆盖剪贴板原有内容且不恢复；终端等 Ctrl+V 不是粘贴的软件不要开。
 #   caret_offset_x:       光标坐标水平校正（dp，96dpi 基准逻辑像素，正=右，默认 0）。
 #   caret_offset_y:       光标坐标垂直校正（dp，96dpi 基准逻辑像素，正=下，默认 0）。
 #                         用于宿主报告的光标坐标**系统性偏移**的场景（如 Windows Terminal，
@@ -196,9 +199,10 @@ host_drawn_candidates = true
 
 [[apps]]
 process = "Weixin.exe"
-comment = "微信：光标高度不稳定改用顶边定位；拦截停在上一次组合的陈旧坐标"
+comment = "微信：光标高度不稳定改用顶边定位；拦截陈旧坐标；多行文本用粘贴上屏"
 caret_use_top = true
 stale_probe_guard = true
+multiline_commit = "paste"
 
 [[apps]]
 process = "QQ.exe"

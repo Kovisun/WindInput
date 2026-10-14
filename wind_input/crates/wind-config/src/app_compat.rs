@@ -3747,6 +3747,14 @@ mod layering_tests {
             c.get_rule("qq.exe")
                 .is_some_and(|r| r.composition_start_pair_guard == Some(true))
         );
+        let wx = c.get_rule("Weixin.exe").expect("出厂有微信规则");
+        assert_eq!(wx.multiline_commit, Some(MultilineCommit::Paste));
+        assert!(wx.caret_use_top && wx.stale_probe_guard, "原有字段不受影响");
+        assert_eq!(
+            c.get_rule("WXWork.exe").and_then(|r| r.multiline_commit),
+            None,
+            "只给微信开"
+        );
         // GH#175：出厂按窗口类名给 Chromium / Firefox 内核换零宽空格占位（含所有 Electron 应用），
         // 其余（WPS 等靠空格撑光标矩形）保持空格。
         let placeholder = |process: &str, class: &str| {
