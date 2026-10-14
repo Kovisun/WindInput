@@ -5,8 +5,9 @@
 
 use std::path::Path;
 
-/// 本版本认识的格式版本。1 = 纯 redb。每个 P 阶段迁移完成 +1。
-pub const KNOWN_FORMAT_VERSION: u32 = 1;
+/// 本版本认识的格式版本。1 = 纯 redb；2 = P1：临时词 / 草稿 / 词频 / 联想历史在运行时引擎
+/// （`local_dir()/state/`）。每个 P 阶段迁移完成 +1。
+pub const KNOWN_FORMAT_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct UserMeta {
@@ -61,6 +62,22 @@ pub fn load_or_init(user_dir: &Path) -> MetaCheck {
         Err(e) => MetaCheck::Unreadable(e.to_string()),
     }
 }
+/// 迁移成功后把 `format_version` 升到 `to`（现值 ≥ `to` 不动，`dir_id` 保留）。旧版本读到更高
+/// 的版本即进只读（§7.1），不会在新格式旁边继续写 redb。
+pub fn raise_format_version(user_dir: &Path, to: u32) -> std::io::Result<()> {
+    let path = user_dir.join("meta.toml");
+    let text = std::fs::read_to_string(&path)?;
+    let mut m: UserMeta = toml::from_str(&text).map_err(std::io::Error::other)?;
+    if m.format_version >= to {
+        return Ok(());
+    }
+    m.format_version = to;
+    let s = toml::to_string(&m).map_err(std::io::Error::other)?;
+    let tmp = user_dir.join("meta.toml.tmp");
+    std::fs::write(&tmp, s)?;
+    std::fs::rename(&tmp, &path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -95,7 +112,7 @@ mod tests {
             load_or_init(&d),
             MetaCheck::Incompatible {
                 found: 99,
-                known: 1
+                known: KNOWN_FORMAT_VERSION
             }
         ));
         assert_eq!(
@@ -114,5 +131,25 @@ mod tests {
             std::fs::read_to_string(d.join("meta.toml")).unwrap(),
             "not toml =="
         );
+    }
+
+    #[test]
+    fn raise_format_version_only_moves_up_and_keeps_dir_id() {
+        let d = dir("raise");
+        std::fs::write(
+            d.join("meta.toml"),
+            "format_version = 1\ndir_id = \"abc\"\n",
+        )
+        .unwrap();
+        raise_format_version(&d, 2).unwrap();
+        let MetaCheck::Ok(m) = load_or_init(&d) else {
+            panic!("应可读")
+        };
+        assert_eq!((m.format_version, m.dir_id.as_str()), (2, "abc"));
+        raise_format_version(&d, 1).unwrap();
+        let MetaCheck::Ok(m) = load_or_init(&d) else {
+            panic!("应可读")
+        };
+        assert_eq!(m.format_version, 2, "不往回改");
     }
 }

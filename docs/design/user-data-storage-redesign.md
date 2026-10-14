@@ -289,10 +289,10 @@ state (postcard, 版本化)
 
 | 表 | 去向 | 阶段 |
 |---|---|---|
-| `temp_words` `temp_abbrev` | 运行时层 temp 快照 + sidecar + 日志 | P1 |
-| `draft_words` | 运行时层 draft 快照 + 日志 | P1 |
-| `freq` | 运行时层 freq 快照 + 日志（Incr/Touch） | P1 |
-| `assoc_history` | 运行时层 assoc 快照 + 日志 | P1 |
+| `temp_words` `temp_abbrev` | 运行时层 temp 快照 + sidecar + 日志（P1b 起旧表只读） | P1 |
+| `draft_words` | 运行时层 draft 快照 + 日志（P1b 起旧表只读） | P1 |
+| `freq` | 运行时层 freq 快照 + 日志（Incr/Touch）（P1b 起旧表只读） | P1 |
+| `assoc_history` | 运行时层 assoc 快照 + 日志（P1b 起旧表只读） | P1 |
 | `user_words` `user_abbrev` | 文本 `user.dict.yaml` + 段 + delta | P2 |
 | `phrases` | 文本 `phrases.dict.yaml` | P3 |
 | `shadow` | 文本 `shadow.dict.yaml` | P3 |
@@ -352,7 +352,7 @@ P4 结束后 `wind-store` 删除 `store.rs` 与 redb 依赖，保留编解码与
 | 前置 | §7.1 降级保护：`meta.toml` 的 `format_version` 与只读模式；`state/` 目录与 `state.toml` 挪位 | **已实现**（2026-10-14，aa83e4a8 / af84a68a）：随下一个发版进入现场 |
 | P0 | `wind-userdata` 引擎：快照、日志、delta、state、锁、device_id、折回；快照段带简拼区与无边界组 | **已实现**（2026-10-14，cbe75b3d…a19027ef；计划 `user-data-storage-plan-p0.md`）：引擎级测试 18 + 5 全绿。与设计的差异：日志记录多一个 `boundary` 字段（回放时 delta 要建简拼分组）；快照发布用 `RwLock<Arc<View>>` 不引 `arc-swap`；折回在调用线程上做，P1 再放独立线程。真实 `userdata.redb` 的等价测试归 P1（迁移时才有对照） |
 | P1a | 引擎补强（时间、叠加唯一、delta 二分、fold_with、零条目快照、state 版本、压实与后台折回）；`Runtime` 四组领域 API；临时词层 / 草稿层 | **已实现**（计划 `user-data-storage-plan-p1a.md`）：领域 API 与 `wind-store` 对拍测试全绿 |
-| P1b | 接线：协调器写路径、`EngineManager` 换层、设置页 IPC、备份 / 导出、联想索引改走 `Runtime`；redb → 引擎一次性迁移；`format_version` → 2；退役 5 张表 | 19 万词库简拼召回不劣于基线；按键路径不再碰 `Store` Mutex |
+| P1b | 接线：协调器写路径、`EngineManager` 换层、设置页 IPC、备份 / 导出、联想索引改走 `Runtime`；redb → 引擎一次性迁移；`format_version` → 2；退役 5 张表 | **已实现**（计划 `user-data-storage-plan-p1b.md`）：与设计的差异——**`Store` 做门面**，四组方法签名不变、方法体委托 `Runtime`，调用方零改动、现有测试即对拍；为此 `wdict` 拆成 `wind-wdict`、Store 三层挪进 `wind-store`。全量回归 4930 条 0 失败；按键路径不经 redb Mutex（`pause()` 测试守）。运行时状态按用户目录分开（`state/runtime/<dir_id>/`）；迁移为合并语义、完成才升 `format_version`。独立审查探针：5000 临时词 + 19 万词频的库迁移 451–476 ms、再开 86–89 ms；真实用户库等价待靶机（`examples/p1_migrate_check.rs`） |
 | P2 | 文本层：`user.dict.yaml` + 分库 + 段 + 折回补丁 + `dict.reload` + 快速扫描；迁移导出；退役 2 张表 | 折回往返测试；崩溃测试；手改生效 |
 | P3 | 短语与 Shadow 文本化；设置页列表 / 编辑改走新层；系统短语覆盖语义 | 短语软删除、pin 次序、cand_id 去重回归 |
 | P4 | 覆盖表与小文件；`meta.toml`；备份 / 导入导出按类别路由；删除 redb 依赖 | `cargo tree` 无 redb；备份还原全量回归 |

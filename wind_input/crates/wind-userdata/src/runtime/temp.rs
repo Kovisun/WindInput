@@ -109,6 +109,20 @@ impl Runtime {
         add_weight: i32,
         boundary: u64,
     ) -> anyhow::Result<u32> {
+        Ok(self
+            .learn_temp_detailed(schema, code, text, add_weight, boundary)?
+            .0)
+    }
+
+    /// 同 [`Self::learn_temp`]，另返回是否新词（门面据此推进结构代次或计数代次）。
+    pub fn learn_temp_detailed(
+        &self,
+        schema: &str,
+        code: &str,
+        text: &str,
+        add_weight: i32,
+        boundary: u64,
+    ) -> anyhow::Result<(u32, bool)> {
         let (ops, count, is_new) = self.temp_learn_ops(schema, code, text, add_weight, boundary);
         self.ud.apply_batch(&ops)?;
         if is_new {
@@ -116,7 +130,7 @@ impl Runtime {
         } else {
             self.bump_count();
         }
-        Ok(count)
+        Ok((count, is_new))
     }
 
     pub fn temp_word(&self, schema: &str, code: &str, text: &str) -> Option<TempWord> {

@@ -217,91 +217,54 @@ impl DictLayer for StoreUserLayer {
     }
 }
 
-/// 临时学习词层（redb 后端，可变）。
+/// 临时学习词层（P1 起数据在运行时引擎；本类型是 `UserDataTempLayer` 的薄包装，保留
+/// `StoreTempLayer::new(store, schema)` 这个入口，调用方不动）。
 pub struct StoreTempLayer {
-    store: Arc<Store>,
-    schema_id: String,
-    name: String,
+    inner: wind_userdata::layer::UserDataTempLayer,
 }
 
 impl StoreTempLayer {
     pub fn new(store: Arc<Store>, schema_id: impl Into<String>) -> Self {
         let schema_id = schema_id.into();
-        let name = format!("temp:{schema_id}");
         Self {
-            store,
-            schema_id,
-            name,
+            inner: wind_userdata::layer::UserDataTempLayer::new(
+                store.runtime().data().clone(),
+                &schema_id,
+            ),
         }
     }
 }
 
+/// 全部转发给引擎层：名字（`temp:{schema}`）、稳定摘要（不覆盖 `for_each_entry`，对派生索引
+/// 的贡献恒为「无」）、精确 / 前缀（`is_prefix` 恒 true）/ 简拼（走分组索引，不回退全表扫）/
+/// 通配（字面前缀扫描后过滤，不带 limit 进扫描）都与 redb 版同语义。
 impl DictLayer for StoreTempLayer {
     fn name(&self) -> &str {
-        &self.name
+        self.inner.name()
     }
 
     fn layer_type(&self) -> LayerType {
-        LayerType::Temp
+        self.inner.layer_type()
     }
 
-    /// 本层**没有**覆盖 `for_each_entry`（枚举恒空），对派生索引的贡献恒为「无」，
-    /// 故可以给一个稳定摘要——否则挂着用户词层的英文引擎永远落不了盘。
-    ///
-    /// ⚠️ 哪天给本层实现了 `for_each_entry`，这里必须同时改成反映其内容的摘要，
-    /// 否则用户词的增删不会让英文词组索引失效。
     fn entries_digest(&self) -> Option<String> {
-        Some(format!("{}|enumerates-nothing", self.name))
+        self.inner.entries_digest()
     }
 
     fn search(&self, code: &str, limit: usize) -> Vec<Candidate> {
-        let recs = self
-            .store
-            .get_temp_words(&self.schema_id, code)
-            .unwrap_or_default();
-        let cands = recs
-            .into_iter()
-            .map(|r| record_to_candidate(r, true, false))
-            .collect();
-        sort_trunc(cands, limit)
+        self.inner.search(code, limit)
     }
 
     fn search_prefix(&self, prefix: &str, limit: usize) -> Vec<Candidate> {
-        let recs = self
-            .store
-            .search_temp_words_prefix(&self.schema_id, prefix, limit)
-            .unwrap_or_default();
-        let cands = recs
-            .into_iter()
-            .map(|r| record_to_candidate(r, true, true))
-            .collect();
-        sort_trunc(cands, limit)
+        self.inner.search_prefix(prefix, limit)
     }
 
-    /// 临时词同样要走索引：简拼召回是**跨层**的（引擎侧的 DictManager 同时注册了
-    /// 用户层与临时层），只索引其一等于只修一半。
     fn search_abbrev(&self, abbrev: &str, limit: usize) -> Vec<Candidate> {
-        let recs = self
-            .store
-            .search_temp_words_by_abbrev(&self.schema_id, abbrev, limit)
-            .unwrap_or_default();
-        let cands = recs
-            .into_iter()
-            .map(|r| record_to_candidate(r, true, false))
-            .collect();
-        sort_trunc(cands, limit)
+        self.inner.search_abbrev(abbrev, limit)
     }
 
     fn search_abbrev_exact(&self, abbrev: &str, limit: usize) -> Vec<Candidate> {
-        let recs = self
-            .store
-            .search_temp_words_by_abbrev_exact(&self.schema_id, abbrev, limit)
-            .unwrap_or_default();
-        let cands = recs
-            .into_iter()
-            .map(|r| record_to_candidate(r, true, false))
-            .collect();
-        sort_trunc(cands, limit)
+        self.inner.search_abbrev_exact(abbrev, limit)
     }
 
     fn search_pattern(
@@ -311,19 +274,12 @@ impl DictLayer for StoreTempLayer {
         limit: usize,
         with_prefix: bool,
     ) -> Vec<Candidate> {
-        if pattern.is_empty() || limit == 0 {
-            return Vec::new();
-        }
-        let lit = wind_dict::layer::literal_prefix(pattern, wildcard);
-        let recs = self
-            .store
-            .search_temp_words_prefix(&self.schema_id, lit, 0)
-            .unwrap_or_default();
-        pattern_from_records(recs, pattern, wildcard, limit, with_prefix, true)
+        self.inner
+            .search_pattern(pattern, wildcard, limit, with_prefix)
     }
 }
 
-/// 自动造词的**草稿层**（redb 后端，只读）。
+/// 自动造词的**草稿层**（P1 起数据在运行时引擎；本类型是 `UserDataDraftLayer` 的薄包装）。
 ///
 /// 滑窗切出的猜测词住在这里，用户真的用它上屏过一次才跃迁进临时词库
 /// （设计见 `docs/design/auto-phrase-draft-layer.md`）。
@@ -342,61 +298,38 @@ impl DictLayer for StoreTempLayer {
 ///
 /// 通配查询（`search_pattern`）同样走默认空实现，理由相同。
 pub struct StoreDraftLayer {
-    store: Arc<Store>,
-    schema_id: String,
-    name: String,
-    /// 草稿有效期（秒）。0 = 永不过期。**过期判定在查询里做**，不能只靠定期清理——
-    /// 清理线程没跑到的窗口里，过期草稿照样会被召回。
-    ttl_secs: i64,
+    inner: wind_userdata::layer::UserDataDraftLayer,
 }
 
 impl StoreDraftLayer {
     pub fn new(store: Arc<Store>, schema_id: impl Into<String>, ttl_secs: i64) -> Self {
         let schema_id = schema_id.into();
-        let name = format!("draft:{schema_id}");
         Self {
-            store,
-            schema_id,
-            name,
-            ttl_secs,
+            inner: wind_userdata::layer::UserDataDraftLayer::new(
+                store.runtime().data().clone(),
+                &schema_id,
+                ttl_secs,
+            ),
         }
     }
 }
 
 impl DictLayer for StoreDraftLayer {
     fn name(&self) -> &str {
-        &self.name
+        self.inner.name()
     }
 
     fn layer_type(&self) -> LayerType {
-        LayerType::Draft
+        self.inner.layer_type()
     }
 
     fn search(&self, code: &str, limit: usize) -> Vec<Candidate> {
-        let texts = self
-            .store
-            .search_drafts(&self.schema_id, code, self.ttl_secs)
-            .unwrap_or_default();
-        let cands: Vec<Candidate> = texts
-            .into_iter()
-            .map(|text| Candidate {
-                text,
-                code: code.to_string(),
-                // 草稿层不存 weight：它在候选里恒沉底（`Candidate::is_draft` 排在
-                // `candidate_display_order` 的 weight 之前），weight 不参与任何比较。
-                // 取 0 而非某个正值，还顺带保证 `CompositeDict::merge_search` 的
-                // 「跨层同 (code,text) 继承更高 weight」不会被草稿意外抬权。
-                weight: 0,
-                is_draft: true,
-                ..Default::default()
-            })
-            .collect();
-        sort_trunc(cands, limit)
+        self.inner.search(code, limit)
     }
 
     /// 恒空，理由见结构体文档——**不要顺手实现它**。
-    fn search_prefix(&self, _prefix: &str, _limit: usize) -> Vec<Candidate> {
-        Vec::new()
+    fn search_prefix(&self, prefix: &str, limit: usize) -> Vec<Candidate> {
+        self.inner.search_prefix(prefix, limit)
     }
 }
 

@@ -25,7 +25,7 @@
 //! 校验方式随之变成机械的：`open_table(USER_ABBREV|TEMP_ABBREV)` 的每一处，
 //! 必然紧跟对应的 `abbrev_index::*` 调用。
 
-use crate::store::{TEMP_ABBREV, TEMP_WORDS, USER_ABBREV, USER_WORDS};
+use crate::store::{USER_ABBREV, USER_WORDS};
 use crate::user_words::{UserWordRecord, dec_val, dec_val_ordered, enc_key, split_key};
 use redb::{ReadableTable, ReadableTableMetadata, Table, TableDefinition, WriteTransaction};
 
@@ -288,7 +288,13 @@ impl crate::Store {
         abbrev: &str,
         limit: usize,
     ) -> anyhow::Result<Vec<UserWordRecord>> {
-        self.with_db(|db| search(db, TEMP_ABBREV, TEMP_WORDS, schema, abbrev, limit, true))
+        // P1 起临时词在运行时引擎：走引擎层的分组索引（快照简拼区 + delta 分组），不读 redb。
+        use wind_dict::DictLayer;
+        let l = wind_userdata::layer::UserDataTempLayer::new(self.runtime().data().clone(), schema);
+        Ok(l.search_abbrev(abbrev, limit)
+            .into_iter()
+            .map(record_of_candidate)
+            .collect())
     }
 
     /// 用户词里声母串**恰为** `abbrev` 的词条：只扫本组、不扫无边界组。`limit = 0` 不设上限。
@@ -316,27 +322,45 @@ impl crate::Store {
         abbrev: &str,
         limit: usize,
     ) -> anyhow::Result<Vec<UserWordRecord>> {
-        self.with_db(|db| search(db, TEMP_ABBREV, TEMP_WORDS, schema, abbrev, limit, false))
+        use wind_dict::DictLayer;
+        let l = wind_userdata::layer::UserDataTempLayer::new(self.runtime().data().clone(), schema);
+        Ok(l.search_abbrev_exact(abbrev, limit)
+            .into_iter()
+            .map(record_of_candidate)
+            .collect())
     }
 
-    /// 两张索引表的条目总数（O(1)）。为 0 而主表非空即说明索引待重建。
+    /// 用户词简拼索引的条目数（O(1)）。为 0 而主表非空即说明索引待重建。临时词（P1 起在运行时
+    /// 引擎）的简拼不在 redb 里。
     pub fn abbrev_index_len(&self) -> u64 {
         self.with_db(|db| {
             let txn = db.begin_read()?;
-            Ok(txn.open_table(USER_ABBREV)?.len()? + txn.open_table(TEMP_ABBREV)?.len()?)
+            Ok(txn.open_table(USER_ABBREV)?.len()?)
         })
         .unwrap_or(0)
     }
 
-    /// 为存量数据补建两张索引（单写事务）。返回建了多少条。见 [`rebuild`]。
+    /// 为存量用户词补建简拼索引（单写事务）。返回建了多少条。见 [`rebuild`]。
     pub fn rebuild_abbrev_indexes(&self) -> anyhow::Result<usize> {
         self.with_db(|db| {
             let txn = db.begin_write()?;
-            let n =
-                rebuild(&txn, USER_ABBREV, USER_WORDS)? + rebuild(&txn, TEMP_ABBREV, TEMP_WORDS)?;
+            let n = rebuild(&txn, USER_ABBREV, USER_WORDS)?;
             txn.commit()?;
             Ok(n)
         })
+    }
+}
+
+/// 引擎层候选 → 记录（count / created_at 不在候选里，补 0；调用方只用 code/text/weight/boundary）。
+fn record_of_candidate(c: wind_candidate::Candidate) -> UserWordRecord {
+    UserWordRecord {
+        code: c.code,
+        text: c.text,
+        weight: c.weight,
+        count: 0,
+        created_at: 0,
+        boundary: c.boundary,
+        order: 0,
     }
 }
 

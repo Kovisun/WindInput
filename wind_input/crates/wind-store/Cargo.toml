@@ -19,6 +19,7 @@ wind-cmdbar = { path = "../wind-cmdbar" }
 wind-wdict = { path = "../wind-wdict" }
 wind-dict = { path = "../wind-dict" }
 wind-candidate = { path = "../wind-candidate" }
+wind-userdata = { path = "../wind-userdata" }
 
 [lints]
 workspace = true

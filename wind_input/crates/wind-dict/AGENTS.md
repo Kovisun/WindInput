@@ -5,17 +5,16 @@
 
 ## Purpose
 
-多层复合词典系统。定义 `DictLayer` 查询接口与 `CompositeDict` 跨层聚合引擎，负责 wdb/wdat 二进制格式的生成与 mmap 零拷贝查询，并将 `wind-store` 用户词/临时词桥接为可挂载的查询层。向上为各引擎 crate 暴露 `DictManager` 作为每方案唯一词典入口，向下依赖 `wind-candidate`（候选类型）与 `wind-store`（持久化后端）。
+多层复合词典系统。定义 `DictLayer` 查询接口与 `CompositeDict` 跨层聚合引擎，负责 wdb/wdat 二进制格式的生成与 mmap 零拷贝查询，（用户词 / 临时词 / 草稿的查询层 `Store*Layer` 已于 P1b 挪到 `wind-store`，本 crate 不再依赖用户库）。向上为各引擎 crate 暴露 `DictManager` 作为每方案唯一词典入口，向下依赖 `wind-candidate`（候选类型）与 `wind-wdict`（文本转义判据）。
 
 ## Key Files
 
 | File | Description |
 |------|-------------|
-| `src/lib.rs` | 对外导出 `CompositeDict`、`DictLayer/LayerType/MutableLayer`、`DictManager/SystemDictLayer`、`StoreUserLayer/StoreTempLayer` |
+| `src/lib.rs` | 对外导出 `CompositeDict`、`DictLayer/LayerType/MutableLayer`、`DictManager/SystemDictLayer` |
 | `src/layer.rs` | `DictLayer`/`MutableLayer` trait；`LayerType` 枚举（Logic=0 \< User=1 \< Temp=2 \< Cell=3 \< System=4，数值越小优先级越高） |
 | `src/composite.rs` | `CompositeDict` 跨层聚合；去重继承更高权重；前缀查保最短码；`set_layer_enabled` 热插拔；含完整单元测试 |
 | `src/manager.rs` | `DictManager` 持有每方案一个 `CompositeDict`；`SystemDictLayer` 把 `CachedDict` 包为 `DictLayer`，用原子标志支持运行时启停 |
-| `src/store_layer.rs` | `StoreUserLayer` / `StoreTempLayer` 把 `wind-store` 查询包装为 `DictLayer`（User/Temp 层） |
 | `src/binformat.rs` | wdb 格式 `DictReader`（mmap 二分查询，V2/V3）/ `DictWriter`（原子 .tmp→rename 写入）；`for_each_entry` 供反查索引构建 |
 | `src/datformat.rs` | wdat（DAT）格式，含独立 `AbbrevSection`（简拼区）；`CachedDict::Mmap` 实际使用的格式。`WdatStreamWriter` 流式写入（码按序喂入、text 直接进池）是唯一的构建路径，`WdatWriter` 排序后委托给它；`WdatReader::codes()` 有序游标 + `leaf_entries()` 供多段 k 路归并；构建各阶段有 debug 级计时与 RssAnon 打点（`RUST_LOG=wind_dict=debug`） |
 | `src/cached.rs` | `CachedDict`（Mmap/Memory/Layered 三种模式）；yaml→wdat 缓存流程（传入的 wdat 路径是**槽位**，实际文件按内容指纹命名）+ **wdat-only 模式**（用户只投放二进制词库、无 yaml 源时原位直接加载，加载失败不可重建）；`build_reverse_index` 构建汉字→编码反查表 |
@@ -43,7 +42,7 @@
 
 - **缓存格式为 wdat（DAT），非 wdb**：`CachedDict` 走 `datformat.rs` 的 wdat 格式（含 AbbrevSection 简拼），而非旧的 wdb；`cache_fp.rs` 用内容指纹而非 mtime，缓存路径可与源分离（`CachedDict::load_at`），部署时不会因 mtime 刷新恒重建。
 
-- **Shadow 不是查询层**：`ShadowRecord`（pin/delete 规则）不挂进 `CompositeDict`，其应用由引擎在候选排序后由调用方执行；本 crate 只在 `store_layer.rs` 桥接 `wind-store` 的查询，不持有 Shadow 状态。
+- **Shadow 不是查询层**：`ShadowRecord`（pin/delete 规则）不挂进 `CompositeDict`，其应用由引擎在候选排序后由调用方执行；本 crate 不持有 Shadow 状态。
 
 ### Testing Requirements
 
@@ -55,7 +54,7 @@
 ### Internal
 
 - `wind-candidate` — `Candidate` 类型、排序函数 `better`、`CandidateSource`
-- `wind-store` — `Store`、`user_words::UserWordRecord`（经 `store_layer.rs` 桥接）
+- `wind-wdict` — 码表文本列的转义与命令栏条目判据（`codetable.rs`）
 
 ### External
 

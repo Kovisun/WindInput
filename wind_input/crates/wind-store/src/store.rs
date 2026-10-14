@@ -153,9 +153,28 @@ enum Dropped {
     Busy,
 }
 
+/// 引擎状态目录与目录 id（设计 §2.1 / §3.7）。生产 = `local_dir()/state` + `meta.toml` 的 dir_id。
+#[derive(Clone, Debug)]
+pub struct StateLoc {
+    pub state_dir: PathBuf,
+    pub dir_id: String,
+}
+
+/// `Store::open(path)` 的引擎状态目录：redb 文件名后追加 `.state`。测试与工具用；生产走
+/// [`Store::open_with_state`]。
+pub fn derived_state_dir(path: &Path) -> PathBuf {
+    let mut s = path.as_os_str().to_os_string();
+    s.push(".state");
+    PathBuf::from(s)
+}
+
 /// 存储引擎（redb）。`db` 为 None 表示已暂停（pause，释放文件锁供热替换）。
 pub struct Store {
     path: PathBuf,
+    /// 运行时数据引擎（临时词 / 草稿 / 词频 / 联想历史，设计 §6 P1）。四组 API 委托给它。
+    runtime: std::sync::Arc<wind_userdata::runtime::Runtime>,
+    /// 引擎状态目录（迁移标记也在这里）。
+    state_dir: PathBuf,
     db: Mutex<Option<Database>>,
     /// 本库的页缓存上限；`resume` 重开时要用同一个值，故随实例存着。
     cache_bytes: usize,
@@ -202,24 +221,56 @@ pub struct Store {
 }
 
 impl Store {
-    /// 打开数据库：创建/打开 redb，建表，运行版本迁移。
+    /// 打开数据库，引擎状态放在派生目录（见 [`derived_state_dir`]）。redb 文件此前不存在 ⇒
+    /// 视为新库，先清空派生目录（新库配新状态，测试反复用同一路径时不串数据）。
     pub fn open(path: impl AsRef<Path>) -> anyhow::Result<Self> {
         Self::open_with_cache_size(path, DEFAULT_CACHE_SIZE_BYTES)
     }
 
-    /// 指定页缓存上限打开。供 `perf_cache_size.rs` 标定用；生产走 [`Self::open`]。
+    /// 生产入口：引擎状态放在给定目录，从不清空。
+    pub fn open_with_state(path: impl AsRef<Path>, loc: StateLoc) -> anyhow::Result<Self> {
+        Self::open_inner(path.as_ref(), DEFAULT_CACHE_SIZE_BYTES, loc)
+    }
+
+    /// 指定页缓存上限打开（状态目录同 [`Self::open`]）。供 `perf_cache_size.rs` 标定用。
     pub fn open_with_cache_size(
         path: impl AsRef<Path>,
         cache_bytes: usize,
     ) -> anyhow::Result<Self> {
-        let path = path.as_ref().to_path_buf();
+        let path = path.as_ref();
+        let derived = derived_state_dir(path);
+        if !path.exists() {
+            let _ = std::fs::remove_dir_all(&derived);
+        }
+        Self::open_inner(
+            path,
+            cache_bytes,
+            StateLoc {
+                state_dir: derived,
+                dir_id: "derived".into(),
+            },
+        )
+    }
+
+    fn open_inner(path: &Path, cache_bytes: usize, loc: StateLoc) -> anyhow::Result<Self> {
+        let path = path.to_path_buf();
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
         let db = open_db(&path, cache_bytes)?;
         Self::init_tables(&db)?;
+        let state_dir = loc.state_dir.clone();
+        let ud = wind_userdata::engine::UserData::open(wind_userdata::engine::Dirs {
+            state_dir: loc.state_dir.clone(),
+            dir_id: loc.dir_id.clone(),
+        })?;
+        let runtime = std::sync::Arc::new(wind_userdata::runtime::Runtime::new(
+            std::sync::Arc::new(ud),
+        ));
         let store = Self {
             path,
+            runtime,
+            state_dir: state_dir.clone(),
             db: Mutex::new(Some(db)),
             cache_bytes,
             touched: std::sync::atomic::AtomicBool::new(false),
@@ -233,12 +284,39 @@ impl Store {
         };
         store.run_migrations()?;
         store.backfill_abbrev_indexes();
+        if let Err(e) = store.migrate_p1_if_needed(&state_dir) {
+            // 迁移失败不阻断启动：标记没写，下次启动重做（与引擎已有数据合并，这一轮的写入
+            // 不会被旧表盖掉）；本次运行只能看到已迁成的那些目标。协调器据 `migrated_p1()`
+            // 决定是否升 format_version——没迁完就不升，旧版本回退后仍可用旧表。
+            warn!("P1 迁移失败，下次启动重试：{e}");
+        }
         info!(
             "Store opened: {} (v{})",
             store.path.display(),
             store.version().unwrap_or(0)
         );
         Ok(store)
+    }
+
+    /// P1 迁移是否已完成（标记 `migrated-p1` 在）。协调器据此决定能否升 `format_version`。
+    pub fn migrated_p1(&self) -> bool {
+        self.state_dir
+            .join(crate::migrate_p1::MIGRATED_P1)
+            .is_file()
+    }
+
+    /// 运行时数据引擎。
+    pub fn runtime(&self) -> &std::sync::Arc<wind_userdata::runtime::Runtime> {
+        &self.runtime
+    }
+
+    /// 门面写入之后：攒够了就起后台折回（判定 O(目标数)，单飞）。
+    #[allow(dead_code)]
+    pub(crate) fn after_write(&self) {
+        let d = self.runtime.data();
+        if d.needs_maintain() {
+            d.spawn_maintain();
+        }
     }
 
     /// 存量库补建简拼索引：升级到带索引的版本时，老库里的词一条索引都没有，
@@ -256,10 +334,8 @@ impl Store {
             .with_db(|db| {
                 use redb::ReadableTableMetadata;
                 let txn = db.begin_read()?;
-                let idx =
-                    txn.open_table(USER_ABBREV)?.len()? + txn.open_table(TEMP_ABBREV)?.len()?;
-                let main =
-                    txn.open_table(USER_WORDS)?.len()? + txn.open_table(TEMP_WORDS)?.len()?;
+                let idx = txn.open_table(USER_ABBREV)?.len()?;
+                let main = txn.open_table(USER_WORDS)?.len()?;
                 Ok(idx == 0 && main > 0)
             })
             .unwrap_or(false);
@@ -758,13 +834,15 @@ impl Store {
         &self.path
     }
 
-    /// 枚举按 schema 前缀编码的表（user/temp/freq/shadow/assoc_history）里出现过的全部 schema id。
+    /// 枚举出现过的全部数据方案 id：redb 的用户词 / shadow 表 + 运行时引擎（临时词 / 草稿 / 词频 /
+    /// 联想历史）。
     /// 备份用：确保有数据但未在当前配置启用的方案也被覆盖。
     pub fn list_data_schemas(&self) -> anyhow::Result<Vec<String>> {
         let mut set = std::collections::BTreeSet::new();
         self.with_db(|db| {
             let txn = db.begin_read()?;
-            for table in [USER_WORDS, TEMP_WORDS, FREQ, SHADOW, ASSOC_HIST] {
+            // 临时词 / 词频 / 联想历史 P1 起在运行时引擎（旧表只读保留，不再代表现状）
+            for table in [USER_WORDS, SHADOW] {
                 let t = txn.open_table(table)?;
                 for item in t.range::<&str>(..)? {
                     let (k, _) = item?;
@@ -775,6 +853,7 @@ impl Store {
             }
             Ok(())
         })?;
+        set.extend(self.runtime.schemas());
         Ok(set.into_iter().collect())
     }
 }
@@ -821,5 +900,60 @@ mod tests {
             assert_eq!(s.version().unwrap(), CURRENT_VERSION);
         }
         let _ = std::fs::remove_file(&path);
+    }
+    fn tmp_db(name: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("wind_store_rt-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&d);
+        d.join(format!("{name}.redb"))
+    }
+
+    #[test]
+    fn open_attaches_runtime_in_derived_state_dir() {
+        let p = tmp_db("derived");
+        let _ = std::fs::remove_file(&p);
+        let s = Store::open(&p).unwrap();
+        s.runtime().learn_temp("py", "a", "甲", 1, 0).unwrap();
+        assert!(derived_state_dir(&p).join("journal").is_dir());
+        drop(s);
+        let s = Store::open(&p).unwrap();
+        assert!(
+            s.runtime().temp_word("py", "a", "甲").is_some(),
+            "同一库重开，引擎数据仍在"
+        );
+    }
+
+    /// Review Focus 4：删掉 redb 再开同一路径 = 新库，派生目录里的旧引擎数据不得残留。
+    #[test]
+    fn fresh_redb_starts_with_empty_runtime() {
+        let p = tmp_db("fresh");
+        let _ = std::fs::remove_file(&p);
+        let s = Store::open(&p).unwrap();
+        s.runtime().learn_temp("py", "a", "甲", 1, 0).unwrap();
+        drop(s);
+        std::fs::remove_file(&p).unwrap();
+        let s = Store::open(&p).unwrap();
+        assert!(s.runtime().temp_word("py", "a", "甲").is_none());
+    }
+
+    #[test]
+    fn open_with_state_uses_the_given_dir_and_never_wipes() {
+        let p = tmp_db("explicit");
+        let _ = std::fs::remove_file(&p);
+        let st = std::env::temp_dir().join(format!("wind_store_rt_state-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&st);
+        let loc = || StateLoc {
+            state_dir: st.clone(),
+            dir_id: "dir-x".into(),
+        };
+        let s = Store::open_with_state(&p, loc()).unwrap();
+        s.runtime().learn_temp("py", "a", "甲", 1, 0).unwrap();
+        drop(s);
+        std::fs::remove_file(&p).unwrap();
+        let s = Store::open_with_state(&p, loc()).unwrap();
+        assert!(
+            s.runtime().temp_word("py", "a", "甲").is_some(),
+            "显式状态目录不随 redb 清空"
+        );
+        assert!(!derived_state_dir(&p).exists());
     }
 }

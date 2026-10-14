@@ -7,8 +7,9 @@
 
 用户数据引擎（设计：[docs/design/user-data-storage-redesign.md](../../../docs/design/user-data-storage-redesign.md) §3）：
 「快照 + 日志 + 增量表」三种物理形态各管一类变化速度。P0 交付引擎与 `DictLayer` 适配，P1a 补上运行时领域 API（`Runtime`）与草稿层；
-**尚未接进 `wind-engine`**（P1b 把临时词 / 草稿 / 计数接进来；P2 文本层在同一台引擎上多一步
-「按行补丁写回」）。
+P1b 起 `wind-store::Store` 持有一个 `Runtime`，临时词 / 草稿 / 词频 / 联想历史的门面方法全部委托到这里
+（生产状态目录 `local_dir()/state/runtime/<dir_id>/`，按用户目录分开；测试的 `Store::open` 用 redb 旁的派生目录）。P2 文本层在同一台
+引擎上多一步「按行补丁写回」。
 
 ## Key Files
 

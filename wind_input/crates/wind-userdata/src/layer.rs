@@ -124,10 +124,12 @@ impl DictLayer for UserDataTempLayer {
             .get(&(Target::Temp, self.schema.clone()))
             .map(|s| s.prefix(prefix, take))
             .unwrap_or_default();
-        sort_trunc(
-            Self::candidates(overlay_entries(base, ops), Some(prefix)),
-            limit,
-        )
+        // 前缀补全一律 is_prefix = true，同 `StoreTempLayer`（`record_to_candidate(r, true, true)`）
+        let mut v = Self::candidates(overlay_entries(base, ops), None);
+        for c in &mut v {
+            c.is_prefix = true;
+        }
+        sort_trunc(v, limit)
     }
 
     fn search_abbrev(&self, abbrev: &str, limit: usize) -> Vec<Candidate> {
@@ -327,8 +329,8 @@ mod tests {
         let pre = layer.search_prefix("nihao", 10);
         assert_eq!(names(pre.clone()), vec!["你好", "你好吗"]);
         assert!(
-            !pre[0].is_prefix && pre[1].is_prefix,
-            "恰等于前缀的不算前缀命中"
+            pre.iter().all(|c| c.is_prefix),
+            "前缀查询一律 is_prefix（同 StoreTempLayer）"
         );
         assert_eq!(
             names(layer.search_abbrev("nh", 10)),
