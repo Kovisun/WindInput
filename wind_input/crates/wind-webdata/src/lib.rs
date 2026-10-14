@@ -2095,7 +2095,7 @@ pub trait WebDataRpc: WebDataHost {
         let schemas_dir = user_dir.as_ref().map(|d| d.join("schemas"));
         let schema_overrides_dir = user_dir.as_ref().map(|d| d.join("schema_overrides"));
         let themes_dir = user_dir.as_ref().map(|d| d.join("themes"));
-        let state_file = wind_config::Config::local_dir().map(|d| d.join("state.toml"));
+        let state_file = wind_config::Config::state_dir().map(|d| d.join("state.toml"));
         let src = BackupSources {
             user_config_file: cfg_file.as_deref(),
             compat_file: compat_file.as_deref(),
@@ -2155,7 +2155,7 @@ pub trait WebDataRpc: WebDataHost {
         let schemas_dir = user_dir.as_ref().map(|d| d.join("schemas"));
         let schema_overrides_dir = user_dir.as_ref().map(|d| d.join("schema_overrides"));
         let themes_dir = user_dir.as_ref().map(|d| d.join("themes"));
-        let state_file = wind_config::Config::local_dir().map(|d| d.join("state.toml"));
+        let state_file = wind_config::Config::state_dir().map(|d| d.join("state.toml"));
         let targets = RestoreTargets {
             user_config_file: cfg_file.as_deref(),
             compat_file: compat_file.as_deref(),
