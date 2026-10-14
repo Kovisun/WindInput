@@ -7234,6 +7234,26 @@ BOOL CTextService::_PasteTextViaClipboard(const std::wstring& text)
     const std::wstring crlf = wind::multiline::NormalizeToCrlf(text);
     const size_t newlines = (size_t)std::count(crlf.begin(), crlf.end(), L'\n');
 
+    // 以下两种情况注入的 Ctrl+V 会变质或落到别处，在写剪贴板、压 skip 条目之前就放弃，由调用方插入原文。
+    // ① 物理按住 Shift / Alt / Win：叠成 Ctrl+Shift+V 之类的别的快捷键（Ctrl 本身按着无妨）。
+    const int heldMods[] = {VK_LSHIFT, VK_RSHIFT, VK_LMENU, VK_RMENU, VK_LWIN, VK_RWIN};
+    for (int vk : heldMods)
+    {
+        if (GetAsyncKeyState(vk) & 0x8000)
+        {
+            WIND_LOG_DEBUG_FMT(L"MultilinePaste: modifier vk=0x%02X held, inserting instead, len=%zu\n", vk,
+                               text.length());
+            return FALSE;
+        }
+    }
+    // ② 前台不是本线程：SendInput 进的是前台窗口的输入队列。
+    if (GetWindowThreadProcessId(GetForegroundWindow(), nullptr) != GetCurrentThreadId())
+    {
+        WIND_LOG_DEBUG_FMT(L"MultilinePaste: foreground is another thread, inserting instead, len=%zu\n",
+                           text.length());
+        return FALSE;
+    }
+
     // 剪贴板可能正被别的进程占着（剪贴板历史 / 同步工具），短暂重试，总等待不超过约 40ms。
     // 用本 DLL 自己的消息窗作所有者：传 nullptr 时 EmptyClipboard 会把所有者置空。
     BOOL opened = FALSE;
@@ -7284,11 +7304,14 @@ BOOL CTextService::_PasteTextViaClipboard(const std::wstring& text)
     INPUT inputs[4] = {};
     for (INPUT& in : inputs)
         in.type = INPUT_KEYBOARD;
-    inputs[0].ki.wVk = VK_CONTROL;
-    inputs[1].ki.wVk = 'V';
-    inputs[2].ki.wVk = 'V';
+    const WORD vks[4] = {VK_CONTROL, 'V', 'V', VK_CONTROL};
+    for (int i = 0; i < 4; i++)
+    {
+        inputs[i].ki.wVk = vks[i];
+        // 补上扫描码：有的宿主按扫描码认键。不加 KEYEVENTF_SCANCODE，仍以 VK 为准。
+        inputs[i].ki.wScan = (WORD)MapVirtualKeyW(vks[i], MAPVK_VK_TO_VSC);
+    }
     inputs[2].ki.dwFlags = KEYEVENTF_KEYUP;
-    inputs[3].ki.wVk = VK_CONTROL;
     inputs[3].ki.dwFlags = KEYEVENTF_KEYUP;
     const UINT sent = SendInput(4, inputs, sizeof(INPUT));
     if (sent == 0)
@@ -7298,8 +7321,11 @@ BOOL CTextService::_PasteTextViaClipboard(const std::wstring& text)
     }
     if (sent != 4)
     {
-        // 已注入了一部分，再插入原文会重复出字；只能留痕。
-        WIND_LOG_WARN_FMT(L"MultilinePaste: SendInput sent %u of 4, len=%zu\n", sent, text.length());
+        // 已注入了一部分，再插入原文会重复出字，不补；但 Ctrl↓ 已发出，补一个 Ctrl↑ 免得宿主里 Ctrl 卡住。
+        // 不另压 skip 条目：上面 MarkSyntheticKey 给 Ctrl↑ 压的那条因第 4 个事件没发出而仍在表里，正好对应它。
+        const UINT upSent = SendInput(1, &inputs[3], sizeof(INPUT));
+        WIND_LOG_WARN_FMT(L"MultilinePaste: SendInput sent %u of 4, ctrl-up resent=%u, len=%zu\n", sent, upSent,
+                          text.length());
     }
     WIND_LOG_DEBUG_FMT(L"MultilinePaste: clipboard set + Ctrl+V injected, len=%zu, newlines=%zu, sent=%u\n",
                        crlf.length(), newlines, sent);
@@ -7346,7 +7372,7 @@ BOOL CTextService::CommitText(const std::wstring& text, BOOL nonKeyContext, BOOL
 
     // 含换行且本进程 compat 配了 paste：组合照常结束，正文改经剪贴板 + Ctrl+V 交给宿主
     // （见 MultilineCommit.h）。会话请求流程不变，粘贴在 DoEditSession 里组合结束之后发生。
-    const BOOL paste = newlineCount > 0 && wind::multiline::IsPasteMode(
+    const BOOL paste = wind::multiline::ContainsNewline(full) && wind::multiline::IsPasteMode(
         static_cast<uint8_t>(InterlockedCompareExchange(&_multilineCommitMode, 0, 0)));
 
     // 诊断用：只统计换行符个数、不打印正文（日志隐私红线）。用来确认到本函数为止
