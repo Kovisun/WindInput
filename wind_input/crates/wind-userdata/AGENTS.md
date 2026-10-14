@@ -22,9 +22,11 @@ P1b 起 `wind-store::Store` 持有一个 `Runtime`，临时词 / 草稿 / 词频
 | `src/delta.rs` | 两级增量表：冻结层 `Arc<[Entry]>` 有序 + 尾巴 ≤128 条；同键多操作按 seq 各自保留；声母分组索引（规则同 `wind-store::abbrev_index::group_of`，含无边界兜底组 `\u{1}` + 首字符） |
 | `src/snapshot.rs` | 快照段：代号命名的 `<name>-<gen>.wdat`（`WdatStreamWriter`，简拼区按条目建键、含兜底组）+ 定长 sidecar `<name>.meta`（count / created_at / last_used / flags，按 wdat 全局条目序号对齐；头内嵌 `max_seq` 与 gen）。**sidecar 是提交点** |
 | `src/engine.rs` | 门面 `UserData`：`open`（锁、设备、state、枚举快照、回放日志）、`apply`（追加 + 发布，写后立即可读）、`fold`（旧快照 + delta → 新快照 → 换入 → 摘 delta → state）、`query_exact` / `query_count` |
-| `src/layer.rs` | `UserDataTempLayer`（与 `StoreTempLayer` 同名同摘要、含通配；前缀多取 delta 覆盖条数；简拼返回声母组 + 兜底组的超集）与 `UserDataDraftLayer`（只精确、按 TTL 过滤、恒沉底） |
-| `src/runtime/` | 运行时领域 API `Runtime`：临时词（`temp.rs`）、草稿（`draft.rs`）、词频 + 联想历史（`freq.rs`），语义逐条对照 `wind-store` 同名函数；不依赖 `wind-store` |
-| `tests/runtime_{temp,draft,freq}.rs` | 领域 API 与 `wind-store` 的行为对拍 |
+| `src/layer.rs` | `UserDataTempLayer` / `UserDataUserLayer`（共用内部 `WordLayer`：同名同摘要、含通配；前缀多取 delta 覆盖条数、`is_prefix` 恒 true；简拼返回声母组 + 兜底组的超集；用户词 `natural_order` = 入库顺序）与 `UserDataDraftLayer`（只精确、按 TTL 过滤、恒沉底） |
+| `src/text/` | 文本真源层（P2a）：`format.rs` 解析 `user.dict.yaml`（Rime 列规则复用 `wind_dict::rime_layout`，`wind:` 扩展 `code_spacing` / `escape`）与唯一的 `normalize_key`；`patch.rs` 渲染与按行补丁（除被改行外逐字节不变）；`fold.rs` 文件层（指纹、读、带复核提交） |
+| `src/runtime/` | 领域 API `Runtime`：临时词（`temp.rs`）、草稿（`draft.rs`）、词频 + 联想历史（`freq.rs`）、用户词（`user.rs`，文本即真源），语义逐条对照 `wind-store` 同名函数；不依赖 `wind-store` |
+| `tests/runtime_{temp,draft,freq,user}.rs` | 领域 API 与 `wind-store` 的行为对拍 |
+| `tests/text_target.rs` | 文本目标：折回写回、手改后重建、编辑器竞争、删除 vs 读不了、整文件替换、空闲折回 |
 | `tests/engine_crash_paths.rs` | 引擎级：写后可读 / 重开回放、折回后不再回放、state 缺失按快照水位、折回期间新到的操作保留、第二实例只读且不写盘、删 journal/ 不倒号、快照坏整份回放、换号后封存日志仍可见且续号。折回半写崩溃在 `engine.rs` 单测（需 `snapshot::FAIL_BEFORE_META` 故障注入） |
 
 ## For AI Agents
@@ -41,6 +43,11 @@ P1b 起 `wind-store::Store` 持有一个 `Runtime`，临时词 / 草稿 / 词频
 - **零条目快照只有 sidecar**：`snapshot::build` 遇零条目只写带水位的 sidecar（gen = 0）并清掉代号文件；`open` 对「sidecar 不存在」给 `None`（零段），对「头坏 / 指向的 wdat 不在 / 条目数对不上」给 `Err`（当零段并整份回放）。
 - **叠加语义只有一份**：`engine::apply_ops`（表见 `docs/design/user-data-storage-plan-p1a.md` Task 1）。读、折回、层都经 `overlay_entries` 调它——别在别处再写一份 Upsert/Delete 的 match。
 - **批量操作走 `fold_with`**：清空、导入、草稿过期 / 淘汰都是「旧快照 + delta → policy → 新快照」原子换段，水位随之推进；不要逐条写 Delete。按键路径的单条写走 `apply` / `apply_batch`。
+- **文本目标**（`bind_text` 绑定的 (目标, 方案)）：`fold` 自动走 `fold_text`（§3.5 次序：读 + 指纹 → 补丁 → tmp + fsync → 复核原文件指纹 → `.bak` + rename + fsync 目录 → 由文本重建段 → 换入 → state 记 `text_fp`）；`fold_with` 对它们直接报错（清空 / 导入用 `rewrite_text` / 逐条 Upsert）。手改文件后 `sync_text` 由文本重建段，水位不回退、已折回记录不回放、未折回的操作仍叠加。文本目标不按条数折回，空闲 `TEXT_IDLE`（30 s）后折回。计数 / 时间（Incr / Touch）不进文本，只有它们且文件未被手改时折回不重建段。
+- **归文本管 = 已绑定，或 state 记过 `text_fp`**：重开后绑定前，这类目标 `fold` / `fold_with` 报错，`maintain` / `compact` 跳过——它们的操作只能绑定后经 `fold_text` 进文本。所以接线时 `bind_text` 要先于对它的显式折回。只读实例 `bind_text` 只登记、不同步。
+- **文本折回失败**（隔离 / 读不了 / 编辑器竞争）只拦该目标：WARN + 退避（30 s 起翻倍，封顶 30 min），别的目标与压实照常。
+- **写出的文件正文首行是 `# no comment`**（文本列在行首，`#` 开头的词不能被读成注释）；往没有它的旧文件追加 `#` 开头的行时补一行。
+- **sidecar 每行带 `order`**（28 字节，头 version 2）：文本目标 = 行号，用户词层的 `natural_order` 取它；`order` 与 wdat 叶内序号是两回事（后者仍是 sidecar 定位的依据）。
 - **时间单位**：sidecar 与领域 API 是 unix 秒（同 `wind-store`）；日志 `ts_ms` 是毫秒。
 - **后台折回**：写入方在写完后调 `spawn_maintain()`（单飞，只读时不起）；阈值 `FOLD_THRESHOLD` 条、日志 `JOURNAL_MAX_BYTES`。
 - 日志记录格式 v1 **尚未发布**，改字段直接改编码即可；一旦随版本发出去就要加版本分支。

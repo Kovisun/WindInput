@@ -266,6 +266,7 @@ impl Runtime {
                                 created_at: now,
                                 last_used: now,
                                 flags: 0,
+                                order: 0,
                             },
                         );
                     }

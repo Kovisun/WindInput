@@ -32,6 +32,7 @@ fn entry(
         created_at,
         last_used,
         flags: 0,
+        order: 0,
     }
 }
 

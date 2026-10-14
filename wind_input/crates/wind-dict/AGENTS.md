@@ -20,7 +20,7 @@
 | `src/cached.rs` | `CachedDict`（Mmap/Memory/Layered 三种模式）；yaml→wdat 缓存流程（传入的 wdat 路径是**槽位**，实际文件按内容指纹命名）+ **wdat-only 模式**（用户只投放二进制词库、无 yaml 源时原位直接加载，加载失败不可重建）；`build_reverse_index` 构建汉字→编码反查表 |
 | `src/reader_pool.rs` | wdat/wcmt mmap reader 进程级共享池（按缓存文件路径复用，存 `Weak` 不持强引用——mmap 期间 rename 会 Access Denied，池持强引用会让词库重建永久失败；新鲜度归 `cache_fp`，本池只管「同一路径只 mmap 一份」） |
 | `src/cache_fp.rs` | 基于源文件内容指纹（SipHash sidecar `.fp`）的缓存有效性校验，解决部署刷新 mtime 导致恒重建的问题；状态 sidecar `.st` 记源的 (存在性, 长度, mtime, inode, ctime) 让源没动时判新鲜只 stat 不读内容（距取 stamp 前 2 s 内的 racy 窗口不记）；内容寻址槽位 API（`resolve_slot_fp` / `slot_content_path` / `prune_slot`）：文件名带指纹、同槽位留 2 份 |
-| `src/codetable.rs` | `CodetableDict` 内存 BTreeMap；自动检测五笔/拼音 Rime 格式；`parse_rime_entries_parallel` 多线程解析（>1MB 走 `thread::scope`），输出全拼+简拼两组 |
+| `src/codetable.rs` | `CodetableDict` 内存 BTreeMap；自动检测五笔/拼音 Rime 格式；`parse_rime_entries_parallel` 多线程解析（>1MB 走 `thread::scope`），输出全拼+简拼两组；`rime_layout` 公开正文起点 / `# no comment` 截断点 / 列下标给 `wind-userdata` 文本层复用（规则只此一份） |
 | `src/trie.rs` | 前缀 Trie，供英文词库回退路径等组件使用 |
 | `src/hotcache.rs` | 热点码查找缓存层 |
 

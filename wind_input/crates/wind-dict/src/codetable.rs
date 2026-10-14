@@ -1066,6 +1066,31 @@ fn parse_rime_line(
     })
 }
 
+/// 文本层（`wind-userdata::text`）复用的 Rime 正文布局。规则只在本文件一份：正文起点
+/// （[`rime_body_offset`]）、`# no comment`（[`find_no_comment_directive`]）、列规格
+/// （[`resolve_columns`]：`columns:` 声明优先，否则探测）。
+pub struct RimeLayout {
+    pub body_offset: usize,
+    pub comment_cutoff: Option<usize>,
+    pub text_col: usize,
+    pub code_col: usize,
+    pub weight_col: Option<usize>,
+}
+
+pub fn rime_layout(content: &str, path: &Path) -> Option<RimeLayout> {
+    let body_offset = rime_body_offset(content)?;
+    let body = &content[body_offset..];
+    let cutoff = find_no_comment_directive(body);
+    let spec = resolve_columns(content, body, path, cutoff)?;
+    Some(RimeLayout {
+        body_offset,
+        comment_cutoff: cutoff.map(|c| c + body_offset),
+        text_col: spec.text_col,
+        code_col: spec.code_col,
+        weight_col: spec.weight_col,
+    })
+}
+
 /// 正文起点：首个（按 `str::lines()` 语义，即剥除 `\r` 后）等于 `...` 的行之后的字节偏移。
 /// 无该分隔行 → None（与 load_impl 一致：无正文标记则零条目）。
 fn rime_body_offset(content: &str) -> Option<usize> {
@@ -2453,5 +2478,21 @@ columns:
                 }
             }
         }
+    }
+    #[test]
+    fn rime_layout_exposes_body_columns_and_comment_cutoff() {
+        let content = "---\nname: x\ncolumns:\n  - code\n  - text\n  - weight\n...\n# 注释\nni\t你\t1\n# no comment\n#hash\t井\t2\n";
+        let l = rime_layout(content, std::path::Path::new("x.dict.yaml")).unwrap();
+        assert!(content[l.body_offset..].starts_with("# 注"));
+        assert_eq!((l.text_col, l.code_col, l.weight_col), (1, 0, Some(2)));
+        let cut = l.comment_cutoff.unwrap();
+        assert!(content[cut..].starts_with("# no comment"));
+        assert!(rime_layout("no body marker", std::path::Path::new("y")).is_none());
+        let d = rime_layout("---\n...\n你好\tnihao\n", std::path::Path::new("z")).unwrap();
+        assert_eq!(
+            (d.text_col, d.code_col, d.weight_col),
+            (0, 1, Some(2)),
+            "未声明 = librime 默认列序"
+        );
     }
 }

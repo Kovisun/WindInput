@@ -66,6 +66,7 @@ fn scan_and_evict_gate_with_large_snapshot() {
                     created_at: 1,
                     last_used: 1,
                     flags: 0,
+                    order: 0,
                 })
                 .collect()
         })

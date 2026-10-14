@@ -38,6 +38,7 @@ pub mod reverseidx;
 pub mod trie;
 pub mod weight_norm;
 
+pub use codetable::{RimeLayout, rime_layout};
 pub use composite::CompositeDict;
 pub use layer::{DictLayer, LayerType, MutableLayer, WILDCARD_SLOT};
 pub use manager::{DictManager, SystemDictLayer};

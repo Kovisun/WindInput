@@ -11,3 +11,4 @@ pub mod record;
 pub mod runtime;
 pub mod snapshot;
 pub mod state;
+pub mod text;

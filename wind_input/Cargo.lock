@@ -2784,11 +2784,14 @@ dependencies = [
  "crc32fast",
  "memmap2",
  "serde",
+ "serde_yaml",
  "toml 0.8.23",
  "tracing",
  "uuid",
  "wind-candidate",
  "wind-dict",
+ "wind-utils",
+ "wind-wdict",
 ]
 
 [[package]]

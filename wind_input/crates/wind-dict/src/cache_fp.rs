@@ -312,10 +312,10 @@ fn write_st(
 ///   「编码在前」手写进文本在前的词库，整条 `$SS` 被当成编码、永远打不出来）
 const PARSE_SEMANTICS_VERSION: u32 = 6;
 
-/// 测试用：本线程全量指纹计算的次数（线程局部，测试并行时互不干扰）。
-/// 快路径的证据就是「它没有增加」。
 #[cfg(test)]
 thread_local! {
+    /// 测试用：本线程全量指纹计算的次数（线程局部，测试并行时互不干扰）。
+    /// 快路径的证据就是「它没有增加」。
     static FULL_HASHES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 

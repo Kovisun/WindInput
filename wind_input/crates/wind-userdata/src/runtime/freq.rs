@@ -72,6 +72,7 @@ impl Runtime {
                         created_at: r.last_used,
                         last_used: 0,
                         flags: 0,
+                        order: 0,
                     });
                 e.count = e.count.max(r.count);
                 e.last_used = e.last_used.max(r.last_used);

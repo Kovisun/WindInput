@@ -20,6 +20,29 @@ use std::sync::{Arc, Mutex, RwLock};
 pub const FOLD_THRESHOLD: usize = 4000;
 /// 日志超过这么大就压实（§9：日志 ≤ 8 MB）。
 pub const JOURNAL_MAX_BYTES: u64 = 8 << 20;
+/// 文本目标的空闲折回间隔（§3.5：文本目标的操作来自用户主动动作，空闲 30 秒再写回）。
+pub const TEXT_IDLE: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// 文本目标折回失败（隔离 / 读不了 / 编辑器竞争）后的退避：首次 30 秒，逐次翻倍，封顶 30 分钟。
+fn text_retry_backoff(fails: u32) -> std::time::Duration {
+    TEXT_IDLE
+        .saturating_mul(1 << fails.saturating_sub(1).min(6))
+        .min(std::time::Duration::from_secs(1800))
+}
+
+/// 把某 (目标, 方案) 绑定到一个文本真源文件（§2.2 / §3.5 文本目标）。
+#[derive(Clone, Debug)]
+pub struct TextBinding {
+    pub path: PathBuf,
+    /// 新建文件时头部的 `name:`（如 `pinyin.user`）。
+    pub name: String,
+    /// 方案的 `lowercase_code`：匹配键规范化用。
+    pub lowercase: bool,
+    /// 新建文件时是否声明 `code_spacing: syllable`（拼音族）。
+    pub syllable_codes: bool,
+}
+
+type TargetKey = (Target, String);
 
 pub struct Dirs {
     /// 本机状态目录（`<localdata>/state/`，设计 §2.1）。
@@ -79,6 +102,12 @@ pub struct UserData {
     jpath: Option<PathBuf>,
     /// 后台折回单飞标记。
     maintaining: std::sync::atomic::AtomicBool,
+    /// 文本目标绑定（P2a）。被绑定的目标折回走 `fold_text`。
+    text_bindings: Mutex<BTreeMap<TargetKey, TextBinding>>,
+    /// 各目标最后一次写入的时刻（文本目标按空闲折回）。
+    last_write: Mutex<BTreeMap<TargetKey, std::time::Instant>>,
+    /// 文本目标折回失败的退避：(连续失败次数, 下次可重试时刻)。成功即清。
+    text_retry: Mutex<BTreeMap<TargetKey, (u32, std::time::Instant)>>,
     view: RwLock<Arc<View>>,
     state: Mutex<State>,
     lock: Option<Lock>,
@@ -209,6 +238,7 @@ pub(crate) fn apply_ops(
         created_at: ts,
         last_used: ts,
         flags,
+        order: 0,
     };
     let mut cur = base;
     for op in ops {
@@ -441,6 +471,9 @@ impl UserData {
             state_path,
             jpath,
             maintaining: std::sync::atomic::AtomicBool::new(false),
+            text_bindings: Mutex::new(BTreeMap::new()),
+            last_write: Mutex::new(BTreeMap::new()),
+            text_retry: Mutex::new(BTreeMap::new()),
             view: RwLock::new(Arc::new(View {
                 snapshots,
                 delta: Arc::new(delta),
@@ -533,6 +566,11 @@ impl UserData {
             snapshots: cur.snapshots.clone(),
             delta: Arc::new(delta),
         });
+        let now = std::time::Instant::now();
+        let mut lw = self.last_write.lock().unwrap_or_else(|e| e.into_inner());
+        for op in ops {
+            lw.insert((op.target, op.schema.clone()), now);
+        }
         Ok(seqs)
     }
 
@@ -547,6 +585,11 @@ impl UserData {
     ) -> anyhow::Result<()> {
         if self.readonly() {
             bail!("只读模式");
+        }
+        if self.text_owned(target, schema) {
+            bail!(
+                "归文本管的目标不走 fold_with（清空 / 导入用 rewrite_text；未绑定时先 bind_text），免得绕过真源"
+            );
         }
         let _f = self.fold_lock.lock().unwrap_or_else(|e| e.into_inner());
         // 水位与起点是一个原子动作：apply 持写锁跨「追加 + 发布」，所以这里拿到的视图
@@ -605,8 +648,376 @@ impl UserData {
         st.save(&self.state_path)
     }
 
+    // ───────────── 文本目标（P2a，设计 §3.5）─────────────
+
+    fn bound_keys(&self) -> std::collections::BTreeSet<TargetKey> {
+        self.text_bindings
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .keys()
+            .cloned()
+            .collect()
+    }
+
+    /// 目标归文本管：已绑定，或 state 记过文本指纹（重开后还没重新绑定）。后者的操作只能等
+    /// 绑定后经 `fold_text` 写进文本——此前走 `fold_with` 会进段不进文本、清掉指纹，绑定时由
+    /// 文本重建就把它们丢了。
+    fn text_owned(&self, target: Target, schema: &str) -> bool {
+        self.text_binding(target, schema).is_some()
+            || self
+                .state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .targets
+                .get(&target_key(target, schema))
+                .is_some_and(|t| t.text_fp.is_some())
+    }
+
+    pub fn text_binding(&self, target: Target, schema: &str) -> Option<TextBinding> {
+        self.text_bindings
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&(target, schema.to_string()))
+            .cloned()
+    }
+
+    /// 绑定文本文件，随即 `sync_text` 一次（文件比段新就由文本重建）。同步失败（隔离 / 读不了）
+    /// 时绑定照样生效，之后的折回 / 同步会重试。只读实例只登记绑定、不同步（它不写快照与 state）。
+    pub fn bind_text(&self, target: Target, schema: &str, b: TextBinding) -> anyhow::Result<()> {
+        self.text_bindings
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert((target, schema.to_string()), b);
+        if self.readonly() {
+            return Ok(());
+        }
+        self.sync_text(target, schema)?;
+        Ok(())
+    }
+
+    /// 取「折回起点」：写锁下的水位与视图（同 `fold_with`）。
+    fn upto_and_view(&self) -> anyhow::Result<(u64, Arc<View>)> {
+        let _g = self.write_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let upto = match self
+            .journal
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+        {
+            Some(j) => j.next_seq() - 1,
+            None => bail!("只读模式"),
+        };
+        Ok((upto, self.view()))
+    }
+
+    /// 文本 → 段条目：按 (code, text) 排序去重（同键多行取文件里第一行），`order` = 行号。
+    fn text_entries(bytes: &[u8], b: &TextBinding) -> anyhow::Result<Vec<SnapshotEntry>> {
+        let dict = crate::text::parse(bytes, &b.path, b.lowercase).map_err(|e| {
+            tracing::warn!(
+                "文本 {} 隔离（{e:?}）：不往里折回，按已有段提供查询",
+                b.path.display()
+            );
+            anyhow::anyhow!("文本 {} 解析失败：{e:?}", b.path.display())
+        })?;
+        let mut v: Vec<SnapshotEntry> = dict
+            .entries
+            .into_iter()
+            .map(|e| SnapshotEntry {
+                code: e.code,
+                text: e.text,
+                weight: e.weight,
+                boundary: e.boundary,
+                count: 0,
+                created_at: 0,
+                last_used: 0,
+                flags: 0,
+                order: e.line as u32,
+            })
+            .collect();
+        v.sort_by(|a, b| {
+            (a.code.as_str(), a.text.as_str()).cmp(&(b.code.as_str(), b.text.as_str()))
+        });
+        v.dedup_by(|a, b| a.code == b.code && a.text == b.text);
+        Ok(v)
+    }
+
+    /// 由文本条目建段并换入；`drop_upto` 给出时摘 delta 里该目标 `seq ≤` 它的条目；`folded`
+    /// 给出时推进折回水位。state 记 `text_fp`。
+    #[allow(clippy::too_many_arguments)]
+    fn install_text_segment(
+        &self,
+        target: Target,
+        schema: &str,
+        entries: Vec<SnapshotEntry>,
+        max_seq: u64,
+        drop_upto: Option<u64>,
+        fp: String,
+        folded: Option<u64>,
+    ) -> anyhow::Result<()> {
+        let dir = self.dirs.state_dir.join(schema);
+        let snap = Arc::new(crate::snapshot::build(
+            &dir,
+            target_name(target),
+            max_seq,
+            entries.into_iter(),
+        )?);
+        {
+            let _g = self.write_lock.lock().unwrap_or_else(|e| e.into_inner());
+            let cur = self.view();
+            let mut snapshots = cur.snapshots.clone();
+            snapshots.insert((target, schema.to_string()), snap);
+            let delta = match drop_upto {
+                Some(u) => Arc::new(cur.delta.drop_folded_for_schema(target, schema, u)),
+                None => cur.delta.clone(),
+            };
+            self.publish(View { snapshots, delta });
+        }
+        let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let ts = st.targets.entry(target_key(target, schema)).or_default();
+        if let Some(f) = folded {
+            ts.folded_seq = ts.folded_seq.max(f);
+        }
+        ts.text_fp = Some(fp);
+        if let Some(f) = folded {
+            st.next_seq = st.next_seq.max(f + 1);
+        }
+        st.save(&self.state_path)
+    }
+
+    /// §3.5 文本目标折回（调用方已持 `fold_lock`）。
+    fn fold_text_locked(
+        &self,
+        b: &TextBinding,
+        target: Target,
+        schema: &str,
+    ) -> anyhow::Result<()> {
+        use crate::text::PatchOp;
+        let (upto, base) = self.upto_and_view()?;
+        let pending: Vec<&Entry> = base
+            .delta
+            .prefix(target, schema, "")
+            .into_iter()
+            .filter(|e| e.seq <= upto)
+            .collect();
+        if pending.is_empty() {
+            return Ok(());
+        }
+        let ops: Vec<PatchOp> = pending
+            .iter()
+            .filter_map(|e| match e.op {
+                DeltaOp::Upsert { weight, .. } => Some(PatchOp::Upsert {
+                    code: e.code.clone(),
+                    text: e.text.clone(),
+                    boundary: e.boundary,
+                    weight,
+                }),
+                DeltaOp::Delete => Some(PatchOp::Delete {
+                    code: e.code.clone(),
+                    text: e.text.clone(),
+                }),
+                DeltaOp::SetWeight(w) => Some(PatchOp::SetWeight {
+                    code: e.code.clone(),
+                    text: e.text.clone(),
+                    weight: w,
+                    ts_secs: e.ts_ms.div_euclid(1000),
+                }),
+                // 计数与时间不进文本（P2a 计划内裁定）
+                DeltaOp::Incr(_) | DeltaOp::Touch(_) => None,
+            })
+            .collect();
+        // 1. 读文件 + 指纹（读不了 ⇒ 本轮跳过；不存在 ⇒ 当空文件，Upsert 会新建）
+        let cur = crate::text::fold::read_text(&b.path)?;
+        let fp_before = crate::text::fold::fingerprint(cur.as_ref().map(|(x, _)| x.as_slice()));
+        if ops.is_empty() && self.text_fp(target, schema).as_deref() == Some(fp_before.as_str()) {
+            // 只有计数 / 时间、文件也没被手改：段不变，只摘 delta、推进水位
+            {
+                let _g = self.write_lock.lock().unwrap_or_else(|e| e.into_inner());
+                let cur = self.view();
+                let delta = Arc::new(cur.delta.drop_folded_for_schema(target, schema, upto));
+                self.publish(View {
+                    snapshots: cur.snapshots.clone(),
+                    delta,
+                });
+            }
+            let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            let ts = st.targets.entry(target_key(target, schema)).or_default();
+            ts.folded_seq = ts.folded_seq.max(upto);
+            st.next_seq = st.next_seq.max(upto + 1);
+            return st.save(&self.state_path);
+        }
+        let (bytes, mtime) = cur.unwrap_or((Vec::new(), 0));
+        let new_bytes = if ops.is_empty() {
+            bytes
+        } else {
+            let out = crate::text::patch(
+                &bytes,
+                &b.path,
+                b.lowercase,
+                &ops,
+                mtime,
+                &b.name,
+                b.syllable_codes,
+            )
+            .map_err(|e| {
+                tracing::warn!("文本 {} 隔离（{e:?}）：不往里折回", b.path.display());
+                anyhow::anyhow!("文本 {} 解析失败：{e:?}", b.path.display())
+            })?;
+            // 2–4. tmp + fsync → 复核原文件指纹 → .bak + rename + fsync 目录
+            crate::text::fold::commit_text(&b.path, &out, Some(&fp_before))?;
+            out
+        };
+        // 5–7. 由文本重建段 → 换入、摘 delta → state
+        let entries = if new_bytes.is_empty() {
+            Vec::new()
+        } else {
+            Self::text_entries(&new_bytes, b)?
+        };
+        let fp = if new_bytes.is_empty() && !b.path.is_file() {
+            crate::text::fold::fingerprint(None)
+        } else {
+            crate::text::fold::fingerprint(Some(&new_bytes))
+        };
+        self.install_text_segment(target, schema, entries, upto, Some(upto), fp, Some(upto))
+    }
+
+    fn text_fp(&self, target: Target, schema: &str) -> Option<String> {
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .targets
+            .get(&target_key(target, schema))
+            .and_then(|t| t.text_fp.clone())
+    }
+
+    /// §3.5 文本目标折回：delta 里该目标 `seq ≤ 水位` 的操作按行补丁写回文本，再由文本重建段。
+    /// 编辑器恰在期间保存 / 文件读不了 / 解析失败（隔离）⇒ `Err`，delta 与 state 不动。
+    pub fn fold_text(&self, target: Target, schema: &str) -> anyhow::Result<()> {
+        if self.readonly() {
+            bail!("只读模式");
+        }
+        let b = self
+            .text_binding(target, schema)
+            .ok_or_else(|| anyhow::anyhow!("目标未绑定文本"))?;
+        let _f = self.fold_lock.lock().unwrap_or_else(|e| e.into_inner());
+        self.fold_text_locked(&b, target, schema)
+    }
+
+    /// 文件被手改 / 换掉 / 删除 ⇒ 由文本重建段（水位不回退），delta 不动——已折回的记录不回放，
+    /// 删掉的行不复活，未折回的操作仍叠加。指纹没变 ⇒ `Ok(false)`。
+    pub fn sync_text(&self, target: Target, schema: &str) -> anyhow::Result<bool> {
+        if self.readonly() {
+            bail!("只读模式");
+        }
+        let b = self
+            .text_binding(target, schema)
+            .ok_or_else(|| anyhow::anyhow!("目标未绑定文本"))?;
+        let _f = self.fold_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let cur = crate::text::fold::read_text(&b.path)?;
+        let fp = crate::text::fold::fingerprint(cur.as_ref().map(|(x, _)| x.as_slice()));
+        let key = (target, schema.to_string());
+        let (old_fp, folded) = {
+            let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            st.targets
+                .get(&target_key(target, schema))
+                .map(|t| (t.text_fp.clone(), t.folded_seq))
+                .unwrap_or((None, 0))
+        };
+        let snap_wm = self.view().snapshots.get(&key).map(|s| s.max_seq);
+        if old_fp.as_deref() == Some(fp.as_str()) && snap_wm.is_some() {
+            return Ok(false);
+        }
+        let entries = match &cur {
+            Some((bytes, _)) => Self::text_entries(bytes, &b)?,
+            None => Vec::new(),
+        };
+        let max_seq = folded.max(snap_wm.unwrap_or(0));
+        self.install_text_segment(target, schema, entries, max_seq, None, fp, None)?;
+        Ok(true)
+    }
+
+    /// 整文件替换（清空 / 导入 / 迁移，§3.8）：先折回待处理操作，再把文件写成 `rows`
+    /// （就是新全集）、重建段、推进水位。不做指纹复核——这是用户明确的整体动作。
+    pub fn rewrite_text(
+        &self,
+        target: Target,
+        schema: &str,
+        rows: &[(String, String, u64, i32)],
+    ) -> anyhow::Result<()> {
+        if self.readonly() {
+            bail!("只读模式");
+        }
+        let b = self
+            .text_binding(target, schema)
+            .ok_or_else(|| anyhow::anyhow!("目标未绑定文本"))?;
+        let _f = self.fold_lock.lock().unwrap_or_else(|e| e.into_inner());
+        self.fold_text_locked(&b, target, schema)?;
+        let (upto, _) = self.upto_and_view()?;
+        let content = crate::text::render(&b.name, b.syllable_codes, rows);
+        crate::text::fold::commit_text(&b.path, content.as_bytes(), None)?;
+        let entries = Self::text_entries(content.as_bytes(), &b)?;
+        let fp = crate::text::fold::fingerprint(Some(content.as_bytes()));
+        self.install_text_segment(target, schema, entries, upto, Some(upto), fp, Some(upto))
+    }
+
+    /// 已绑定、有待处理操作、且距最后一次写入 ≥ `idle` 的文本目标。
+    fn idle_text_targets(&self, idle: std::time::Duration) -> Vec<TargetKey> {
+        let v = self.view();
+        let lw = self.last_write.lock().unwrap_or_else(|e| e.into_inner());
+        let retry = self.text_retry.lock().unwrap_or_else(|e| e.into_inner());
+        let now = std::time::Instant::now();
+        self.bound_keys()
+            .into_iter()
+            .filter(|k| {
+                v.delta.pending(k.0, &k.1) > 0
+                    && lw
+                        .get(k)
+                        .is_none_or(|t| now.saturating_duration_since(*t) >= idle)
+                    && retry.get(k).is_none_or(|(_, at)| now >= *at)
+            })
+            .collect()
+    }
+
+    /// 折回空闲够久的文本目标；返回折回成功的目标数。单个目标失败（隔离 / 读不了 / 编辑器
+    /// 竞争）只记 WARN 并进入退避，不拖住别的目标。
+    pub fn maintain_text_idle(&self, idle: std::time::Duration) -> anyhow::Result<usize> {
+        let mut n = 0;
+        for (t, s) in self.idle_text_targets(idle) {
+            if self.fold_text_logged(t, &s) {
+                n += 1;
+            }
+        }
+        Ok(n)
+    }
+
+    /// `fold_text`，失败记 WARN 并登记退避；成功清退避。
+    fn fold_text_logged(&self, target: Target, schema: &str) -> bool {
+        let key = (target, schema.to_string());
+        let r = self.fold_text(target, schema);
+        let mut retry = self.text_retry.lock().unwrap_or_else(|e| e.into_inner());
+        match r {
+            Ok(()) => {
+                retry.remove(&key);
+                true
+            }
+            Err(e) => {
+                let fails = retry.get(&key).map_or(0, |(f, _)| *f) + 1;
+                let wait = text_retry_backoff(fails);
+                tracing::warn!(
+                    "文本目标 {}:{schema} 折回失败（第 {fails} 次，{}s 后重试）：{e:#}",
+                    target_name(target),
+                    wait.as_secs()
+                );
+                retry.insert(key, (fails, std::time::Instant::now() + wait));
+                false
+            }
+        }
+    }
+
     /// 旧快照 + delta → 新快照 → 换入 → 摘 delta → state（设计 §3.5 次序）。
     pub fn fold(&self, target: Target, schema: &str) -> anyhow::Result<()> {
+        if self.text_binding(target, schema).is_some() {
+            return self.fold_text(target, schema);
+        }
         self.fold_with(target, schema, &mut |v| v)
     }
 
@@ -691,8 +1102,14 @@ impl UserData {
         if self.readonly() {
             bail!("只读模式");
         }
+        // 归文本管的目标：已绑定的逐个折回，失败不拦压实（裁剪只到 delta 最小 seq，留在 delta
+        // 里的操作不受影响）；未绑定的等绑定后再折回。
         for (t, s) in self.view().delta.targets() {
-            self.fold(t, &s)?;
+            if self.text_binding(t, &s).is_some() {
+                self.fold_text_logged(t, &s);
+            } else if !self.text_owned(t, &s) {
+                self.fold_with(t, &s, &mut |v| v)?;
+            }
         }
         // 写锁下裁剪：裁剪是重写 + rename，期间不能有追加。
         let _g = self.write_lock.lock().unwrap_or_else(|e| e.into_inner());
@@ -737,7 +1154,8 @@ impl UserData {
         v.delta
             .targets()
             .iter()
-            .any(|(t, s)| v.delta.pending(*t, s) >= threshold)
+            .any(|k| v.delta.pending(k.0, &k.1) >= threshold && !self.text_owned(k.0, &k.1))
+            || !self.idle_text_targets(TEXT_IDLE).is_empty()
             || self.journal_len() > max_bytes
     }
 
@@ -750,11 +1168,12 @@ impl UserData {
         let mut n = 0;
         let v = self.view();
         for (t, s) in v.delta.targets() {
-            if v.delta.pending(t, &s) >= threshold {
-                self.fold(t, &s)?;
+            if v.delta.pending(t, &s) >= threshold && !self.text_owned(t, &s) {
+                self.fold_with(t, &s, &mut |v| v)?;
                 n += 1;
             }
         }
+        n += self.maintain_text_idle(TEXT_IDLE)?;
         if self.journal_len() > max_bytes {
             self.compact()?;
         }

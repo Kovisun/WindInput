@@ -1,8 +1,8 @@
 //! 快照段（设计 §3.1）：wdat（带简拼区，含无边界兜底组）+ 定长 sidecar `.meta`。
 //!
 //! sidecar 头 32 字节：`"WUDM" | version u16 | reserved u16 | max_seq u64 | entry_count u32 |
-//! gen u64 | reserved [u8;4]`，其后每条 24 字节 `count u32 | created_at i64 | last_used i64 |
-//! flags u8 | pad [u8;3]`，按 wdat 条目的**全局序号**对齐（DAT 键序 × 叶内序）。`max_seq` 是快照
+//! gen u64 | reserved [u8;4]`（version = 2），其后每条 28 字节 `count u32 | created_at i64 |
+//! last_used i64 | flags u8 | pad [u8;3] | order u32`，按 wdat 条目的**全局序号**对齐（DAT 键序 × 叶内序）。`max_seq` 是快照
 //! 内嵌的折回水位：state 丢了也能只回放更大的 seq（§3.6）。
 //!
 //! **sidecar 是提交点**：wdat 按代号落成 `<name>-<gen>.wdat`（每次折回一个新路径，从不覆盖
@@ -31,7 +31,9 @@ thread_local! {
 
 const META_MAGIC: &[u8; 4] = b"WUDM";
 const META_HEADER: usize = 32;
-const META_ROW: usize = 24;
+const META_ROW: usize = 28;
+/// sidecar 格式版本：2 = 每行带 `order`（入库顺序）。读到别的版本 ⇒ `Err`（当零段并整份回放）。
+const META_VERSION: u16 = 2;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct SnapshotEntry {
@@ -43,6 +45,8 @@ pub struct SnapshotEntry {
     pub created_at: i64,
     pub last_used: i64,
     pub flags: u8,
+    /// 入库顺序：文本目标 = 行号（用户词层的 `natural_order`）；运行时目标 0。
+    pub order: u32,
 }
 
 pub struct Snapshot {
@@ -98,6 +102,7 @@ pub fn build(
             meta.extend_from_slice(&e.last_used.to_le_bytes());
             meta.push(e.flags);
             meta.extend_from_slice(&[0u8; 3]);
+            meta.extend_from_slice(&e.order.to_le_bytes());
         }
         g.clear();
     }
@@ -159,7 +164,7 @@ pub fn build(
 fn meta_header(max_seq: u64, n: u32, generation: u64) -> Vec<u8> {
     let mut head = Vec::with_capacity(META_HEADER);
     head.extend_from_slice(META_MAGIC);
-    head.extend_from_slice(&1u16.to_le_bytes());
+    head.extend_from_slice(&META_VERSION.to_le_bytes());
     head.extend_from_slice(&0u16.to_le_bytes());
     head.extend_from_slice(&max_seq.to_le_bytes());
     head.extend_from_slice(&n.to_le_bytes());
@@ -208,7 +213,10 @@ pub fn open(dir: &Path, name: &str) -> anyhow::Result<Option<Snapshot>> {
         return Ok(None);
     }
     let meta = unsafe { memmap2::Mmap::map(&std::fs::File::open(&meta_path)?)? };
-    if meta.len() < META_HEADER || &meta[..4] != META_MAGIC {
+    if meta.len() < META_HEADER
+        || &meta[..4] != META_MAGIC
+        || u16::from_le_bytes([meta[4], meta[5]]) != META_VERSION
+    {
         bail!("sidecar 头损坏: {}", meta_path.display());
     }
     let max_seq = u64::from_le_bytes(meta[8..16].try_into()?);
@@ -247,6 +255,14 @@ pub fn open(dir: &Path, name: &str) -> anyhow::Result<Option<Snapshot>> {
 }
 
 impl Snapshot {
+    /// 第 `entry_idx` 条的入库顺序；越界给零。
+    pub fn order_of(&self, entry_idx: u32) -> u32 {
+        let o = META_HEADER + entry_idx as usize * META_ROW + 24;
+        self.meta
+            .get(o..o + 4)
+            .map_or(0, |b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+    }
+
     /// 第 `entry_idx` 条的 `(count, created_at, last_used, flags)`；越界给零。
     pub fn meta_of(&self, entry_idx: u32) -> (u32, i64, i64, u8) {
         let o = META_HEADER + entry_idx as usize * META_ROW;
@@ -283,6 +299,7 @@ impl Snapshot {
             created_at,
             last_used,
             flags,
+            order: self.order_of(idx),
         }
     }
 
@@ -379,6 +396,7 @@ impl Snapshot {
                     created_at,
                     last_used,
                     flags,
+                    order: self.order_of(idx),
                 });
                 idx += 1;
             }
@@ -400,6 +418,7 @@ mod tests {
             created_at: 100,
             last_used: 200,
             flags: 0,
+            order: 0,
         }
     }
 
@@ -513,6 +532,25 @@ mod tests {
         assert_eq!(wdats, 0, "旧代号文件已清");
         let s = open(&d, "t").unwrap().expect("零条目 sidecar 也能打开");
         assert_eq!(s.max_seq, 7);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+    #[test]
+    fn order_survives_build_and_open() {
+        let d = std::env::temp_dir().join(format!("wind_snap_order-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let mut a = se("ni", "你", 5, 0b1, 0);
+        a.order = 7;
+        let mut b = se("ni", "泥", 5, 0b1, 0);
+        b.order = 3;
+        drop(build(&d, "t", 1, vec![a, b].into_iter()).unwrap());
+        let s = open(&d, "t").unwrap().unwrap();
+        let mut got: Vec<(String, u32)> = s
+            .exact("ni")
+            .into_iter()
+            .map(|e| (e.text, e.order))
+            .collect();
+        got.sort();
+        assert_eq!(got, vec![("你".into(), 7), ("泥".into(), 3)]);
         let _ = std::fs::remove_dir_all(&d);
     }
 }
