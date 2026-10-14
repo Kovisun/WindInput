@@ -10,6 +10,9 @@
 //! sidecar 原子写完才算换段。崩溃在两步之间只留下一个无人引用的新 wdat，旧段原样可读；
 //! 无人引用的代号文件在下一次换段后清掉（Windows 上仍被映射的删不掉，留给再下一次）。
 //!
+//! 零条目快照只有 sidecar（带水位、gen = 0），没有 wdat：清空之后 state 丢了，被清空的记录也
+//! 不会因水位缺失而回放。
+//!
 //! 简拼区：每个条目按 [`crate::delta::group_of`] 的规则得一个键（有边界 ⇒ 首字母串；无边界
 //! ⇒ `\u{1}` + 首字符），同码同键只留一个、权重取其中最高——这就是 `wind-store`
 //! `USER_ABBREV` 兜底组在段里的等价物。同码异边界（xian 下的「先」与「西安」）各得各的键。
@@ -43,7 +46,8 @@ pub struct SnapshotEntry {
 }
 
 pub struct Snapshot {
-    pub reader: Arc<WdatReader>,
+    /// 零条目快照没有 wdat。
+    reader: Option<Arc<WdatReader>>,
     meta: memmap2::Mmap,
     pub max_seq: u64,
     pub entry_count: u32,
@@ -122,13 +126,14 @@ pub fn build(
             codes.push((abbrevs[i].1.as_str(), abbrevs[i].2));
             i += 1;
         }
-        sw.push_abbrev_sorted(&k, codes.into_iter());
+        sw.push_abbrev_sorted(&k, codes);
     }
 
     if n == 0 {
-        // 零段：没有文件就是零段（open 返回 None），不写空 wdat
-        remove(dir, name);
-        bail!("空快照不落盘");
+        // 零段也是快照：只有 sidecar（带水位），没有 wdat。
+        crate::state::atomic_write(&meta_path(dir, name), &meta_header(max_seq, 0, 0))?;
+        remove_stale_wdats(dir, name, None);
+        return open(dir, name)?.ok_or_else(|| anyhow::anyhow!("刚建好的空段打不开"));
     }
     let mut generation = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -144,7 +149,15 @@ pub fn build(
     if FAIL_BEFORE_META.with(|f| f.replace(false)) {
         bail!("故障注入：wdat 已写、sidecar 未写");
     }
-    let mut head = Vec::with_capacity(META_HEADER + meta.len());
+    let mut head = meta_header(max_seq, n, generation);
+    head.extend_from_slice(&meta);
+    crate::state::atomic_write(&meta_path(dir, name), &head)?;
+    remove_stale_wdats(dir, name, Some(generation));
+    open(dir, name)?.ok_or_else(|| anyhow::anyhow!("刚建好的段打不开"))
+}
+
+fn meta_header(max_seq: u64, n: u32, generation: u64) -> Vec<u8> {
+    let mut head = Vec::with_capacity(META_HEADER);
     head.extend_from_slice(META_MAGIC);
     head.extend_from_slice(&1u16.to_le_bytes());
     head.extend_from_slice(&0u16.to_le_bytes());
@@ -152,10 +165,7 @@ pub fn build(
     head.extend_from_slice(&n.to_le_bytes());
     head.extend_from_slice(&generation.to_le_bytes());
     head.extend_from_slice(&[0u8; 4]);
-    head.extend_from_slice(&meta);
-    crate::state::atomic_write(&meta_path(dir, name), &head)?;
-    remove_stale_wdats(dir, name, Some(generation));
-    open(dir, name)?.ok_or_else(|| anyhow::anyhow!("刚建好的段打不开"))
+    head
 }
 
 fn meta_path(dir: &Path, name: &str) -> PathBuf {
@@ -190,12 +200,6 @@ fn remove_stale_wdats(dir: &Path, name: &str, keep: Option<u64>) {
     }
 }
 
-/// 删段：先删 sidecar（提交点，删了即零段），再删代号文件。
-pub fn remove(dir: &Path, name: &str) {
-    let _ = std::fs::remove_file(meta_path(dir, name));
-    remove_stale_wdats(dir, name, None);
-}
-
 /// sidecar 不存在 ⇒ `Ok(None)`（零段）；在但头坏、指向的 wdat 不在或条目数对不上 ⇒ `Err`
 /// （调用方当零段，并对该目标整份回放日志）。
 pub fn open(dir: &Path, name: &str) -> anyhow::Result<Option<Snapshot>> {
@@ -207,14 +211,23 @@ pub fn open(dir: &Path, name: &str) -> anyhow::Result<Option<Snapshot>> {
     if meta.len() < META_HEADER || &meta[..4] != META_MAGIC {
         bail!("sidecar 头损坏: {}", meta_path.display());
     }
+    let max_seq = u64::from_le_bytes(meta[8..16].try_into()?);
+    let entry_count = u32::from_le_bytes(meta[16..20].try_into()?);
+    if entry_count == 0 {
+        return Ok(Some(Snapshot {
+            reader: None,
+            meta,
+            max_seq,
+            entry_count: 0,
+            first_idx: BTreeMap::new(),
+        }));
+    }
     let generation = u64::from_le_bytes(meta[20..28].try_into()?);
     let wdat = wdat_path(dir, name, generation);
     if !wdat.is_file() {
         bail!("sidecar 指向的段不在: {}", wdat.display());
     }
     let reader = wind_dict::reader_pool::open_wdat(&wdat)?;
-    let max_seq = u64::from_le_bytes(meta[8..16].try_into()?);
-    let entry_count = u32::from_le_bytes(meta[16..20].try_into()?);
     let mut first_idx = BTreeMap::new();
     let mut total = 0u32;
     for (code, leaf) in reader.codes() {
@@ -225,7 +238,7 @@ pub fn open(dir: &Path, name: &str) -> anyhow::Result<Option<Snapshot>> {
         bail!("sidecar 与 wdat 对不上: {} 条 vs {} 条", entry_count, total);
     }
     Ok(Some(Snapshot {
-        reader,
+        reader: Some(reader),
         meta,
         max_seq,
         entry_count,
@@ -252,48 +265,110 @@ impl Snapshot {
         self.first_idx.get(code).copied().unwrap_or(0) + order.max(0) as u32
     }
 
-    /// `(text, weight, boundary, entry_idx)`，同码按权重降序（建段时的叶内序）。
-    pub fn exact(&self, code: &str) -> Vec<(String, i32, u64, u32)> {
-        self.reader
-            .search(code)
-            .into_iter()
-            .map(|e| (e.text, e.weight, e.boundary, self.idx_of(code, e.order)))
-            .collect()
+    fn entry(
+        &self,
+        code: &str,
+        text: String,
+        weight: i32,
+        boundary: u64,
+        idx: u32,
+    ) -> SnapshotEntry {
+        let (count, created_at, last_used, flags) = self.meta_of(idx);
+        SnapshotEntry {
+            code: code.to_string(),
+            text,
+            weight,
+            boundary,
+            count,
+            created_at,
+            last_used,
+            flags,
+        }
     }
 
-    /// `(code, text, weight, boundary, entry_idx)`。
-    pub fn prefix(&self, prefix: &str, limit: usize) -> Vec<(String, String, i32, u64, u32)> {
-        self.reader
-            .search_prefix(prefix, limit)
+    /// 同码按权重降序（建段时的叶内序）。
+    pub fn exact(&self, code: &str) -> Vec<SnapshotEntry> {
+        let Some(r) = self.reader.as_deref() else {
+            return Vec::new();
+        };
+        r.search(code)
             .into_iter()
             .map(|e| {
-                let idx = self.idx_of(&e.code, e.order);
-                (e.code, e.text, e.weight, e.boundary, idx)
+                let idx = self.idx_of(code, e.order);
+                self.entry(code, e.text, e.weight, e.boundary, idx)
             })
             .collect()
     }
 
-    /// 简拼：简拼区给出全拼码，再回主表装配候选；按权重降序截到 `limit`。
-    pub fn abbrev(&self, abbrev: &str, limit: usize) -> Vec<(String, String, i32, u64, u32)> {
-        let mut out = Vec::new();
-        for a in self.reader.search_abbrev(abbrev, 0) {
-            let code = a.text;
-            for (text, weight, boundary, idx) in self.exact(&code) {
-                out.push((code.clone(), text, weight, boundary, idx));
-            }
+    /// `limit == 0` 由 [`Self::for_each_prefix`] 负责（`WdatReader::search_prefix(…, 0)` 返回空）。
+    pub fn prefix(&self, prefix: &str, limit: usize) -> Vec<SnapshotEntry> {
+        if limit == 0 {
+            let mut v = Vec::new();
+            self.for_each_prefix(prefix, &mut |e| {
+                v.push(e);
+                true
+            });
+            return v;
         }
-        out.sort_by(|x, y| y.2.cmp(&x.2).then(x.0.cmp(&y.0)));
+        let Some(r) = self.reader.as_deref() else {
+            return Vec::new();
+        };
+        r.search_prefix(prefix, limit)
+            .into_iter()
+            .map(|e| {
+                let idx = self.idx_of(&e.code, e.order);
+                self.entry(&e.code, e.text, e.weight, e.boundary, idx)
+            })
+            .collect()
+    }
+
+    /// 简拼：简拼区给出全拼码，再回主表装配条目；按权重降序截到 `limit`。
+    pub fn abbrev(&self, abbrev: &str, limit: usize) -> Vec<SnapshotEntry> {
+        let Some(r) = self.reader.as_deref() else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for a in r.search_abbrev(abbrev, 0) {
+            out.extend(self.exact(&a.text));
+        }
+        out.sort_by(|x, y| y.weight.cmp(&x.weight).then(x.code.cmp(&y.code)));
         if limit > 0 {
             out.truncate(limit);
         }
         out
     }
 
+    /// 按 (code, 叶内序) 顺序遍历 code 以 `prefix` 开头的条目；`f` 返回 false 即停。
+    pub fn for_each_prefix(&self, prefix: &str, f: &mut dyn FnMut(SnapshotEntry) -> bool) {
+        let Some(r) = self.reader.as_deref() else {
+            return;
+        };
+        for (code, leaf) in r.codes() {
+            if !code.starts_with(prefix) {
+                if code.as_str() > prefix {
+                    break;
+                }
+                continue;
+            }
+            let first = self.first_idx.get(&code).copied().unwrap_or(0);
+            for (i, (text, weight, _order, boundary)) in
+                r.leaf_entries(leaf).into_iter().enumerate()
+            {
+                if !f(self.entry(&code, text.to_string(), weight, boundary, first + i as u32)) {
+                    return;
+                }
+            }
+        }
+    }
+
     /// 全量遍历（DAT 键序 × 叶内序 = 全局序号顺序），供折回合并用。
     pub fn for_each(&self, f: &mut dyn FnMut(SnapshotEntry)) {
+        let Some(r) = self.reader.as_deref() else {
+            return;
+        };
         let mut idx = 0u32;
-        for (code, leaf) in self.reader.codes() {
-            for (text, weight, _order, boundary) in self.reader.leaf_entries(leaf) {
+        for (code, leaf) in r.codes() {
+            for (text, weight, _order, boundary) in r.leaf_entries(leaf) {
                 let (count, created_at, last_used, flags) = self.meta_of(idx);
                 f(SnapshotEntry {
                     code: code.clone(),
@@ -349,14 +424,15 @@ mod tests {
         assert_eq!(s.max_seq, 42);
         let hits = s.exact("nihao");
         assert_eq!(
-            hits.iter().map(|h| h.0.as_str()).collect::<Vec<_>>(),
+            hits.iter().map(|h| h.text.as_str()).collect::<Vec<_>>(),
             vec!["你好", "拟好"],
             "同码按权重降序"
         );
-        let (count, created, used, _) = s.meta_of(hits[0].3);
-        assert_eq!((count, created, used), (3, 100, 200));
-        let (count2, _, _, _) = s.meta_of(hits[1].3);
-        assert_eq!(count2, 1, "sidecar 与条目一一对齐");
+        assert_eq!(
+            (hits[0].count, hits[0].created_at, hits[0].last_used),
+            (3, 100, 200)
+        );
+        assert_eq!(hits[1].count, 1, "sidecar 与条目一一对齐");
         // 简拼命中的是**候选**：nihao 下两条（你好、拟好）都算
         assert_eq!(s.abbrev("nh", 10).len(), 2, "多音节简拼");
         assert_eq!(s.abbrev("nh", 1).len(), 1, "limit 截断");
@@ -383,9 +459,9 @@ mod tests {
             se("xian", "西安", 50, 0b101, 0),
         ];
         let s = build(&d, "t", 1, es.into_iter()).unwrap();
-        assert!(s.abbrev("x", 10).iter().any(|h| h.1 == "先"));
+        assert!(s.abbrev("x", 10).iter().any(|h| h.text == "先"));
         assert!(
-            s.abbrev("xa", 10).iter().any(|h| h.1 == "西安"),
+            s.abbrev("xa", 10).iter().any(|h| h.text == "西安"),
             "低权重条目的边界也要建键"
         );
         let _ = std::fs::remove_dir_all(&d);
@@ -417,6 +493,26 @@ mod tests {
         drop(s);
         std::fs::write(d.join("t.meta"), b"WUDM").unwrap();
         assert!(open(&d, "t").is_err());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// 零条目也是一个快照：它带着水位，清空之后 state 丢了也不会让旧记录复活。
+    #[test]
+    fn empty_build_keeps_watermark_and_drops_old_segment() {
+        let d = std::env::temp_dir().join(format!("wind_snap_empty-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        drop(build(&d, "t", 3, vec![se("a", "甲", 1, 0, 1)].into_iter()).unwrap());
+        let s = build(&d, "t", 7, std::iter::empty()).unwrap();
+        assert_eq!((s.max_seq, s.entry_count), (7, 0));
+        assert!(s.exact("a").is_empty());
+        let wdats = std::fs::read_dir(&d)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.path().extension().is_some_and(|x| x == "wdat"))
+            .count();
+        assert_eq!(wdats, 0, "旧代号文件已清");
+        let s = open(&d, "t").unwrap().expect("零条目 sidecar 也能打开");
+        assert_eq!(s.max_seq, 7);
         let _ = std::fs::remove_dir_all(&d);
     }
 }

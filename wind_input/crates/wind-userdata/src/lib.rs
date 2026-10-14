@@ -8,5 +8,6 @@ pub mod engine;
 pub mod journal;
 pub mod layer;
 pub mod record;
+pub mod runtime;
 pub mod snapshot;
 pub mod state;

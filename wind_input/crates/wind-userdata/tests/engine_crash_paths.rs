@@ -137,7 +137,9 @@ fn state_missing_replays_only_beyond_snapshot_watermark() {
     std::fs::remove_file(d.state_dir.join("journal/state")).unwrap();
     let ud = UserData::open(d).unwrap();
     assert_eq!(
-        ud.query_count(Target::Temp, "py", "a", "甲"),
+        ud.get(Target::Temp, "py", "a", "甲")
+            .map(|e| e.count)
+            .unwrap_or(0),
         2,
         "快照里 1 + 日志里只回放折回后的 1；重复回放会得 3"
     );
@@ -333,4 +335,160 @@ fn renewed_device_keeps_unfolded_records_and_continues_numbering() {
     for (c, t) in [("a", "甲"), ("b", "乙"), ("c", "丙"), ("e", "戊")] {
         assert_eq!(texts(&ud, c), vec![t], "{c}");
     }
+}
+
+/// Review Focus 3：清空（fold_with 返回空）后 state 丢失再重开，被清空的词不复活。
+#[test]
+fn clear_survives_state_loss() {
+    let d = dirs("clear");
+    let ud = reopen(&d);
+    up(&ud, "a", "甲");
+    ud.fold(Target::Temp, "py").unwrap();
+    up(&ud, "b", "乙");
+    ud.fold_with(Target::Temp, "py", &mut |_| Vec::new())
+        .unwrap();
+    assert!(texts(&ud, "a").is_empty() && texts(&ud, "b").is_empty());
+    drop(ud);
+    std::fs::remove_file(d.state_dir.join("journal").join("state")).unwrap();
+    let ud = reopen(&d);
+    assert!(texts(&ud, "a").is_empty(), "快照里的被清空");
+    assert!(texts(&ud, "b").is_empty(), "日志里的也不回放");
+}
+
+/// policy 看到的是叠加后的全集（快照 + delta），它的输出就是新快照。
+#[test]
+fn fold_with_policy_sees_merged_entries() {
+    let d = dirs("policy");
+    let ud = reopen(&d);
+    up(&ud, "a", "甲");
+    ud.fold(Target::Temp, "py").unwrap();
+    up(&ud, "b", "乙");
+    let mut seen = Vec::new();
+    ud.fold_with(Target::Temp, "py", &mut |v| {
+        seen = v.iter().map(|e| e.code.clone()).collect();
+        v.into_iter().filter(|e| e.code == "a").collect()
+    })
+    .unwrap();
+    assert_eq!(seen, vec!["a", "b"]);
+    drop(ud);
+    let ud = reopen(&d);
+    assert_eq!(texts(&ud, "a"), vec!["甲"]);
+    assert!(texts(&ud, "b").is_empty());
+}
+
+fn journal_records(d: &Dirs) -> usize {
+    let jdir = d.state_dir.join("journal");
+    std::fs::read_dir(&jdir)
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "wjl"))
+        .map(|p| {
+            wind_userdata::journal::Journal::replay(&p, 0)
+                .unwrap()
+                .len()
+        })
+        .sum()
+}
+
+#[test]
+fn compact_prunes_journal_and_keeps_everything_visible() {
+    let d = dirs("compact");
+    let ud = reopen(&d);
+    up(&ud, "a", "甲");
+    up(&ud, "b", "乙");
+    ud.compact().unwrap();
+    assert_eq!(journal_records(&d), 0, "全部折回后日志清空");
+    up(&ud, "c", "丙");
+    drop(ud);
+    let ud = reopen(&d);
+    for (c, t) in [("a", "甲"), ("b", "乙"), ("c", "丙")] {
+        assert_eq!(texts(&ud, c), vec![t], "{c}");
+    }
+}
+
+#[test]
+fn compact_removes_sealed_journals_once_folded() {
+    let d = dirs("compact_sealed");
+    let ud = reopen(&d);
+    up(&ud, "a", "甲");
+    drop(ud);
+    let d2 = Dirs {
+        state_dir: d.state_dir.clone(),
+        dir_id: "dir-B".into(),
+    };
+    let ud = reopen(&d2);
+    ud.compact().unwrap();
+    let sealed = std::fs::read_dir(d.state_dir.join("journal"))
+        .unwrap()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().ends_with(".wjl.sealed"))
+        .count();
+    assert_eq!(sealed, 0);
+    drop(ud);
+    assert_eq!(texts(&reopen(&d2), "a"), vec!["甲"]);
+}
+
+#[test]
+fn maintain_folds_only_targets_over_threshold() {
+    let d = dirs("maintain");
+    let ud = reopen(&d);
+    for c in ["a", "b", "c"] {
+        up(&ud, c, "字");
+    }
+    ud.apply(
+        Target::Freq,
+        "py",
+        OpKind::Incr,
+        "a",
+        "字",
+        Payload::Count(1),
+        0,
+    )
+    .unwrap();
+    assert!(ud.needs_maintain_with(3, u64::MAX));
+    assert_eq!(ud.maintain_with(3, u64::MAX).unwrap(), 1);
+    assert_eq!(ud.pending(Target::Temp, "py"), 0);
+    assert_eq!(ud.pending(Target::Freq, "py"), 1);
+    assert!(!ud.needs_maintain_with(3, u64::MAX));
+}
+
+#[test]
+fn spawn_maintain_runs_in_background_and_is_single_flight() {
+    let d = dirs("spawn");
+    let ud = std::sync::Arc::new(reopen(&d));
+    up(&ud, "a", "甲");
+    let h = ud.spawn_maintain_with(1, u64::MAX).expect("第一个起得来");
+    assert!(ud.spawn_maintain_with(1, u64::MAX).is_none() || ud.pending(Target::Temp, "py") == 0);
+    h.join().unwrap();
+    assert_eq!(ud.pending(Target::Temp, "py"), 0);
+}
+
+#[test]
+fn scan_merges_snapshot_and_delta_in_key_order() {
+    let d = dirs("scan");
+    let ud = reopen(&d);
+    up(&ud, "b", "乙");
+    up(&ud, "d", "丁");
+    ud.fold(Target::Temp, "py").unwrap();
+    up(&ud, "a", "甲");
+    up(&ud, "c", "丙");
+    ud.apply(
+        Target::Temp,
+        "py",
+        OpKind::Delete,
+        "d",
+        "丁",
+        Payload::None,
+        0,
+    )
+    .unwrap();
+    let mut got = Vec::new();
+    ud.scan(Target::Temp, "py", "", &mut |e| {
+        got.push(e.code);
+        true
+    });
+    assert_eq!(got, vec!["a", "b", "c"]);
+    let keys: Vec<_> = ud.keys().into_iter().collect();
+    assert_eq!(keys, vec![(Target::Temp, "py".to_string())]);
 }

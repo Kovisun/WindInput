@@ -16,11 +16,52 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock};
 
+/// 某 (目标, 方案) 未折回操作达到这么多条就折回（§3.5）。
+pub const FOLD_THRESHOLD: usize = 4000;
+/// 日志超过这么大就压实（§9：日志 ≤ 8 MB）。
+pub const JOURNAL_MAX_BYTES: u64 = 8 << 20;
+
 pub struct Dirs {
     /// 本机状态目录（`<localdata>/state/`，设计 §2.1）。
     pub state_dir: PathBuf,
     /// 用户目录 `meta.toml` 里的 dir_id。
     pub dir_id: String,
+}
+
+/// 一条待写入的操作。`ts_ms == 0` 表示取当前时刻（测试与迁移可显式给定）。
+#[derive(Clone, Debug)]
+pub struct Op {
+    pub target: Target,
+    pub schema: String,
+    pub kind: OpKind,
+    pub code: String,
+    pub text: String,
+    pub payload: Payload,
+    pub boundary: u64,
+    pub ts_ms: i64,
+}
+
+impl Op {
+    pub fn new(
+        target: Target,
+        schema: &str,
+        kind: OpKind,
+        code: &str,
+        text: &str,
+        payload: Payload,
+        boundary: u64,
+    ) -> Op {
+        Op {
+            target,
+            schema: schema.into(),
+            kind,
+            code: code.into(),
+            text: text.into(),
+            payload,
+            boundary,
+            ts_ms: 0,
+        }
+    }
 }
 
 /// 一个不可变的读视图：各 (目标, 数据方案) 的快照 + 未折回的增量表。
@@ -34,9 +75,15 @@ pub struct UserData {
     /// 只读实例为 `None`：它不打开日志写端，免得 open 时的截尾截掉写者正在写的那一条。
     journal: Mutex<Option<Journal>>,
     state_path: PathBuf,
+    /// 本设备日志路径（只读实例且没有 device.toml 时为 None）。
+    jpath: Option<PathBuf>,
+    /// 后台折回单飞标记。
+    maintaining: std::sync::atomic::AtomicBool,
     view: RwLock<Arc<View>>,
     state: Mutex<State>,
     lock: Option<Lock>,
+    /// 折回串行化：同一时刻只有一个 fold_with 在跑（后台折回与显式清空 / 导入不交错）。
+    fold_lock: Mutex<()>,
     /// 写者之间互斥；apply 持它跨「追加 + 发布」，fold 持它跨「取水位 + 取起点」与「换入」。
     write_lock: Mutex<()>,
 }
@@ -146,34 +193,35 @@ fn replay_all(journal_dir: &std::path::Path, current: Option<&std::path::Path>) 
     out
 }
 
-/// 把 delta 里某键的操作按 seq 叠加到快照条目上（折回语义，设计 §3.5 / 计划 Task 8）。
-fn apply_ops(
+/// 叠加语义的唯一实现（读路径、折回、层共用）。表见 P1a 计划 Task 1。
+pub(crate) fn apply_ops(
     base: Option<SnapshotEntry>,
     ops: &[&Entry],
     code: &str,
     text: &str,
 ) -> Option<SnapshotEntry> {
+    let fresh = |weight: i32, count: u32, boundary: u64, ts: i64, flags: u8| SnapshotEntry {
+        code: code.to_string(),
+        text: text.to_string(),
+        weight,
+        boundary,
+        count,
+        created_at: ts,
+        last_used: ts,
+        flags,
+    };
     let mut cur = base;
     for op in ops {
+        let ts = op.ts_ms.div_euclid(1000);
         match op.op {
             DeltaOp::Upsert { weight, kind } => match &mut cur {
                 Some(e) => {
                     e.weight = weight;
                     e.flags = kind;
                     e.boundary = op.boundary;
+                    e.last_used = ts;
                 }
-                None => {
-                    cur = Some(SnapshotEntry {
-                        code: code.to_string(),
-                        text: text.to_string(),
-                        weight,
-                        boundary: op.boundary,
-                        count: 0,
-                        created_at: now_ms(),
-                        last_used: 0,
-                        flags: kind,
-                    })
-                }
+                None => cur = Some(fresh(weight, 0, op.boundary, ts, kind)),
             },
             DeltaOp::Delete => cur = None,
             DeltaOp::SetWeight(w) => {
@@ -181,11 +229,13 @@ fn apply_ops(
                     e.weight = w;
                 }
             }
-            DeltaOp::Incr(c) => {
-                if let Some(e) = &mut cur {
+            DeltaOp::Incr(c) => match &mut cur {
+                Some(e) => {
                     e.count = e.count.saturating_add(c);
+                    e.last_used = ts;
                 }
-            }
+                None => cur = Some(fresh(0, c, op.boundary, ts, 0)),
+            },
             DeltaOp::Touch(t) => {
                 if let Some(e) = &mut cur {
                     e.last_used = t;
@@ -196,6 +246,33 @@ fn apply_ops(
     cur
 }
 
+/// 快照条目 + delta 操作 → 叠加后的条目，按 (code, text) 升序。`ops` 里涉及的每个键必须带上
+/// **该键的全部**操作（`Delta::exact` / `prefix` / `ops_for` 给出的都满足），否则叠加不完整。
+pub(crate) fn overlay_entries(
+    base: Vec<SnapshotEntry>,
+    mut ops: Vec<&Entry>,
+) -> Vec<SnapshotEntry> {
+    let mut map: BTreeMap<(String, String), Option<SnapshotEntry>> = base
+        .into_iter()
+        .map(|e| ((e.code.clone(), e.text.clone()), Some(e)))
+        .collect();
+    ops.sort_by_key(|e| e.seq);
+    ops.dedup_by_key(|e| e.seq);
+    let mut by_key: BTreeMap<(String, String), Vec<&Entry>> = BTreeMap::new();
+    for op in ops {
+        by_key
+            .entry((op.code.clone(), op.text.clone()))
+            .or_default()
+            .push(op);
+    }
+    for ((code, text), ks) in by_key {
+        let b = map.remove(&(code.clone(), text.clone())).flatten();
+        let merged = apply_ops(b, &ks, &code, &text);
+        map.insert((code, text), merged);
+    }
+    map.into_values().flatten().collect()
+}
+
 /// 旧快照 + delta（该目标、该方案、seq ≤ upto）→ 按 (code, text) 排好序的新快照条目。
 fn merge_for_fold(
     snapshot: Option<&Snapshot>,
@@ -204,60 +281,82 @@ fn merge_for_fold(
     schema: &str,
     upto: u64,
 ) -> Vec<SnapshotEntry> {
-    let mut map: BTreeMap<(String, String), SnapshotEntry> = BTreeMap::new();
+    let mut base = Vec::new();
     if let Some(s) = snapshot {
-        s.for_each(&mut |e| {
-            map.insert((e.code.clone(), e.text.clone()), e);
-        });
+        s.for_each(&mut |e| base.push(e));
     }
-    // delta 里涉及的键
-    let mut keys: Vec<(String, String)> = delta
+    let ops: Vec<&Entry> = delta
         .prefix(target, schema, "")
         .into_iter()
         .filter(|e| e.seq <= upto)
-        .map(|e| (e.code.clone(), e.text.clone()))
         .collect();
-    keys.sort();
-    keys.dedup();
-    for (code, text) in keys {
-        let ops: Vec<&Entry> = delta
-            .ops_for(target, schema, &code, &text)
-            .into_iter()
-            .filter(|e| e.seq <= upto)
-            .collect();
-        let base = map.remove(&(code.clone(), text.clone()));
-        if let Some(e) = apply_ops(base, &ops, &code, &text) {
-            map.insert((code, text), e);
-        }
-    }
-    map.into_values().collect()
+    overlay_entries(base, ops)
 }
 
-/// 快照命中 + delta 操作 → 候选 `(text, weight)`，权重降序、同权按 text。
-fn overlay(snapshot_hits: Vec<(String, i32, u64, u32)>, ops: Vec<&Entry>) -> Vec<(String, i32)> {
-    let mut map: BTreeMap<String, i32> = snapshot_hits
-        .into_iter()
-        .map(|(t, w, _, _)| (t, w))
-        .collect();
-    for op in ops {
-        match op.op {
-            DeltaOp::Upsert { weight, .. } => {
-                map.insert(op.text.clone(), weight);
-            }
-            DeltaOp::Delete => {
-                map.remove(&op.text);
-            }
-            DeltaOp::SetWeight(w) => {
-                if let Some(v) = map.get_mut(&op.text) {
-                    *v = w;
-                }
-            }
-            DeltaOp::Incr(_) | DeltaOp::Touch(_) => {}
+type DeltaKeys<'a> =
+    std::iter::Peekable<std::collections::btree_map::IntoIter<(String, String), Vec<&'a Entry>>>;
+
+/// 吐出 delta 里 code < `before`（None = 全部）的、快照里没有的键。返回 false = 回调要求停。
+fn flush_delta_before(
+    dk: &mut DeltaKeys<'_>,
+    before: Option<&str>,
+    f: &mut dyn FnMut(SnapshotEntry) -> bool,
+) -> bool {
+    while let Some(((c, _), _)) = dk.peek() {
+        if before.is_some_and(|b| c.as_str() >= b) {
+            break;
+        }
+        let Some(((c, t), ops)) = dk.next() else {
+            break;
+        };
+        if let Some(e) = apply_ops(None, &ops, &c, &t)
+            && !f(e)
+        {
+            return false;
         }
     }
-    let mut v: Vec<(String, i32)> = map.into_iter().collect();
-    v.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
-    v
+    true
+}
+
+/// 快照里一个码的全部条目与 delta 里同码的键按 text 归并叠加。返回 false = 回调要求停。
+fn merge_code_group(
+    mut group: Vec<SnapshotEntry>,
+    code: &str,
+    dk: &mut DeltaKeys<'_>,
+    f: &mut dyn FnMut(SnapshotEntry) -> bool,
+) -> bool {
+    if !flush_delta_before(dk, Some(code), f) {
+        return false;
+    }
+    // 叶内是按权重排的，归并要 text 序
+    group.sort_by(|a, b| a.text.cmp(&b.text));
+    let mut gi = group.into_iter().peekable();
+    loop {
+        let dnext = dk
+            .peek()
+            .filter(|((c, _), _)| c == code)
+            .map(|((_, t), _)| t.clone());
+        let take_delta = match (gi.peek(), &dnext) {
+            (None, None) => return true,
+            (Some(g), Some(d)) => d <= &g.text,
+            (None, Some(_)) => true,
+            (Some(_), None) => false,
+        };
+        let out = if take_delta {
+            let Some(((c, t), ops)) = dk.next() else {
+                return true;
+            };
+            let base = gi.next_if(|g| g.text == t);
+            apply_ops(base, &ops, &c, &t)
+        } else {
+            gi.next()
+        };
+        if let Some(e) = out
+            && !f(e)
+        {
+            return false;
+        }
+    }
 }
 
 impl UserData {
@@ -340,6 +439,8 @@ impl UserData {
             dirs,
             journal: Mutex::new(journal),
             state_path,
+            jpath,
+            maintaining: std::sync::atomic::AtomicBool::new(false),
             view: RwLock::new(Arc::new(View {
                 snapshots,
                 delta: Arc::new(delta),
@@ -347,6 +448,7 @@ impl UserData {
             state: Mutex::new(state),
             lock,
             write_lock: Mutex::new(()),
+            fold_lock: Mutex::new(()),
         })
     }
 
@@ -376,6 +478,14 @@ impl UserData {
         payload: Payload,
         boundary: u64,
     ) -> anyhow::Result<u64> {
+        let seqs =
+            self.apply_batch(&[Op::new(target, schema, kind, code, text, payload, boundary)])?;
+        Ok(seqs[0])
+    }
+
+    /// 一批操作：先全部校验（无增量语义的整批拒、不占号），再逐条追加（各一次 write）、
+    /// 最后发布一次视图。写锁跨「追加 + 发布」，与 fold 取水位互斥。
+    pub fn apply_batch(&self, ops: &[Op]) -> anyhow::Result<Vec<u64>> {
         if self.readonly() {
             bail!(
                 "只读模式：另一个实例持有 {}",
@@ -383,41 +493,62 @@ impl UserData {
             );
         }
         let _g = self.write_lock.lock().unwrap_or_else(|e| e.into_inner());
-        let seq = {
-            let mut guard = self.journal.lock().unwrap_or_else(|e| e.into_inner());
-            let Some(j) = guard.as_mut() else {
-                bail!("只读模式");
-            };
-            let seq = j.next_seq();
-            let rec = Record {
-                seq,
-                ts_ms: now_ms(),
-                kind,
-                target,
-                schema: schema.into(),
-                code: code.into(),
-                text: text.into(),
-                payload,
-                boundary,
-            };
-            j.append(&rec)?;
-            if let Some(e) = entry_from_record(&rec) {
-                let cur = self.view();
-                self.publish(View {
-                    snapshots: cur.snapshots.clone(),
-                    delta: Arc::new(cur.delta.with(e)),
-                });
-            }
-            seq
+        let mut guard = self.journal.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(j) = guard.as_mut() else {
+            bail!("只读模式");
         };
-        Ok(seq)
+        let now = now_ms();
+        let mut recs = Vec::with_capacity(ops.len());
+        let mut entries = Vec::with_capacity(ops.len());
+        for (i, op) in ops.iter().enumerate() {
+            let rec = Record {
+                seq: j.next_seq() + i as u64,
+                ts_ms: if op.ts_ms == 0 { now } else { op.ts_ms },
+                kind: op.kind,
+                target: op.target,
+                schema: op.schema.clone(),
+                code: op.code.clone(),
+                text: op.text.clone(),
+                payload: op.payload.clone(),
+                boundary: op.boundary,
+            };
+            rec.check_lens()?;
+            let Some(e) = entry_from_record(&rec) else {
+                bail!("操作 {:?} 没有增量语义，不写入", op.kind);
+            };
+            recs.push(rec);
+            entries.push(e);
+        }
+        let mut seqs = Vec::with_capacity(recs.len());
+        for rec in &recs {
+            j.append(rec)?;
+            seqs.push(rec.seq);
+        }
+        let cur = self.view();
+        let mut delta = (*cur.delta).clone();
+        for e in entries {
+            delta = delta.with(e);
+        }
+        self.publish(View {
+            snapshots: cur.snapshots.clone(),
+            delta: Arc::new(delta),
+        });
+        Ok(seqs)
     }
 
-    /// 旧快照 + delta → 新快照 → 换入 → 摘 delta → state（设计 §3.5 次序）。
-    pub fn fold(&self, target: Target, schema: &str) -> anyhow::Result<()> {
+    /// 带策略的折回（§3.5 次序；§3.8 批量操作都走它）：旧快照 + delta(seq ≤ upto) 叠加 →
+    /// `policy` → 新快照（可为零条目）→ 换入 → 摘 delta → state。新快照内嵌 `max_seq = upto`，
+    /// 所以换入即推进水位：清空 / 导入 / 淘汰之后，被取代的旧记录无论 state 在不在都不再回放。
+    pub fn fold_with(
+        &self,
+        target: Target,
+        schema: &str,
+        policy: &mut dyn FnMut(Vec<SnapshotEntry>) -> Vec<SnapshotEntry>,
+    ) -> anyhow::Result<()> {
         if self.readonly() {
             bail!("只读模式");
         }
+        let _f = self.fold_lock.lock().unwrap_or_else(|e| e.into_inner());
         // 水位与起点是一个原子动作：apply 持写锁跨「追加 + 发布」，所以这里拿到的视图
         // 一定含有全部 seq ≤ upto 的操作。
         let (upto, base) = {
@@ -441,31 +572,23 @@ impl UserData {
             schema,
             upto,
         );
+        let mut out = policy(merged);
+        out.sort_by(|a, b| {
+            (a.code.as_str(), a.text.as_str()).cmp(&(b.code.as_str(), b.text.as_str()))
+        });
+        out.dedup_by(|a, b| a.code == b.code && a.text == b.text);
         let dir = self.dirs.state_dir.join(schema);
-        let name = target_name(target);
-        let new_snap = if merged.is_empty() {
-            crate::snapshot::remove(&dir, name);
-            None
-        } else {
-            Some(Arc::new(crate::snapshot::build(
-                &dir,
-                name,
-                upto,
-                merged.into_iter(),
-            )?))
-        };
+        let new_snap = Arc::new(crate::snapshot::build(
+            &dir,
+            target_name(target),
+            upto,
+            out.into_iter(),
+        )?);
         {
             let _g = self.write_lock.lock().unwrap_or_else(|e| e.into_inner());
             let cur = self.view();
             let mut snapshots = cur.snapshots.clone();
-            match new_snap {
-                Some(s) => {
-                    snapshots.insert(key.clone(), s);
-                }
-                None => {
-                    snapshots.remove(&key);
-                }
-            }
+            snapshots.insert(key.clone(), new_snap);
             // 只摘 seq ≤ upto 的该目标条目：折回期间新到的操作留下（Review Focus 4）
             let delta = Arc::new(cur.delta.drop_folded_for_schema(target, schema, upto));
             self.publish(View { snapshots, delta });
@@ -476,45 +599,246 @@ impl UserData {
             TargetState {
                 folded_seq: upto,
                 text_fp: None,
-                snapshot_fp: String::new(),
             },
         );
-        st.next_seq = upto + 1;
+        st.next_seq = st.next_seq.max(upto + 1);
         st.save(&self.state_path)
     }
 
-    /// 调试 / 适配层用：快照 + delta 叠加后的候选 `(text, weight)`。
-    pub fn query_exact(&self, target: Target, schema: &str, code: &str) -> Vec<(String, i32)> {
-        let v = self.view();
-        let hits = v
-            .snapshots
-            .get(&(target, schema.to_string()))
-            .map(|s| s.exact(code))
-            .unwrap_or_default();
-        overlay(hits, v.delta.exact(target, schema, code))
+    /// 旧快照 + delta → 新快照 → 换入 → 摘 delta → state（设计 §3.5 次序）。
+    pub fn fold(&self, target: Target, schema: &str) -> anyhow::Result<()> {
+        self.fold_with(target, schema, &mut |v| v)
     }
 
-    /// 某条的使用计数：快照里的 count + delta 里的 Incr 之和。
-    pub fn query_count(&self, target: Target, schema: &str, code: &str, text: &str) -> u32 {
+    /// 叠加后按 (code, text) 升序遍历 code 以 `prefix` 开头的条目；`f` 返回 false 即停。
+    ///
+    /// 流式：快照按码分组边读边与 delta（按键分好组，条数受折回阈值约束）归并，不物化整表——
+    /// 只取前几条（分页第一页、通配命中够数）时代价与读到的条数成正比。
+    pub fn scan(
+        &self,
+        target: Target,
+        schema: &str,
+        prefix: &str,
+        f: &mut dyn FnMut(SnapshotEntry) -> bool,
+    ) {
+        let v = self.view();
+        let mut by_key: BTreeMap<(String, String), Vec<&Entry>> = BTreeMap::new();
+        for e in v.delta.prefix(target, schema, prefix) {
+            by_key
+                .entry((e.code.clone(), e.text.clone()))
+                .or_default()
+                .push(e);
+        }
+        let mut dk = by_key.into_iter().peekable();
+        let mut stopped = false;
+        let mut cur: Option<String> = None;
+        let mut group: Vec<SnapshotEntry> = Vec::new();
+        if let Some(snap) = v.snapshots.get(&(target, schema.to_string())) {
+            snap.for_each_prefix(prefix, &mut |e| {
+                if cur.as_deref() != Some(e.code.as_str()) {
+                    if let Some(c) = cur.take()
+                        && !merge_code_group(std::mem::take(&mut group), &c, &mut dk, f)
+                    {
+                        stopped = true;
+                        return false;
+                    }
+                    cur = Some(e.code.clone());
+                }
+                group.push(e);
+                true
+            });
+        }
+        if stopped {
+            return;
+        }
+        if let Some(c) = cur.take()
+            && !merge_code_group(group, &c, &mut dk, f)
+        {
+            return;
+        }
+        flush_delta_before(&mut dk, None, f);
+    }
+
+    /// 有数据（快照非空或 delta 有操作）的 (目标, 方案)。
+    pub fn keys(&self) -> BTreeSet<(Target, String)> {
+        let v = self.view();
+        let mut out = v.delta.targets();
+        out.extend(
+            v.snapshots
+                .iter()
+                .filter(|(_, s)| s.entry_count > 0)
+                .map(|(k, _)| k.clone()),
+        );
+        out
+    }
+
+    /// 条目数上界（快照条数 + 未折回操作数），O(1)。给淘汰之类「要全量扫描才知道该不该删」的
+    /// 操作做门控：上界不超限就一定不用删。
+    pub fn upper_bound(&self, target: Target, schema: &str) -> usize {
+        let v = self.view();
+        v.snapshots
+            .get(&(target, schema.to_string()))
+            .map_or(0, |s| s.entry_count as usize)
+            + v.delta.pending(target, schema)
+    }
+
+    pub fn pending(&self, target: Target, schema: &str) -> usize {
+        self.view().delta.pending(target, schema)
+    }
+
+    /// 折回全部有待处理操作的目标，再把日志裁到「最小未折回 seq」之前，并删掉已全部折回的封存日志。
+    pub fn compact(&self) -> anyhow::Result<()> {
+        if self.readonly() {
+            bail!("只读模式");
+        }
+        for (t, s) in self.view().delta.targets() {
+            self.fold(t, &s)?;
+        }
+        // 写锁下裁剪：裁剪是重写 + rename，期间不能有追加。
+        let _g = self.write_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let mut guard = self.journal.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(j) = guard.as_mut() else {
+            bail!("只读模式");
+        };
+        let keep_from = self
+            .view()
+            .delta
+            .min_seq()
+            .unwrap_or(u64::MAX)
+            .min(j.next_seq());
+        j.prune_before(keep_from)?;
+        let jdir = self.dirs.state_dir.join("journal");
+        for p in std::fs::read_dir(&jdir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.to_str().is_some_and(|s| s.ends_with(".wjl.sealed")))
+        {
+            if Journal::tail_seq(&p).map_or(true, |t| t < keep_from) {
+                let _ = std::fs::remove_file(&p);
+            }
+        }
+        Ok(())
+    }
+
+    fn journal_len(&self) -> u64 {
+        self.jpath
+            .as_ref()
+            .and_then(|p| std::fs::metadata(p).ok())
+            .map_or(0, |m| m.len())
+    }
+
+    pub fn needs_maintain_with(&self, threshold: usize, max_bytes: u64) -> bool {
+        if self.readonly() {
+            return false;
+        }
+        let v = self.view();
+        v.delta
+            .targets()
+            .iter()
+            .any(|(t, s)| v.delta.pending(*t, s) >= threshold)
+            || self.journal_len() > max_bytes
+    }
+
+    pub fn needs_maintain(&self) -> bool {
+        self.needs_maintain_with(FOLD_THRESHOLD, JOURNAL_MAX_BYTES)
+    }
+
+    /// 折回 `pending ≥ threshold` 的目标；日志超 `max_bytes` 则压实。返回折回的目标数。
+    pub fn maintain_with(&self, threshold: usize, max_bytes: u64) -> anyhow::Result<usize> {
+        let mut n = 0;
+        let v = self.view();
+        for (t, s) in v.delta.targets() {
+            if v.delta.pending(t, &s) >= threshold {
+                self.fold(t, &s)?;
+                n += 1;
+            }
+        }
+        if self.journal_len() > max_bytes {
+            self.compact()?;
+        }
+        Ok(n)
+    }
+
+    pub fn maintain(&self) -> anyhow::Result<usize> {
+        self.maintain_with(FOLD_THRESHOLD, JOURNAL_MAX_BYTES)
+    }
+
+    /// 后台折回（§3.5：折回在独立线程）。只读或已有一个在跑 ⇒ None。
+    pub fn spawn_maintain_with(
+        self: &Arc<Self>,
+        threshold: usize,
+        max_bytes: u64,
+    ) -> Option<std::thread::JoinHandle<()>> {
+        use std::sync::atomic::Ordering;
+        if self.readonly() || self.maintaining.swap(true, Ordering::AcqRel) {
+            return None;
+        }
+        let me = self.clone();
+        let spawned = std::thread::Builder::new()
+            .name("userdata-fold".into())
+            .spawn(move || {
+                if let Err(e) = me.maintain_with(threshold, max_bytes) {
+                    tracing::warn!("用户数据折回失败: {e}");
+                }
+                me.maintaining.store(false, Ordering::Release);
+            });
+        match spawned {
+            Ok(h) => Some(h),
+            Err(e) => {
+                tracing::warn!("起折回线程失败: {e}");
+                self.maintaining.store(false, Ordering::Release);
+                None
+            }
+        }
+    }
+
+    pub fn spawn_maintain(self: &Arc<Self>) -> Option<std::thread::JoinHandle<()>> {
+        self.spawn_maintain_with(FOLD_THRESHOLD, JOURNAL_MAX_BYTES)
+    }
+
+    /// 某键叠加后的条目（快照 + delta）。
+    pub fn get(
+        &self,
+        target: Target,
+        schema: &str,
+        code: &str,
+        text: &str,
+    ) -> Option<SnapshotEntry> {
         let v = self.view();
         let base = v
             .snapshots
             .get(&(target, schema.to_string()))
-            .and_then(|s| {
-                s.exact(code)
-                    .into_iter()
-                    .find(|h| h.0 == text)
-                    .map(|h| s.meta_of(h.3).0)
-            })
-            .unwrap_or(0);
-        v.delta
-            .ops_for(target, schema, code, text)
-            .iter()
-            .map(|e| match e.op {
-                DeltaOp::Incr(c) => c,
-                _ => 0,
-            })
-            .fold(base, |a, b| a.saturating_add(b))
+            .and_then(|s| s.exact(code).into_iter().find(|e| e.text == text));
+        apply_ops(
+            base,
+            &v.delta.ops_for(target, schema, code, text),
+            code,
+            text,
+        )
+    }
+
+    /// 某码下叠加后的全部条目，按 text 升序。
+    pub fn exact(&self, target: Target, schema: &str, code: &str) -> Vec<SnapshotEntry> {
+        let v = self.view();
+        let base = v
+            .snapshots
+            .get(&(target, schema.to_string()))
+            .map(|s| s.exact(code))
+            .unwrap_or_default();
+        overlay_entries(base, v.delta.exact(target, schema, code))
+    }
+
+    /// 调试 / 测试用：`(text, weight)`，权重降序、同权按 text。
+    pub fn query_exact(&self, target: Target, schema: &str, code: &str) -> Vec<(String, i32)> {
+        let mut v: Vec<(String, i32)> = self
+            .exact(target, schema, code)
+            .into_iter()
+            .map(|e| (e.text, e.weight))
+            .collect();
+        v.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        v
     }
 }
 
@@ -561,6 +885,94 @@ mod tests {
                 "{c}"
             );
         }
+        let _ = std::fs::remove_dir_all(&d);
+    }
+    fn dirs_for(name: &str) -> (std::path::PathBuf, Dirs) {
+        let d = std::env::temp_dir().join(format!("wind_ud_{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        (
+            d.clone(),
+            Dirs {
+                state_dir: d,
+                dir_id: "dir".into(),
+            },
+        )
+    }
+
+    /// M3：created_at 是写入时刻，折回不改它；Upsert 刷新 last_used；Incr 对不存在的键新建条目。
+    #[test]
+    fn timestamps_come_from_the_op_not_the_fold() {
+        let (d, dirs) = dirs_for("ts");
+        let ud = UserData::open(dirs).unwrap();
+        let mut a = Op::new(
+            Target::Temp,
+            "py",
+            OpKind::Upsert,
+            "a",
+            "甲",
+            Payload::Weight(5),
+            0,
+        );
+        a.ts_ms = 5_000_000;
+        let mut a2 = Op::new(
+            Target::Temp,
+            "py",
+            OpKind::Upsert,
+            "a",
+            "甲",
+            Payload::Weight(6),
+            0,
+        );
+        a2.ts_ms = 9_000_000;
+        let mut f = Op::new(
+            Target::Freq,
+            "py",
+            OpKind::Incr,
+            "b",
+            "乙",
+            Payload::Count(2),
+            0,
+        );
+        f.ts_ms = 7_000_000;
+        ud.apply_batch(&[a, a2, f]).unwrap();
+        ud.fold(Target::Temp, "py").unwrap();
+        ud.fold(Target::Freq, "py").unwrap();
+        let e = ud.get(Target::Temp, "py", "a", "甲").unwrap();
+        assert_eq!((e.weight, e.created_at, e.last_used), (6, 5_000, 9_000));
+        let f = ud
+            .get(Target::Freq, "py", "b", "乙")
+            .expect("Incr 对不存在的键新建");
+        assert_eq!((f.count, f.created_at, f.last_used), (2, 7_000, 7_000));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// M5：没有增量语义的记录不落日志、不占号。
+    #[test]
+    fn op_without_delta_semantics_is_refused_before_append() {
+        let (d, dirs) = dirs_for("m5");
+        let ud = UserData::open(dirs).unwrap();
+        let bad = Op::new(
+            Target::Temp,
+            "py",
+            OpKind::BatchMarker,
+            "a",
+            "甲",
+            Payload::None,
+            0,
+        );
+        assert!(ud.apply_batch(&[bad]).is_err());
+        let seq = ud
+            .apply(
+                Target::Temp,
+                "py",
+                OpKind::Upsert,
+                "a",
+                "甲",
+                Payload::Weight(1),
+                0,
+            )
+            .unwrap();
+        assert_eq!(seq, 1, "被拒的记录不占号");
         let _ = std::fs::remove_dir_all(&d);
     }
 }

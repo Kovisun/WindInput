@@ -6,8 +6,8 @@
 ## Purpose
 
 用户数据引擎（设计：[docs/design/user-data-storage-redesign.md](../../../docs/design/user-data-storage-redesign.md) §3）：
-「快照 + 日志 + 增量表」三种物理形态各管一类变化速度。P0 只交付引擎与 `DictLayer` 适配，
-**尚未接进 `wind-engine`**（P1 把临时词 / 草稿 / 计数迁进来；P2 文本层在同一台引擎上多一步
+「快照 + 日志 + 增量表」三种物理形态各管一类变化速度。P0 交付引擎与 `DictLayer` 适配，P1a 补上运行时领域 API（`Runtime`）与草稿层；
+**尚未接进 `wind-engine`**（P1b 把临时词 / 草稿 / 计数接进来；P2 文本层在同一台引擎上多一步
 「按行补丁写回」）。
 
 ## Key Files
@@ -21,7 +21,9 @@
 | `src/delta.rs` | 两级增量表：冻结层 `Arc<[Entry]>` 有序 + 尾巴 ≤128 条；同键多操作按 seq 各自保留；声母分组索引（规则同 `wind-store::abbrev_index::group_of`，含无边界兜底组 `\u{1}` + 首字符） |
 | `src/snapshot.rs` | 快照段：代号命名的 `<name>-<gen>.wdat`（`WdatStreamWriter`，简拼区按条目建键、含兜底组）+ 定长 sidecar `<name>.meta`（count / created_at / last_used / flags，按 wdat 全局条目序号对齐；头内嵌 `max_seq` 与 gen）。**sidecar 是提交点** |
 | `src/engine.rs` | 门面 `UserData`：`open`（锁、设备、state、枚举快照、回放日志）、`apply`（追加 + 发布，写后立即可读）、`fold`（旧快照 + delta → 新快照 → 换入 → 摘 delta → state）、`query_exact` / `query_count` |
-| `src/layer.rs` | `UserDataTempLayer: DictLayer`：快照命中 + delta 叠加成候选；前缀多取 delta 覆盖条数；简拼返回声母组 + 兜底组的超集 |
+| `src/layer.rs` | `UserDataTempLayer`（与 `StoreTempLayer` 同名同摘要、含通配；前缀多取 delta 覆盖条数；简拼返回声母组 + 兜底组的超集）与 `UserDataDraftLayer`（只精确、按 TTL 过滤、恒沉底） |
+| `src/runtime/` | 运行时领域 API `Runtime`：临时词（`temp.rs`）、草稿（`draft.rs`）、词频 + 联想历史（`freq.rs`），语义逐条对照 `wind-store` 同名函数；不依赖 `wind-store` |
+| `tests/runtime_{temp,draft,freq}.rs` | 领域 API 与 `wind-store` 的行为对拍 |
 | `tests/engine_crash_paths.rs` | 引擎级：写后可读 / 重开回放、折回后不再回放、state 缺失按快照水位、折回期间新到的操作保留、第二实例只读且不写盘、删 journal/ 不倒号、快照坏整份回放、换号后封存日志仍可见且续号。折回半写崩溃在 `engine.rs` 单测（需 `snapshot::FAIL_BEFORE_META` 故障注入） |
 
 ## For AI Agents
@@ -35,7 +37,11 @@
 - **换段不覆盖**：快照每次折回落一个新代号文件，sidecar 原子写完才算换入；崩溃在两步之间旧段原样可读。别改回「同名覆盖 wdat」——那会让 `reader_pool` 按 (大小, mtime) 复用旧 reader，也会让半写状态把整个目标清零。
 - **只读实例零写入**：拿不到锁就不开日志写端、不换号、不截尾（尾巴可能是写者正写的那条）。
 - **记录带 boundary**：拍平的码推不回音节边界，而 delta 的简拼分组索引要它。写入端（P1 的协调器）必须传真实位图；位图是**字节**位置，`nihaoma` = `0b100101`（0、2、5），不是 `0b10101`——计划阶段的夹具就错过一次。
-- **空快照不落盘**：`snapshot::build` 遇零条目 bail，`fold` 据此 `snapshot::remove`（先删 sidecar 再删代号文件）；`open` 对「sidecar 不存在」给 `None`（零段），对「头坏 / 指向的 wdat 不在 / 条目数对不上」给 `Err`（当零段并整份回放）。
+- **零条目快照只有 sidecar**：`snapshot::build` 遇零条目只写带水位的 sidecar（gen = 0）并清掉代号文件；`open` 对「sidecar 不存在」给 `None`（零段），对「头坏 / 指向的 wdat 不在 / 条目数对不上」给 `Err`（当零段并整份回放）。
+- **叠加语义只有一份**：`engine::apply_ops`（表见 `docs/design/user-data-storage-plan-p1a.md` Task 1）。读、折回、层都经 `overlay_entries` 调它——别在别处再写一份 Upsert/Delete 的 match。
+- **批量操作走 `fold_with`**：清空、导入、草稿过期 / 淘汰都是「旧快照 + delta → policy → 新快照」原子换段，水位随之推进；不要逐条写 Delete。按键路径的单条写走 `apply` / `apply_batch`。
+- **时间单位**：sidecar 与领域 API 是 unix 秒（同 `wind-store`）；日志 `ts_ms` 是毫秒。
+- **后台折回**：写入方在写完后调 `spawn_maintain()`（单飞，只读时不起）；阈值 `FOLD_THRESHOLD` 条、日志 `JOURNAL_MAX_BYTES`。
 - 日志记录格式 v1 **尚未发布**，改字段直接改编码即可；一旦随版本发出去就要加版本分支。
 - 目标键 `"{target}:{schema}"` 既是 state 的 key，也是快照目录 `state/<schema>/<target>.{wdat,meta}`；`schema` 是**数据方案 id**（拼音族折叠为 `pinyin`）。
 

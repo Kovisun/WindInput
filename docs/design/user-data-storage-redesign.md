@@ -243,7 +243,7 @@ state (postcard, 版本化)
 - 启动：读 state；读不出或版本不符 → 视为「水位未知」，**不整份回放**：以当前快照为准，日志只回放 `generation` 相同且 `seq > 所有快照内嵌的 max_seq` 的记录（快照头部记录其覆盖到的 seq）。即快照自带水位，state 只是加速。
 - 文本目标多一步：state 里的 `text_fp` 与文件当前指纹一致才只回放增量；不一致说明有人手改过，仍只回放 `seq > folded_seq`，绝不回退。
 - `next_seq = max(state.next_seq, 日志尾 seq) + 1`，持久化在 state；用户删掉 `journal/` 后序号也不会倒退。
-- `generation` 不同的记录一律忽略。
+- `generation`：P1 起批量操作（清空、导入、还原、迁移）一律走 `fold_with`——新快照内嵌 `max_seq = upto` 原子换入即推进水位，被取代的旧记录不再回放，不需要按代过滤。字段保留，留给日后「整目录文件级替换」式还原。
 
 ### 3.7 单写者与设备标识
 
@@ -351,7 +351,8 @@ P4 结束后 `wind-store` 删除 `store.rs` 与 redb 依赖，保留编解码与
 |---|---|---|
 | 前置 | §7.1 降级保护：`meta.toml` 的 `format_version` 与只读模式；`state/` 目录与 `state.toml` 挪位 | **已实现**（2026-10-14，aa83e4a8 / af84a68a）：随下一个发版进入现场 |
 | P0 | `wind-userdata` 引擎：快照、日志、delta、state、锁、device_id、折回；快照段带简拼区与无边界组 | **已实现**（2026-10-14，cbe75b3d…a19027ef；计划 `user-data-storage-plan-p0.md`）：引擎级测试 18 + 5 全绿。与设计的差异：日志记录多一个 `boundary` 字段（回放时 delta 要建简拼分组）；快照发布用 `RwLock<Arc<View>>` 不引 `arc-swap`；折回在调用线程上做，P1 再放独立线程。真实 `userdata.redb` 的等价测试归 P1（迁移时才有对照） |
-| P1 | 运行时层接入：temp / draft / freq / assoc；协调器写路径改走引擎；退役 5 张表 | 19 万词库简拼召回不劣于基线；按键路径不再碰 `Store` Mutex |
+| P1a | 引擎补强（时间、叠加唯一、delta 二分、fold_with、零条目快照、state 版本、压实与后台折回）；`Runtime` 四组领域 API；临时词层 / 草稿层 | **已实现**（计划 `user-data-storage-plan-p1a.md`）：领域 API 与 `wind-store` 对拍测试全绿 |
+| P1b | 接线：协调器写路径、`EngineManager` 换层、设置页 IPC、备份 / 导出、联想索引改走 `Runtime`；redb → 引擎一次性迁移；`format_version` → 2；退役 5 张表 | 19 万词库简拼召回不劣于基线；按键路径不再碰 `Store` Mutex |
 | P2 | 文本层：`user.dict.yaml` + 分库 + 段 + 折回补丁 + `dict.reload` + 快速扫描；迁移导出；退役 2 张表 | 折回往返测试；崩溃测试；手改生效 |
 | P3 | 短语与 Shadow 文本化；设置页列表 / 编辑改走新层；系统短语覆盖语义 | 短语软删除、pin 次序、cand_id 去重回归 |
 | P4 | 覆盖表与小文件；`meta.toml`；备份 / 导入导出按类别路由；删除 redb 依赖 | `cargo tree` 无 redb；备份还原全量回归 |

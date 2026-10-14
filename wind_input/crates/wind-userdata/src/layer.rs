@@ -2,49 +2,49 @@
 //!
 //! 叠加规则：Delete 剔除、SetWeight 覆盖、Upsert 并入或覆盖、Incr / Touch 不影响候选。
 //! 候选字段照 `wind-dict/src/store_layer.rs::record_to_candidate`：`meta.is_temp_dict`、
-//! `meta.raw_weight`、`natural_order`（快照全局序号；delta 里新来的排在同权快照条目之后）、
-//! `boundary`。简拼召回按 trait 约定返回**超集**（声母组 + 首字符的无边界兜底组），判据留在
+//! `meta.raw_weight`、`natural_order`（恒 0，同 redb 版）、`boundary`。叠加语义经
+//! `engine::overlay_entries`，与读路径、折回同一份。简拼召回按 trait 约定返回**超集**（声母组 + 首字符的无边界兜底组），判据留在
 //! 引擎侧；`search_abbrev_exact` 只给声母组（不含无边界词）。
 
-use crate::delta::{DeltaOp, Entry, group_of};
-use crate::engine::UserData;
+use crate::delta::{Entry, group_of};
+use crate::engine::{UserData, overlay_entries};
 use crate::record::Target;
-use std::collections::BTreeMap;
+use crate::snapshot::SnapshotEntry;
 use std::sync::Arc;
 use wind_candidate::{Candidate, better};
 use wind_dict::{DictLayer, LayerType};
 
+fn sort_trunc(mut v: Vec<Candidate>, limit: usize) -> Vec<Candidate> {
+    v.sort_by(better);
+    if limit > 0 {
+        v.truncate(limit);
+    }
+    v
+}
+
 pub struct UserDataTempLayer {
     ud: Arc<UserData>,
     schema: String,
+    name: String,
 }
-
-/// delta 里新来的条目（快照里没有）的自然序：排在同权的快照条目之后。
-const DELTA_ORDER: i32 = i32::MAX - 1;
 
 impl UserDataTempLayer {
     pub fn new(ud: Arc<UserData>, schema: &str) -> Self {
         Self {
             ud,
             schema: schema.to_string(),
+            name: format!("temp:{schema}"),
         }
     }
 
-    fn candidate(
-        code: &str,
-        text: &str,
-        weight: i32,
-        boundary: u64,
-        order: i32,
-        is_prefix: bool,
-    ) -> Candidate {
+    /// `natural_order` 恒 0：与 `StoreTempLayer` 一致（redb 临时词 value 里没有入库序号）。
+    fn candidate(code: &str, text: &str, weight: i32, boundary: u64, is_prefix: bool) -> Candidate {
         let mut c = Candidate {
             text: text.to_string(),
             code: code.to_string(),
             weight,
             boundary,
             is_prefix,
-            natural_order: order,
             ..Default::default()
         };
         c.meta.raw_weight = weight;
@@ -52,82 +52,47 @@ impl UserDataTempLayer {
         c
     }
 
-    /// 快照命中 `(code, text, weight, boundary, entry_idx)` 与 delta 条目叠加成候选。
-    /// `query_code` 非空时命中的 code 等于它的 `is_prefix = false`，其余 true。
-    fn overlay(
-        hits: Vec<(String, String, i32, u64, u32)>,
-        delta: Vec<&Entry>,
-        query_code: Option<&str>,
-    ) -> Vec<Candidate> {
-        // key = (code, text) → (weight, boundary, order)
-        let mut map: BTreeMap<(String, String), (i32, u64, i32)> = hits
+    fn candidates(entries: Vec<SnapshotEntry>, query_code: Option<&str>) -> Vec<Candidate> {
+        entries
             .into_iter()
-            .map(|(c, t, w, b, idx)| ((c, t), (w, b, idx as i32)))
-            .collect();
-        let mut ops = delta;
-        ops.sort_by_key(|e| e.seq);
-        for op in ops {
-            let key = (op.code.clone(), op.text.clone());
-            match op.op {
-                DeltaOp::Upsert { weight, .. } => {
-                    let order = map.get(&key).map(|v| v.2).unwrap_or(DELTA_ORDER);
-                    map.insert(key, (weight, op.boundary, order));
-                }
-                DeltaOp::Delete => {
-                    map.remove(&key);
-                }
-                DeltaOp::SetWeight(w) => {
-                    if let Some(v) = map.get_mut(&key) {
-                        v.0 = w;
-                    }
-                }
-                DeltaOp::Incr(_) | DeltaOp::Touch(_) => {}
-            }
-        }
-        map.into_iter()
-            .map(|((code, text), (w, b, order))| {
-                let is_prefix = query_code.is_some_and(|q| q != code);
-                Self::candidate(&code, &text, w, b, order, is_prefix)
+            .map(|e| {
+                let is_prefix = query_code.is_some_and(|q| q != e.code);
+                Self::candidate(&e.code, &e.text, e.weight, e.boundary, is_prefix)
             })
             .collect()
-    }
-
-    fn sort_trunc(mut v: Vec<Candidate>, limit: usize) -> Vec<Candidate> {
-        v.sort_by(better);
-        if limit > 0 {
-            v.truncate(limit);
-        }
-        v
     }
 
     fn abbrev_groups(&self, groups: &[String], limit: usize) -> Vec<Candidate> {
         let v = self.ud.view();
         let snap = v.snapshots.get(&(Target::Temp, self.schema.clone()));
-        let mut hits = Vec::new();
-        let mut ops: Vec<&Entry> = Vec::new();
+        let mut base = Vec::new();
+        let mut keys: Vec<(String, String)> = Vec::new();
         for g in groups {
             if let Some(s) = snap {
-                hits.extend(s.abbrev(g, 0));
+                base.extend(s.abbrev(g, 0));
             }
-            ops.extend(v.delta.by_group(Target::Temp, &self.schema, g));
+            keys.extend(
+                v.delta
+                    .by_group(Target::Temp, &self.schema, g)
+                    .into_iter()
+                    .map(|e| (e.code.clone(), e.text.clone())),
+            );
         }
-        // 快照命中的键在 delta 里可能还有别的操作（如 Delete）：按键补齐全部操作
-        let mut keys: Vec<(String, String)> =
-            hits.iter().map(|h| (h.0.clone(), h.1.clone())).collect();
+        keys.extend(base.iter().map(|e| (e.code.clone(), e.text.clone())));
         keys.sort();
         keys.dedup();
-        for (code, text) in &keys {
-            ops.extend(v.delta.ops_for(Target::Temp, &self.schema, code, text));
-        }
-        ops.sort_by_key(|e| e.seq);
-        ops.dedup_by_key(|e| e.seq);
-        Self::sort_trunc(Self::overlay(hits, ops, None), limit)
+        // 每个涉及的键补齐它在 delta 里的全部操作（Incr 等可能落在别的分组）
+        let ops: Vec<&Entry> = keys
+            .iter()
+            .flat_map(|(c, t)| v.delta.ops_for(Target::Temp, &self.schema, c, t))
+            .collect();
+        sort_trunc(Self::candidates(overlay_entries(base, ops), None), limit)
     }
 }
 
 impl DictLayer for UserDataTempLayer {
     fn name(&self) -> &str {
-        "userdata-temp"
+        &self.name
     }
 
     fn layer_type(&self) -> LayerType {
@@ -136,31 +101,33 @@ impl DictLayer for UserDataTempLayer {
 
     fn search(&self, code: &str, limit: usize) -> Vec<Candidate> {
         let v = self.ud.view();
-        let hits: Vec<(String, String, i32, u64, u32)> = v
+        let base = v
             .snapshots
             .get(&(Target::Temp, self.schema.clone()))
-            .map(|s| {
-                s.exact(code)
-                    .into_iter()
-                    .map(|(t, w, b, idx)| (code.to_string(), t, w, b, idx))
-                    .collect()
-            })
+            .map(|s| s.exact(code))
             .unwrap_or_default();
         let ops = v.delta.exact(Target::Temp, &self.schema, code);
-        Self::sort_trunc(Self::overlay(hits, ops, Some(code)), limit)
+        sort_trunc(
+            Self::candidates(overlay_entries(base, ops), Some(code)),
+            limit,
+        )
     }
 
     fn search_prefix(&self, prefix: &str, limit: usize) -> Vec<Candidate> {
         let v = self.ud.view();
         let ops = v.delta.prefix(Target::Temp, &self.schema, prefix);
-        // 每段多取「delta 覆盖的条数」：被删条目占名额、被调高的条目可能不在前 limit 里
+        // 每段多取「delta 覆盖的条数」：被删条目占名额、被调高的条目可能不在前 limit 里。
+        // limit == 0 = 不限（Snapshot::prefix 自己处理）。
         let take = if limit == 0 { 0 } else { limit + ops.len() };
-        let hits = v
+        let base = v
             .snapshots
             .get(&(Target::Temp, self.schema.clone()))
             .map(|s| s.prefix(prefix, take))
             .unwrap_or_default();
-        Self::sort_trunc(Self::overlay(hits, ops, Some(prefix)), limit)
+        sort_trunc(
+            Self::candidates(overlay_entries(base, ops), Some(prefix)),
+            limit,
+        )
     }
 
     fn search_abbrev(&self, abbrev: &str, limit: usize) -> Vec<Candidate> {
@@ -176,6 +143,96 @@ impl DictLayer for UserDataTempLayer {
             .into_iter()
             .filter(|c| c.boundary != 0)
             .collect()
+    }
+
+    /// 本层不覆盖 `for_each_entry`，对派生索引的贡献恒为「无」，给稳定摘要（同 `StoreTempLayer`）。
+    fn entries_digest(&self) -> Option<String> {
+        Some(format!("{}|enumerates-nothing", self.name))
+    }
+
+    /// 字面前缀扫描（不带 limit——先截断再过滤会整批落空）→ 过滤 → 等长档在前排序截断。
+    fn search_pattern(
+        &self,
+        pattern: &str,
+        wildcard: char,
+        limit: usize,
+        with_prefix: bool,
+    ) -> Vec<Candidate> {
+        if pattern.is_empty() || limit == 0 {
+            return Vec::new();
+        }
+        let n = pattern.chars().count();
+        let lit = wind_dict::layer::literal_prefix(pattern, wildcard);
+        let mut v = Vec::new();
+        self.ud.scan(Target::Temp, &self.schema, lit, &mut |e| {
+            if wind_dict::layer::pattern_matches(pattern, wildcard, &e.code, with_prefix) {
+                let longer = e.code.chars().count() > n;
+                v.push(Self::candidate(
+                    &e.code, &e.text, e.weight, e.boundary, longer,
+                ));
+            }
+            true
+        });
+        v.sort_by(|a, b| wind_dict::layer::cmp_pattern(n, a, b));
+        v.truncate(limit);
+        v
+    }
+}
+
+/// 草稿层（对照 `wind-dict/src/store_layer.rs::StoreDraftLayer`）：只响应精确查询，查询时按
+/// TTL 过滤，候选 weight 0 + `is_draft` 恒沉底。`search_prefix` 恒空、简拼与通配走 trait 默认
+/// （空）——理由见 `StoreDraftLayer` 文档，**不要顺手实现它们**。
+pub struct UserDataDraftLayer {
+    ud: Arc<UserData>,
+    schema: String,
+    name: String,
+    ttl_secs: i64,
+}
+
+impl UserDataDraftLayer {
+    pub fn new(ud: Arc<UserData>, schema: &str, ttl_secs: i64) -> Self {
+        Self {
+            ud,
+            schema: schema.to_string(),
+            name: format!("draft:{schema}"),
+            ttl_secs,
+        }
+    }
+}
+
+impl DictLayer for UserDataDraftLayer {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn layer_type(&self) -> LayerType {
+        LayerType::Draft
+    }
+
+    fn search(&self, code: &str, limit: usize) -> Vec<Candidate> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let cands: Vec<Candidate> = self
+            .ud
+            .exact(Target::Draft, &self.schema, code)
+            .into_iter()
+            .filter(|e| crate::runtime::draft_alive(e.last_used, now, self.ttl_secs))
+            .map(|e| Candidate {
+                text: e.text,
+                code: code.to_string(),
+                // weight 0：不参与比较，也不让 merge_search 的「继承更高 weight」抬别层的权
+                weight: 0,
+                is_draft: true,
+                ..Default::default()
+            })
+            .collect();
+        sort_trunc(cands, limit)
+    }
+
+    fn search_prefix(&self, _prefix: &str, _limit: usize) -> Vec<Candidate> {
+        Vec::new()
     }
 }
 
@@ -295,5 +352,156 @@ mod tests {
         assert!(layer.has_longer_code("niha"));
         let c = &layer.search("nihao", 10)[0];
         assert!(c.meta.is_temp_dict && c.meta.raw_weight == 10 && c.boundary == 0b101);
+    }
+    /// 开放问题：search_prefix(…, 0) 表示不限，快照里的条目也要返回。
+    #[test]
+    fn prefix_with_zero_limit_returns_snapshot_entries_too() {
+        let d = std::env::temp_dir().join(format!("wind_layer_p0-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let ud = Arc::new(
+            UserData::open(Dirs {
+                state_dir: d.clone(),
+                dir_id: "dir".into(),
+            })
+            .unwrap(),
+        );
+        ud.apply(
+            Target::Temp,
+            "py",
+            OpKind::Upsert,
+            "nihao",
+            "你好",
+            Payload::Weight(5),
+            0b101,
+        )
+        .unwrap();
+        ud.fold(Target::Temp, "py").unwrap();
+        ud.apply(
+            Target::Temp,
+            "py",
+            OpKind::Upsert,
+            "nihaoma",
+            "你好吗",
+            Payload::Weight(3),
+            0b100101,
+        )
+        .unwrap();
+        let layer = UserDataTempLayer::new(ud, "py");
+        assert_eq!(
+            names(layer.search_prefix("niha", 0)),
+            vec!["你好", "你好吗"]
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+    fn open_ud(name: &str) -> Arc<UserData> {
+        let d = std::env::temp_dir().join(format!("wind_layer8_{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        Arc::new(
+            UserData::open(Dirs {
+                state_dir: d,
+                dir_id: "dir".into(),
+            })
+            .unwrap(),
+        )
+    }
+
+    #[test]
+    fn temp_layer_identity_matches_store_layer() {
+        let ud = open_ud("ident");
+        let l = UserDataTempLayer::new(ud.clone(), "py");
+        assert_eq!(l.name(), "temp:py");
+        assert_eq!(
+            l.entries_digest().as_deref(),
+            Some("temp:py|enumerates-nothing")
+        );
+        ud.apply(
+            Target::Temp,
+            "py",
+            OpKind::Upsert,
+            "nihao",
+            "你好",
+            Payload::Weight(5),
+            0b101,
+        )
+        .unwrap();
+        let c = &l.search("nihao", 0)[0];
+        assert!(c.meta.is_temp_dict && !c.is_prefix);
+        assert_eq!(
+            (c.natural_order, c.boundary, c.meta.raw_weight),
+            (0, 0b101, 5)
+        );
+    }
+
+    /// 对照 store_layers_answer_pattern_queries_and_drafts_stay_out：字面前缀扫描后过滤，等长档在前。
+    #[test]
+    fn temp_layer_answers_pattern_queries() {
+        let ud = open_ud("pattern");
+        for (code, text) in [
+            ("abcd", "甲"),
+            ("abxd", "乙"),
+            ("abcde", "丙"),
+            ("zbcd", "丁"),
+        ] {
+            ud.apply(
+                Target::Temp,
+                "wb",
+                OpKind::Upsert,
+                code,
+                text,
+                Payload::Weight(1),
+                0,
+            )
+            .unwrap();
+        }
+        ud.fold(Target::Temp, "wb").unwrap();
+        let l = UserDataTempLayer::new(ud, "wb");
+        assert_eq!(
+            names(l.search_pattern("ab?d", '?', 10, false)),
+            vec!["甲", "乙"]
+        );
+        let with_prefix = l.search_pattern("ab?d", '?', 10, true);
+        assert_eq!(
+            names(with_prefix.clone()),
+            vec!["甲", "乙", "丙"],
+            "等长档在前"
+        );
+        assert!(with_prefix[2].is_prefix);
+        assert!(l.search_pattern("", '?', 10, true).is_empty());
+        assert!(l.search_pattern("ab?d", '?', 0, true).is_empty());
+    }
+
+    /// 对照 drafts_never_surface_through_prefix_queries 与草稿候选形态。
+    #[test]
+    fn draft_layer_is_exact_only_sinks_and_respects_ttl() {
+        let ud = open_ud("draft");
+        let mut old = crate::engine::Op::new(
+            Target::Draft,
+            "wb",
+            OpKind::Upsert,
+            "ggtt",
+            "旧",
+            Payload::Weight(0),
+            0,
+        );
+        old.ts_ms = 1_000;
+        ud.apply_batch(&[old]).unwrap();
+        ud.apply(
+            Target::Draft,
+            "wb",
+            OpKind::Upsert,
+            "ggtt",
+            "盖伦",
+            Payload::Weight(0),
+            0,
+        )
+        .unwrap();
+        let l = UserDataDraftLayer::new(ud, "wb", 86_400);
+        assert_eq!(l.name(), "draft:wb");
+        assert_eq!(l.layer_type(), LayerType::Draft);
+        let hits = l.search("ggtt", 0);
+        assert_eq!(names(hits.clone()), vec!["盖伦"], "过期的不出");
+        assert!(hits[0].is_draft && hits[0].weight == 0);
+        assert!(l.search_prefix("ggt", 0).is_empty());
+        assert!(l.search_abbrev("g", 0).is_empty());
     }
 }

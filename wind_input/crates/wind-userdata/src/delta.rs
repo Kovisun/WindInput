@@ -17,6 +17,8 @@ const TAIL_MAX: usize = 128;
 #[derive(Clone, Debug, PartialEq)]
 pub struct Entry {
     pub seq: u64,
+    /// 写入时刻（毫秒，取自日志记录）；叠加时折成秒写进 created_at / last_used。
+    pub ts_ms: i64,
     pub target: Target,
     pub schema: String,
     pub code: String,
@@ -64,18 +66,23 @@ pub struct Delta {
     tail: Vec<Entry>,
     /// (target, schema, 分组) → 冻结层索引。
     groups: Arc<BTreeMap<GroupKey, Vec<usize>>>,
+    /// (target, schema) → 未折回条数。按键路径每次写后判折回阈值要用，不能逐条扫。
+    counts: Arc<BTreeMap<(Target, String), usize>>,
 }
 
 impl Delta {
     /// 返回加了一条的新表：只克隆尾巴；尾巴满 [`TAIL_MAX`] 条时并入冻结层。
     pub fn with(&self, e: Entry) -> Delta {
         let mut tail = self.tail.clone();
+        let mut counts = (*self.counts).clone();
+        *counts.entry((e.target, e.schema.clone())).or_insert(0) += 1;
         tail.push(e);
         if tail.len() <= TAIL_MAX {
             return Delta {
                 frozen: self.frozen.clone(),
                 tail,
                 groups: self.groups.clone(),
+                counts: Arc::new(counts),
             };
         }
         let all: Vec<Entry> = self.frozen.iter().cloned().chain(tail).collect();
@@ -85,7 +92,9 @@ impl Delta {
     fn freeze(mut all: Vec<Entry>) -> Delta {
         all.sort_by(|a, b| key(a).cmp(&key(b)));
         let mut groups: BTreeMap<GroupKey, Vec<usize>> = BTreeMap::new();
+        let mut counts: BTreeMap<(Target, String), usize> = BTreeMap::new();
         for (i, e) in all.iter().enumerate() {
+            *counts.entry((e.target, e.schema.clone())).or_insert(0) += 1;
             groups
                 .entry((e.target, e.schema.clone(), group_of(&e.code, e.boundary)))
                 .or_default()
@@ -95,6 +104,7 @@ impl Delta {
             frozen: all.into(),
             tail: Vec::new(),
             groups: Arc::new(groups),
+            counts: Arc::new(counts),
         }
     }
 
@@ -102,16 +112,40 @@ impl Delta {
         self.frozen.iter().chain(self.tail.iter())
     }
 
-    /// 某键的全部操作，按 seq 升序。写路径与折回用；按键路径走 exact / prefix / by_group。
+    /// 某键的全部操作，按 seq 升序。冻结层按 (target, schema, code, text, seq) 有序，二分定位。
     pub fn ops_for(&self, target: Target, schema: &str, code: &str, text: &str) -> Vec<&Entry> {
-        let mut v: Vec<&Entry> = self
-            .all()
-            .filter(|e| {
+        let lo = self
+            .frozen
+            .partition_point(|e| key(e) < (target, schema, code, text, 0));
+        let mut v: Vec<&Entry> = self.frozen[lo..]
+            .iter()
+            .take_while(|e| {
                 e.target == target && e.schema == schema && e.code == code && e.text == text
             })
             .collect();
+        v.extend(self.tail.iter().filter(|e| {
+            e.target == target && e.schema == schema && e.code == code && e.text == text
+        }));
         v.sort_by_key(|e| e.seq);
         v
+    }
+
+    /// 某 (目标, 方案) 未折回的操作条数（折回阈值判断用）。O(log 目标数)。
+    pub fn pending(&self, target: Target, schema: &str) -> usize {
+        self.counts
+            .get(&(target, schema.to_string()))
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// 有未折回操作的 (目标, 方案)。
+    pub fn targets(&self) -> std::collections::BTreeSet<(Target, String)> {
+        self.counts.keys().cloned().collect()
+    }
+
+    /// 最小的未折回 seq；空表 None。日志压实只能裁到它之前。
+    pub fn min_seq(&self) -> Option<u64> {
+        self.all().map(|e| e.seq).min()
     }
 
     pub fn exact(&self, target: Target, schema: &str, code: &str) -> Vec<&Entry> {
@@ -204,6 +238,7 @@ pub fn entry_from_record(r: &Record) -> Option<Entry> {
     };
     Some(Entry {
         seq: r.seq,
+        ts_ms: r.ts_ms,
         target: r.target,
         schema: r.schema.clone(),
         code: r.code.clone(),
@@ -220,6 +255,7 @@ mod tests {
 
     fn e(seq: u64, code: &str, text: &str, op: DeltaOp) -> Entry {
         Entry {
+            ts_ms: 0,
             seq,
             target: Target::Temp,
             schema: "py".into(),
@@ -331,5 +367,70 @@ mod tests {
         assert_eq!(group_of("nihao", 0b101), "nh");
         assert_eq!(group_of("nihao", 0), "\u{1}n");
         assert_eq!(group_of("", 0), "");
+    }
+
+    fn many() -> Delta {
+        let mut d = Delta::default();
+        let mut seq = 0;
+        for i in 0..600u32 {
+            seq += 1;
+            let t = if i % 3 == 0 {
+                Target::Freq
+            } else {
+                Target::Temp
+            };
+            let mut x = e(
+                seq,
+                &format!("c{}", i % 37),
+                &format!("t{}", i % 11),
+                DeltaOp::Incr(1),
+            );
+            x.target = t;
+            d = d.with(x);
+        }
+        d
+    }
+
+    /// M4 的特征测试：二分版 ops_for 与线性过滤结果逐条相同（冻结层 + 尾巴都覆盖到）。
+    #[test]
+    fn ops_for_matches_linear_filter() {
+        let d = many();
+        for c in 0..37 {
+            for t in 0..11 {
+                let (code, text) = (format!("c{c}"), format!("t{t}"));
+                let mut want: Vec<u64> = d
+                    .all()
+                    .filter(|e| {
+                        e.target == Target::Temp
+                            && e.schema == "py"
+                            && e.code == code
+                            && e.text == text
+                    })
+                    .map(|e| e.seq)
+                    .collect();
+                want.sort();
+                let got: Vec<u64> = d
+                    .ops_for(Target::Temp, "py", &code, &text)
+                    .iter()
+                    .map(|e| e.seq)
+                    .collect();
+                assert_eq!(got, want, "{code}/{text}");
+            }
+        }
+    }
+
+    #[test]
+    fn pending_targets_and_min_seq() {
+        let d = many();
+        assert_eq!(d.pending(Target::Freq, "py"), 200);
+        assert_eq!(d.pending(Target::Temp, "py"), 400);
+        assert_eq!(d.pending(Target::Temp, "other"), 0);
+        let ts: Vec<(Target, String)> = d.targets().into_iter().collect();
+        assert_eq!(
+            ts,
+            vec![(Target::Temp, "py".into()), (Target::Freq, "py".into())]
+        );
+        assert_eq!(d.min_seq(), Some(1));
+        assert_eq!(Delta::default().min_seq(), None);
     }
 }

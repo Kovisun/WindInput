@@ -12,11 +12,15 @@ pub struct TargetState {
     pub folded_seq: u64,
     /// 文本目标：折回后文本的指纹（P2 用）；运行时目标 None。
     pub text_fp: Option<String>,
-    pub snapshot_fp: String,
 }
+
+/// state 文件格式版本；读到别的版本当「水位未知」（§3.6），由快照内嵌水位兜底。
+pub const STATE_VERSION: u32 = 1;
 
 #[derive(Default, Serialize, Deserialize, Clone, PartialEq, Debug)]
 pub struct State {
+    #[serde(default)]
+    pub version: u32,
     /// 还原 / 批量替换后递增；不同代的日志记录一律忽略（§3.8）。
     pub generation: u32,
     /// 序号续号来源：与日志尾取较大者 + 1；用户删掉 journal/ 后序号也不会倒退。
@@ -63,11 +67,14 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
 impl State {
     /// 读不出 / 解析不出 ⇒ `None`（水位未知），调用方以快照内嵌水位为准。
     pub fn load(path: &Path) -> Option<State> {
-        toml::from_str(&std::fs::read_to_string(path).ok()?).ok()
+        let s: State = toml::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
+        (s.version == STATE_VERSION).then_some(s)
     }
 
     pub fn save(&self, path: &Path) -> anyhow::Result<()> {
-        atomic_write(path, toml::to_string(self)?.as_bytes())
+        let mut s = self.clone();
+        s.version = STATE_VERSION;
+        atomic_write(path, toml::to_string(&s)?.as_bytes())
     }
 }
 
@@ -82,6 +89,7 @@ mod tests {
         std::fs::create_dir_all(&d).unwrap();
         let p = d.join("state");
         let mut s = State {
+            version: STATE_VERSION,
             generation: 2,
             next_seq: 10,
             targets: Default::default(),
@@ -91,7 +99,6 @@ mod tests {
             TargetState {
                 folded_seq: 9,
                 text_fp: None,
-                snapshot_fp: "ab".into(),
             },
         );
         s.save(&p).unwrap();
@@ -115,5 +122,25 @@ mod tests {
         atomic_write(&p, b"long old content").unwrap();
         atomic_write(&p, b"new").unwrap();
         assert_eq!(std::fs::read(&p).unwrap(), b"new");
+    }
+
+    #[test]
+    fn state_with_unknown_version_is_treated_as_missing() {
+        let d = std::env::temp_dir().join(format!("wind_state_ver-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&d);
+        let p = d.join("state");
+        let s = State {
+            next_seq: 9,
+            ..Default::default()
+        };
+        s.save(&p).unwrap();
+        let back = State::load(&p).expect("同版本可读");
+        assert_eq!((back.version, back.next_seq), (STATE_VERSION, 9));
+        let text = std::fs::read_to_string(&p)
+            .unwrap()
+            .replace(&format!("version = {STATE_VERSION}"), "version = 99");
+        std::fs::write(&p, text).unwrap();
+        assert!(State::load(&p).is_none(), "版本不符 = 水位未知");
+        let _ = std::fs::remove_dir_all(&d);
     }
 }
