@@ -174,7 +174,7 @@ wind-store (文本编解码、小文件) ← wind-dict (格式) ← wind-userdat
 - 词条快照 = wdat 段。新写 `build_user_segment()`：输入 `(code_spaced, text, weight, order, boundary, kind)` 迭代器，输出带 AbbrevSection 的 wdat，简拼区**包含无边界组**（`\u{1}` + 码首字符，与 `abbrev_index.rs` 的兜底组语义一致）。构建期串行解析，不起 `available_parallelism` 线程。
 - sidecar `.meta`：按 wdat 条目序号对齐的定长记录，`count u32 | created_at i64 | last_used i64 | flags u8`，mmap。
 - 草稿、计数、联想历史量小且只做精确查询：定长记录排序数组 + 二分，`.bin` 文件 mmap 或常驻（≤ 3 MB 常驻，同 `.wridx` 规则）。
-- 写段时必须用 `reader_pool::replacing` 圈住以推进代数，否则内容变而大小与 mtime 不变时会复用陈旧 reader。
+- 段按代号命名（`<name>-<gen>.wdat`），sidecar 头记 gen 并作为**提交点**原子写：每次换段一个新路径，从不覆盖正被映射的文件（`reader_pool` 不会按大小与 mtime 复用陈旧 reader，也就无需 `replacing`）；崩溃在 wdat 与 sidecar 之间只留下无人引用的新文件，旧段原样可读。sidecar 在而段打不开 ⇒ 该目标水位不可信，整份回放日志。
 - 空输入定义为「零段」，不是失败；`CachedDict` 现有的「空则报错、写失败退化内存模式」不适用于本引擎。
 
 ### 3.2 日志 `.wjl`
@@ -218,7 +218,7 @@ Record : len u32 | crc32 u32 | seq u64 | ts_ms i64 | kind u8 | target u8 | schem
 **持久化次序（真源级，必须严格）**：
 
 1. 文本目标：重新读文件，校验长度、mtime、指纹并记录。按行补丁：Upsert 已存在则更新权重取 max 并保留原行位置，不存在才追加末尾；Delete 删匹配行；SetWeight 改权重列。写 `tmp`，**fsync tmp**，再次校验原文件指纹未变（变了说明编辑器刚保存，丢弃本轮重做），`rename` 覆盖，**fsync 目录**（Windows 用 `MoveFileExW(MOVEFILE_WRITE_THROUGH)`），保留上一版为 `.bak`。
-2. 重建该目标的段（tmp + rename，`replacing` 圈住）。
+2. 重建该目标的段（新代号文件 + sidecar 原子写为提交点，见 §3.1）。
 3. 构造新 Snapshot 换入；只有新段换入成功才从 delta 摘除该目标 `seq ≤ 水位` 的条目。段重建失败则保留 delta、不推进 state、记 WARN。
 4. 写 `state`（tmp + fsync + rename）。
 
@@ -349,8 +349,8 @@ P4 结束后 `wind-store` 删除 `store.rs` 与 redb 依赖，保留编解码与
 
 | 阶段 | 内容 | 退出判据 |
 |---|---|---|
-| 前置 | §7.1 降级保护：`meta.toml` 的 `format_version` 与只读模式；`state/` 目录与 `state.toml` 挪位 | 随下一个发版进入现场，先于任何新格式 |
-| P0 | `wind-userdata` 引擎：快照、日志、delta、state、锁、device_id、折回；`build_user_segment` 带简拼区与无边界组 | §11 的引擎级测试全绿；真实 `userdata.redb` 副本上的等价测试 |
+| 前置 | §7.1 降级保护：`meta.toml` 的 `format_version` 与只读模式；`state/` 目录与 `state.toml` 挪位 | **已实现**（2026-10-14，aa83e4a8 / af84a68a）：随下一个发版进入现场 |
+| P0 | `wind-userdata` 引擎：快照、日志、delta、state、锁、device_id、折回；快照段带简拼区与无边界组 | **已实现**（2026-10-14，cbe75b3d…a19027ef；计划 `user-data-storage-plan-p0.md`）：引擎级测试 18 + 5 全绿。与设计的差异：日志记录多一个 `boundary` 字段（回放时 delta 要建简拼分组）；快照发布用 `RwLock<Arc<View>>` 不引 `arc-swap`；折回在调用线程上做，P1 再放独立线程。真实 `userdata.redb` 的等价测试归 P1（迁移时才有对照） |
 | P1 | 运行时层接入：temp / draft / freq / assoc；协调器写路径改走引擎；退役 5 张表 | 19 万词库简拼召回不劣于基线；按键路径不再碰 `Store` Mutex |
 | P2 | 文本层：`user.dict.yaml` + 分库 + 段 + 折回补丁 + `dict.reload` + 快速扫描；迁移导出；退役 2 张表 | 折回往返测试；崩溃测试；手改生效 |
 | P3 | 短语与 Shadow 文本化；设置页列表 / 编辑改走新层；系统短语覆盖语义 | 短语软删除、pin 次序、cand_id 去重回归 |
@@ -366,7 +366,7 @@ P0 与 P1 先行的理由：运行时层负载最重、没有手改冲突，能�
 - 日志尾部截断、半条记录、CRC 错：启动恢复到最后一条完整记录。
 - 快照半写（tmp 残留）、state 缺失 / 损坏 / 版本不符：按快照内嵌水位恢复，无重复应用、无丢失。
 - seq 续号：删除 `journal/` 后新记录 seq 单调递增。
-- 折回后旧段 `strong_count` 归零；`replacing` 代数递增。
+- 折回后旧段 `strong_count` 归零；wdat 与 sidecar 之间崩溃不丢已折回的数据。
 - 同键多操作（晋升）按 seq 叠加结果正确。
 
 文本层（P2–P3）：
