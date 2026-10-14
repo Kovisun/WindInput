@@ -4494,7 +4494,7 @@ impl Coordinator {
         }
         // 一表一缓存之前是主表 + 分类表合建的一份 `emoji.wemj`，现已无人读它
         if let Some(dir) = Config::cache_dir() {
-            for f in ["emoji.wemj", "emoji.wemj.fp"] {
+            for f in ["emoji.wemj", "emoji.wemj.fp", "emoji.wemj.st"] {
                 let _ = std::fs::remove_file(dir.join("emoji").join(f));
             }
         }
