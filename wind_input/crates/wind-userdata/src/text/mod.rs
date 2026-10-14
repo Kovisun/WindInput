@@ -2,6 +2,7 @@
 pub mod fold;
 pub mod format;
 pub mod patch;
+pub mod table;
 
 pub use format::{ParseError, TextDict, TextEntry, WindHeader, normalize_key, parse};
 pub use patch::{PatchOp, patch, render};

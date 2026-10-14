@@ -464,18 +464,11 @@ impl Coordinator {
                 info!("Opened redb store: {}", p.display());
                 // 迁移完成（标记 migrated-p1 / migrated-p2 在）才升 format_version：此后认识旧格式的
                 // 版本只读（§7.1）。没迁完就不升——旧版本回退后旧表仍是完整的真源、仍可写。
-                let target = match (s.migrated_p1(), s.migrated_p2()) {
-                    (true, true) => Some(wind_config::user_meta::KNOWN_FORMAT_VERSION),
-                    (true, false) => Some(2),
-                    _ => None,
-                };
-                match target {
+                // P3 的短语迁移要等协调器交来系统短语（之后协调器会再升一次）。
+                match s.format_version_reached() {
                     Some(v) => {
                         if let Err(e) = wind_config::user_meta::raise_format_version(dir, v) {
                             warn!("format_version 升级失败（旧版本仍可能写 redb）：{e}");
-                        }
-                        if v < wind_config::user_meta::KNOWN_FORMAT_VERSION {
-                            warn!("P2 迁移未完成，format_version 停在 {v}，下次启动重试");
                         }
                     }
                     None => warn!("P1 迁移未完成，format_version 暂不升级，下次启动重试"),
@@ -660,6 +653,25 @@ mod p1_meta_tests {
         let s = store.unwrap();
         assert_eq!(s.get_user_words("wb", "a").unwrap()[0].weight, 7);
         drop(s);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// P3 迁完（短语迁移要等 set_system_phrases）后升到 4。
+    #[test]
+    fn format_version_reaches_4_after_phrase_migration() {
+        let d = std::env::temp_dir().join(format!("wind_p3_fv-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let (store, _) = Coordinator::open_user_store_checked(Some(&d), StateChoice::Derived);
+        let s = store.unwrap();
+        assert!(!s.migrated_p3(), "短语迁移要等系统短语");
+        s.set_system_phrases(&[]).unwrap();
+        assert!(s.migrated_p3());
+        assert_eq!(s.format_version_reached(), Some(4));
+        drop(s);
+        let (store, _) = Coordinator::open_user_store_checked(Some(&d), StateChoice::Derived);
+        drop(store);
+        let text = std::fs::read_to_string(d.join("meta.toml")).unwrap();
+        assert!(text.contains("format_version = 4"), "{text}");
         let _ = std::fs::remove_dir_all(&d);
     }
 

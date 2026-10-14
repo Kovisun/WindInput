@@ -2494,36 +2494,53 @@ impl Coordinator {
         }
         let phrases = {
             if let Some(store) = store.as_ref() {
-                if let Some(p) = system_phrase_path.as_ref() {
-                    let entries = wind_phrase::PhraseLayer::parse_system_entries(p);
+                {
+                    // 没有 system.phrases.toml（定制版可能删掉）⇒ 系统短语为空，但照样交给 store：
+                    // 短语迁移要在这里触发，否则旧表里的用户短语永远迁不过来、看不见。
+                    let entries = system_phrase_path
+                        .as_ref()
+                        .map(|p| wind_phrase::PhraseLayer::parse_system_entries(p))
+                        .unwrap_or_default();
                     // 内容哈希：条目稳定序列化后哈希
                     let hash = phrase_entries_hash(&entries);
-                    // 自愈：哈希不一致（TOML 改动）或表内系统短语为空（被删/未初始化）时才同步。
-                    // 仅凭哈希会漏掉"系统短语从表中丢失但 TOML 未变"的场景。
-                    let sys_empty = store
-                        .list_system_phrases()
-                        .map(|v| v.is_empty())
-                        .unwrap_or(false);
-                    if store.phrase_sys_hash().ok().flatten().as_deref() != Some(hash.as_str())
-                        || sys_empty
+                    let sys: Vec<wind_store::phrases::SystemPhrase> = entries
+                        .iter()
+                        .map(|e| wind_store::phrases::SystemPhrase {
+                            code: e.code.clone(),
+                            text: e.text.clone(),
+                            weight: e.weight,
+                            position: e.position,
+                            category: e.category.clone(),
+                        })
+                        .collect();
+                    // 系统短语只在内存（P3 叠加模型），每次启动都交给 store；首次还会触发旧表迁移。
+                    // 没有 TOML 时不动 store 里的系统条目，只确保旧表迁移照样做。
+                    let r = if system_phrase_path.is_some() {
+                        store.set_system_phrases(&sys)
+                    } else {
+                        store.migrate_phrases_now()
+                    };
+                    if let Err(e) = r {
+                        warn!("系统短语设定 / 短语迁移失败: {e}");
+                    }
+                    // 短语迁移刚完成就升版本：等到下次启动才升，中间回退的旧版本会继续往旧表写
+                    if let (Some(v), Some(dir)) =
+                        (store.format_version_reached(), store.path().parent())
+                        && dir.join("meta.toml").is_file()
+                        && let Err(e) = wind_config::user_meta::raise_format_version(dir, v)
                     {
-                        let sys: Vec<wind_store::phrases::SystemPhrase> = entries
-                            .iter()
-                            .map(|e| wind_store::phrases::SystemPhrase {
-                                code: e.code.clone(),
-                                text: e.text.clone(),
-                                weight: e.weight,
-                                position: e.position,
-                                category: e.category.clone(),
-                            })
-                            .collect();
-                        if let Ok(st) = store.sync_system_phrases(&sys) {
-                            info!(
-                                "Synced system phrases: +{} ~{} -{}",
-                                st.added, st.updated, st.removed
-                            );
-                            let _ = store.set_phrase_sys_hash(&hash);
-                        }
+                        warn!("format_version 升级失败: {e}");
+                    }
+                    // TOML 改了（哈希不一致）才同步：修改行回到新 TOML 值、已删条目的修改行清掉。
+                    if system_phrase_path.is_some()
+                        && store.phrase_sys_hash().ok().flatten().as_deref() != Some(hash.as_str())
+                        && let Ok(st) = store.sync_system_phrases(&sys)
+                    {
+                        info!(
+                            "Synced system phrases: +{} ~{} -{}",
+                            st.added, st.updated, st.removed
+                        );
+                        let _ = store.set_phrase_sys_hash(&hash);
                     }
                     system_phrase_entries = entries;
                 }
@@ -4784,7 +4801,10 @@ impl Coordinator {
                 if let Some(store) = &self.store {
                     let changed = store.sync_user_texts();
                     if !changed.is_empty() {
-                        info!("用户词文本已重新载入：{} 个方案", changed.len());
+                        info!("用户文本已重新载入：{} 项", changed.len());
+                    }
+                    if changed.iter().any(|c| c == "phrases") {
+                        self.rebuild_phrases();
                     }
                 }
                 // 语言栏图标的呈现参数同理跟随全局配置（`[ui.langbar]`），也不属 schema。

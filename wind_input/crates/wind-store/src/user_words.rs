@@ -400,37 +400,73 @@ impl Store {
         }
     }
 
-    /// 发现（用户目录下新出现的方案目录）+ 同步全部有用户词的方案，返回变了的方案。
+    /// 发现（用户目录下新出现的方案目录）+ 同步全部用户文本：各方案的用户词与 Shadow、全局短语。
+    /// 返回变了的：方案名，短语变了另含 `"phrases"`（调用方据此重建输入期短语层）。
     /// 触发：配置热重载、`dict.reload` 不带路径（设计 §5）。
     pub fn sync_user_texts(&self) -> Vec<String> {
-        self.user_text_schemas()
+        let mut changed: Vec<String> = self
+            .user_text_schemas()
             .into_iter()
             .filter(|s| self.sync_user_text(s))
-            .collect()
+            .collect();
+        for s in self.sync_shadows() {
+            if !changed.contains(&s) {
+                changed.push(s);
+            }
+        }
+        if self.sync_phrases() {
+            changed.push("phrases".into());
+        }
+        changed
     }
 
-    /// `dict.reload` 带路径：只认 `<text_dir>/<schema>/user.dict.yaml`（按路径分量比对，不碰文件
-    /// 系统；`..` 是 `ParentDir` 分量，必然比对失败）。任一路径不合规 ⇒ 整体 Err、一个都不同步。
+    /// `dict.reload` 带路径：只认 `<text_dir>/phrases.dict.yaml`、`<text_dir>/<schema>/user.dict.yaml`
+    /// 与 `<text_dir>/<schema>/shadow.dict.yaml`（按路径分量比对，不碰文件系统；`..` 是 `ParentDir`
+    /// 分量，必然比对失败）。任一路径不合规 ⇒ 整体 Err、一个都不同步。返回值同 [`Self::sync_user_texts`]。
     pub fn reload_user_text_paths(&self, paths: &[String]) -> anyhow::Result<Vec<String>> {
         use std::path::{Component, Path};
+        enum Target {
+            Phrases,
+            Words(String),
+            Shadow(String),
+        }
         let base: Vec<Component> = self.user_text_dir().components().collect();
-        let mut schemas = Vec::new();
+        let mut targets = Vec::new();
         for p in paths {
             let comps: Vec<Component> = Path::new(p).components().collect();
-            let schema = match comps.get(base.len()..) {
-                Some([Component::Normal(s), Component::Normal(f)])
-                    if comps[..base.len()] == base[..] && *f == "user.dict.yaml" =>
-                {
-                    s.to_string_lossy().into_owned()
+            let inside = comps.len() > base.len() && comps[..base.len()] == base[..];
+            let t = match comps.get(base.len()..) {
+                Some([Component::Normal(f)]) if inside && *f == "phrases.dict.yaml" => {
+                    Target::Phrases
                 }
-                _ => anyhow::bail!("路径不在用户词目录内或不是 user.dict.yaml：{p}"),
+                Some([Component::Normal(s), Component::Normal(f)]) if inside => {
+                    let s = s.to_string_lossy().into_owned();
+                    if *f == "user.dict.yaml" {
+                        Target::Words(s)
+                    } else if *f == "shadow.dict.yaml" {
+                        Target::Shadow(s)
+                    } else {
+                        anyhow::bail!("不是用户词 / Shadow / 短语文件：{p}")
+                    }
+                }
+                _ => anyhow::bail!("路径不在用户文本目录内：{p}"),
             };
-            schemas.push(schema);
+            targets.push(t);
         }
-        Ok(schemas
-            .into_iter()
-            .filter(|s| self.sync_user_text(s))
-            .collect())
+        let mut changed = Vec::new();
+        for t in targets {
+            let name = match t {
+                Target::Phrases => self.sync_phrases().then(|| "phrases".to_string()),
+                Target::Words(s) => self.sync_user_text(&s).then_some(s),
+                Target::Shadow(s) => self.shadow_table_synced(&s).then_some(s),
+            };
+            if let Some(n) = name
+                && !changed.contains(&n)
+            {
+                changed.push(n);
+            }
+        }
+        Ok(changed)
     }
 
     /// `dict.flush`：折回全部待处理操作（文本目标写回文件），再压实日志。
@@ -1376,5 +1412,44 @@ mod tests {
                 .unwrap()
                 .contains("工\ta\t1")
         );
+    }
+
+    /// 手改短语与 Shadow 文件：sync_user_texts 一并载入，返回值含 "phrases" 与方案名；dict.reload
+    /// 也认这两种文件。
+    #[test]
+    fn sync_picks_up_phrase_and_shadow_hand_edits() {
+        let s = Store::open(tmp("wind_uw_sync_ph_sh.redb")).unwrap();
+        s.add_phrase("yx", "me@x.com", 0, 1800).unwrap();
+        s.pin_shadow("wb", "aa", "恭", None, 0).unwrap();
+        let pf = s.phrases_path();
+        std::fs::write(
+            &pf,
+            std::fs::read_to_string(&pf).unwrap() + "dz\t地址\t1800\n",
+        )
+        .unwrap();
+        let sf = s.shadow_path("wb");
+        std::fs::write(
+            &sf,
+            std::fs::read_to_string(&sf).unwrap() + "bb\t八\tdelete\n",
+        )
+        .unwrap();
+        let mut changed = s.sync_user_texts();
+        changed.sort();
+        assert_eq!(changed, vec!["phrases".to_string(), "wb".to_string()]);
+        assert!(
+            s.enabled_phrases_for_input()
+                .unwrap()
+                .iter()
+                .any(|p| p.code == "dz")
+        );
+        assert!(s.get_shadow_rules("wb", "bb").unwrap().is_some());
+        std::fs::write(&pf, std::fs::read_to_string(&pf).unwrap() + "xx\t叉\t1\n").unwrap();
+        let p = pf.to_string_lossy().into_owned();
+        assert_eq!(
+            s.reload_user_text_paths(&[p]).unwrap(),
+            vec!["phrases".to_string()]
+        );
+        let p = sf.to_string_lossy().into_owned();
+        assert!(s.reload_user_text_paths(&[p]).is_ok());
     }
 }

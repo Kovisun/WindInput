@@ -190,6 +190,15 @@ pub struct Store {
     state_dir: PathBuf,
     /// 用户词文本根目录（P2 起用户词的真源）。
     text_dir: PathBuf,
+    /// 各方案的 Shadow 规则表（P3 起真源是 `user/<schema>/shadow.dict.yaml`），首次访问时载入。
+    /// 系统短语（来自 TOML，协调器交进来；P3 起不落库）。
+    pub(crate) phrase_sys: std::sync::RwLock<std::sync::Arc<Vec<crate::phrases::SystemPhrase>>>,
+    /// 用户短语文件表（首次访问时载入）。
+    pub(crate) phrase_table:
+        std::sync::OnceLock<std::sync::Arc<wind_userdata::text::table::TextTable>>,
+    pub(crate) shadows: Mutex<
+        std::collections::HashMap<String, std::sync::Arc<wind_userdata::text::table::TextTable>>,
+    >,
     db: Mutex<Option<Database>>,
     /// 本库的页缓存上限；`resume` 重开时要用同一个值，故随实例存着。
     cache_bytes: usize,
@@ -290,6 +299,9 @@ impl Store {
             runtime,
             state_dir: state_dir.clone(),
             text_dir: loc.text_dir.clone(),
+            shadows: Mutex::new(std::collections::HashMap::new()),
+            phrase_sys: Default::default(),
+            phrase_table: std::sync::OnceLock::new(),
             db: Mutex::new(Some(db)),
             cache_bytes,
             touched: std::sync::atomic::AtomicBool::new(false),
@@ -312,6 +324,9 @@ impl Store {
         if let Err(e) = store.migrate_p2_if_needed(&state_dir) {
             // 同 P1：不阻断启动，标记没写下次重做（合并，幂等）；没迁完不升 format_version
             warn!("P2 迁移失败，下次启动重试：{e}");
+        }
+        if let Err(e) = store.migrate_p3_shadow_if_needed(&state_dir) {
+            warn!("P3 Shadow 迁移失败，下次启动重试：{e}");
         }
         info!(
             "Store opened: {} (v{})",
@@ -898,23 +913,14 @@ impl Store {
     /// 联想历史）。
     /// 备份用：确保有数据但未在当前配置启用的方案也被覆盖。
     pub fn list_data_schemas(&self) -> anyhow::Result<Vec<String>> {
-        let mut set = std::collections::BTreeSet::new();
-        self.with_db(|db| {
-            let txn = db.begin_read()?;
-            // 临时词 / 词频 / 联想历史（P1）与用户词（P2）在运行时引擎，`runtime.schemas()` 已含；
-            // 旧表只读保留，不再代表现状
-            for table in [SHADOW] {
-                let t = txn.open_table(table)?;
-                for item in t.range::<&str>(..)? {
-                    let (k, _) = item?;
-                    if let Some((schema, _rest)) = k.value().split_once('\u{0}') {
-                        set.insert(schema.to_string());
-                    }
-                }
+        // 临时词 / 词频 / 联想历史（P1）与用户词（P2）在运行时引擎，`runtime.schemas()` 已含；
+        // Shadow（P3）在 `user/<schema>/shadow.dict.yaml`，有规则的才算
+        let mut set: std::collections::BTreeSet<String> = self.runtime.schemas();
+        for sc in self.shadow_schemas_on_disk() {
+            if !set.contains(&sc) && !self.list_shadow_rules(&sc)?.is_empty() {
+                set.insert(sc);
             }
-            Ok(())
-        })?;
-        set.extend(self.runtime.schemas());
+        }
         Ok(set.into_iter().collect())
     }
 }

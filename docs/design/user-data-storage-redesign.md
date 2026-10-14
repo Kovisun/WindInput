@@ -144,7 +144,7 @@ columns: [code, text, action, position, cand_id]
 wind: {kind: shadow}
 ```
 
-`action ∈ {pin, delete}`；`position` 是 pin 的队首次序（小的在前），新规则由程序写最小值减一；`cand_id` 可空，供动态短语精准去重。
+`action ∈ {pin, delete}`；`position` 是 pin 的**目标槽位**（置顶 = 0、上移 = 原下标 − 1），同一编码下多条 pin 的新旧先后由**行序**表达（先出现的更新，程序写入时插在该组最前）；`cand_id` 可空，供动态短语精准去重。空编码是合法的组（特殊模式的规则桶）。文件开 `escape: true`（候选文本可含换行）。
 
 ### 2.3 解析与规范化
 
@@ -353,7 +353,7 @@ P4 结束后 `wind-store` 删除 `store.rs` 与 redb 依赖，保留编解码与
 | P2a | 文本层引擎：`user.dict.yaml` 解析与 `normalize_key`、按行补丁、文本目标折回 / 同步 / 整文件替换、sidecar 记行序、用户词层与领域 API | **已实现**（计划 `user-data-storage-plan-p2a.md`）。与设计的差异：文本只存 text / code / weight（用户词 count / created_at 不进文本）；段放在引擎状态目录（沿用 sidecar 提交点，可由文本重建）；`sync_text` 总算内容指纹，不走长度 + mtime 快路径；写出的正文以 `# no comment` 开头；补齐的音节边界改写该行码列；归文本管的目标绑定前不折回；单个文本目标折回失败只退避该目标 |
 | P2b | 接线：`wind-store` 用户词门面委托、redb `USER_WORDS` → `user.dict.yaml` 迁移、`format_version` → 3、`dict.reload` / `dict.flush`、启动 / 切方案 / 配置重载时 `sync_text`；退役 2 张表 | **已实现**（计划 `user-data-storage-plan-p2b.md`）。与设计的差异：用户分库移到 P2c；用户词 count / created_at 不再保留，`on_word_selected` 删除（无生产调用方）；`lowercase` 未按方案下发；拼音文本里单个汉字的无空格码按单音节解析（空格载体表达不了 0b1）；空闲写回由 5 秒一拍的后台节拍驱动。合成 19 万词旧库迁移 674 ms、逐码比对 0 不一致 |
 | P2c | 用户分库 | **并入现有扩展词库目录，不另建机制**（2026-10-14 裁定）：用户自放的只读 `*.dict.yaml` 已由 `[[dictionary_dirs]]` / 默认 `<主词库目录>/ext`（`inject_dir_dicts`，用户目录优先）识别，按方案 override 逐个开关即「登记」，设置页有入口（`schema-dict-discovery.md`）。再在 `user/<schema>/` 下开第二个入口只会让同一件事两处配置。`user/<schema>/` 只认 `user.dict.yaml`，其余文件不读 |
-| P3 | 短语与 Shadow 文本化；设置页列表 / 编辑改走新层；系统短语覆盖语义 | 短语软删除、pin 次序、cand_id 去重回归 |
+| P3 | 短语与 Shadow 文本化；设置页列表 / 编辑改走新层；系统短语覆盖语义 | **已实现**（计划 `user-data-storage-plan-p3.md`）。与设计的差异：两张表按 §2.4 小表处理（内存持有、按组补丁、整文件提交，不走日志 + delta），按键路径查 Shadow 零 IO；短语为叠加模型——系统短语只在内存（每次启动由协调器交给 store），文件只记用户行与 `overrides_system: 1` 的修改行；系统短语改键时原键写停用的修改行、新键归用户；`phrase_sys_hash` 留在 redb `META` 等 P4；短语迁移要 TOML 才分得清系统行被改过没有，所以在首次 `set_system_phrases` 时做，做完立即升 `format_version` 到 4 |
 | P4 | 覆盖表与小文件；`meta.toml`；备份 / 导入导出按类别路由；删除 redb 依赖 | `cargo tree` 无 redb；备份还原全量回归 |
 | P5 | 同步协议（日志交换、Incr 求和、LWW） | 另立设计 |
 

@@ -46,6 +46,7 @@ P1b 起 `wind-store::Store` 持有一个 `Runtime`，临时词 / 草稿 / 词频
 - **文本目标**（`bind_text` 绑定的 (目标, 方案)）：`fold` 自动走 `fold_text`（§3.5 次序：读 + 指纹 → 补丁 → tmp + fsync → 复核原文件指纹 → `.bak` + rename + fsync 目录 → 由文本重建段 → 换入 → state 记 `text_fp`）；`fold_with` 对它们直接报错（清空 / 导入用 `rewrite_text` / 逐条 Upsert）。手改文件后 `sync_text` 由文本重建段，水位不回退、已折回记录不回放、未折回的操作仍叠加。文本目标不按条数折回，空闲 `TEXT_IDLE`（30 s）后折回。计数 / 时间（Incr / Touch）不进文本，只有它们且文件未被手改时折回不重建段。
 - **归文本管 = 已绑定，或 state 记过 `text_fp`**：重开后绑定前，这类目标 `fold` / `fold_with` 报错，`maintain` / `compact` 跳过——它们的操作只能绑定后经 `fold_text` 进文本。所以接线时 `bind_text` 要先于对它的显式折回。只读实例 `bind_text` 只登记、不同步。
 - **文本折回失败**（隔离 / 读不了 / 编辑器竞争）只拦该目标：WARN + 退避（30 s 起翻倍，封顶 30 min），别的目标与压实照常。
+- **小表 `text::table`**（短语 / Shadow 用）：按列名读写的 TSV；`TextTable` 内存持有最近一次成功解析的内容（读零 IO），`edit` 先按文件现状重新解析（手改优先）再按组补丁、整文件提交，文件隔离时拒写、读照旧；`replace_all` 整文件替换。`# no comment` 之后不含 tab 的 `#` 行仍算注释。
 - **空闲折回靠节拍**：`spawn_ticker(every)`（只持 `Weak`、只读不起）每拍看 `needs_maintain`，需要就 `spawn_maintain`——没有后续写入时文本也会在空闲后写回。生产由 `Store::spawn_userdata_ticker` 起。
 - **拼音文本里单个汉字的无空格码 = 单音节（0b1）**：空格载体表达不了 0b1，一个汉字只对应一个音节；非汉字单字符（emoji）仍为 0。
 - **导入分类**：`classify_user_rows` / `user_row_effect` 与 `import_user_rows` 同一判据（权重更大或补上 0 边界 = updated；同批重复键按「本批已合并」判），预览与落盘一致。

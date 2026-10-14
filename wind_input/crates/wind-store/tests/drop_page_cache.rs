@@ -13,6 +13,10 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use wind_store::Store;
+use wind_store::completion::CompletionKind;
+
+/// 负载用补全历史表：P2 / P3 起用户词与短语都不在 redb，页缓存机制要拿仍在 redb 的表来测。
+const K: CompletionKind = CompletionKind::UrlHistory;
 
 fn store(tag: &str) -> (Arc<Store>, std::path::PathBuf) {
     let p = std::env::temp_dir().join(format!("wind_dpc_{}_{tag}.redb", std::process::id()));
@@ -20,18 +24,23 @@ fn store(tag: &str) -> (Arc<Store>, std::path::PathBuf) {
     (Arc::new(Store::open(&p).expect("开库")), p)
 }
 
-/// 负载用短语表：P2 起用户词不在 redb，页缓存机制要拿仍在 redb 的表来测。
-fn rows(n: usize) -> Vec<(String, String)> {
-    (0..n)
-        .map(|i| (format!("a{i:04}"), format!("词{i:04}")))
-        .collect()
+fn fill(s: &Store, n: usize) {
+    let jsonl: String = (0..n)
+        .map(|i| {
+            format!(
+                "{{\"kind\":\"url_history\",\"text\":\"a{i:04}\",\"count\":1,\"last_used\":0}}\n"
+            )
+        })
+        .collect();
+    s.import_completions_jsonl(&jsonl).expect("导入");
 }
 
-fn listed(s: &Store) -> Vec<(String, String)> {
-    s.list_phrases()
+fn listed(s: &Store) -> Vec<(String, u32)> {
+    s.list_completions(K, "", 0, 0)
         .expect("扫")
+        .0
         .into_iter()
-        .map(|p| (p.code, p.text))
+        .map(|(t, r)| (t, r.count))
         .collect()
 }
 
@@ -39,7 +48,7 @@ fn listed(s: &Store) -> Vec<(String, String)> {
 #[test]
 fn dropping_the_cache_keeps_every_row() {
     let (s, p) = store("rows");
-    s.import_phrases_appending(&rows(500), 100).expect("导入");
+    fill(&s, 500);
     let before = listed(&s);
 
     s.drop_page_cache().expect("丢缓存");
@@ -50,7 +59,7 @@ fn dropping_the_cache_keeps_every_row() {
     assert!(!s.is_paused(), "结束时不得停在暂停态");
 
     // 还能继续写。
-    s.add_phrase("zz", "新词", 0, 100).expect("写");
+    s.record_completion(K, "zz").expect("写");
     assert_eq!(listed(&s).len(), 501);
 
     let _ = std::fs::remove_file(&p);
@@ -71,7 +80,7 @@ fn dropping_the_cache_keeps_every_row() {
 #[test]
 fn concurrent_reads_survive_a_cache_drop() {
     let (s, p) = store("concurrent");
-    s.import_phrases_appending(&rows(2000), 100).expect("导入");
+    fill(&s, 2000);
 
     let stop = Arc::new(AtomicBool::new(false));
     let failures = Arc::new(AtomicUsize::new(0));
@@ -87,7 +96,7 @@ fn concurrent_reads_survive_a_cache_drop() {
             );
             std::thread::spawn(move || {
                 while !stop.load(Ordering::Relaxed) {
-                    match s.list_user_phrases_paged(Some("a01"), 0, 10) {
+                    match s.list_completions(K, "a01", 0, 10) {
                         Ok(_) => reads.fetch_add(1, Ordering::Relaxed),
                         Err(_) => failures.fetch_add(1, Ordering::Relaxed),
                     };

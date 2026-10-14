@@ -14,6 +14,7 @@ pub mod freq;
 pub mod import_formats;
 pub mod migrate_p1;
 pub mod migrate_p2;
+pub mod migrate_p3;
 pub mod migration;
 pub mod phrase_text;
 pub mod phrases;

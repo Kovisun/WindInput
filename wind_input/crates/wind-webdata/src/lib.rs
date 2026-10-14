@@ -1164,6 +1164,10 @@ pub trait WebDataRpc: WebDataHost {
             }
             None => store.sync_user_texts(),
         };
+        // 短语文件变了 ⇒ 输入期短语层随之重建（Shadow 按键路径直接读表，不用）
+        if reloaded.iter().any(|c| c == "phrases") {
+            self.rebuild_phrases();
+        }
         Ok(json!({ "reloaded": reloaded }))
     }
 
@@ -10177,13 +10181,18 @@ mod phrase_shadowing_tests {
     /// 带真实 `system.phrases.toml` 的无头协调器（`data_dir=None` 时补齐逻辑会整体早退，
     /// 那样测出来的「通过」是假的——它根本没跑到被测代码）。
     fn coord_with_sys_phrase(tag: &str) -> (Arc<Coordinator>, std::path::PathBuf) {
+        coord_with_sys_toml(tag, "")
+    }
+
+    /// `extra`：追加在 TOML 末尾的更多 `[[phrases]]` 条目。
+    fn coord_with_sys_toml(tag: &str, extra: &str) -> (Arc<Coordinator>, std::path::PathBuf) {
         let base = std::env::temp_dir().join(format!("wind_phrase_shadow_{tag}"));
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(&base).unwrap();
         std::fs::write(
             base.join("system.phrases.toml"),
             format!(
-                "[[phrases]]\ncode = '{SYS_CODE}'\ntext = '{SYS_TEXT}'\nweight = 1000\nposition = 1\n"
+                "[[phrases]]\ncode = '{SYS_CODE}'\ntext = '{SYS_TEXT}'\nweight = 1000\nposition = 1\n{extra}"
             ),
         )
         .unwrap();
@@ -10213,6 +10222,50 @@ mod phrase_shadowing_tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    /// P3 审查 I2：`dict.reload` 载入手改的短语文件后，输入期短语层随之重建。
+    #[test]
+    fn dict_reload_rebuilds_phrase_layer() {
+        let (c, base) = coord_with_sys_phrase("reload_phrases");
+        let store = c.user_store().cloned().unwrap();
+        store.add_phrase("yx", "me@x.com", 0, 1800).unwrap();
+        c.web_data_rpc("phrase.list", &json!({})).ok();
+        let f = store.phrases_path();
+        std::fs::write(
+            &f,
+            std::fs::read_to_string(&f).unwrap() + "dzdz\t地址\t1800\n",
+        )
+        .unwrap();
+        let r = c.web_data_rpc("dict.reload", &json!({})).unwrap();
+        assert!(
+            r["reloaded"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|v| v == "phrases"),
+            "{r}"
+        );
+        assert!(c.debug_phrase_texts("dzdz").contains(&"地址".to_string()));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// P3 审查 I1：数据目录里没有 system.phrases.toml 时短语迁移照样做（没有 TOML 就没有系统行），
+    /// 用户短语不能因此看不见。
+    #[test]
+    fn phrase_migration_runs_without_system_toml() {
+        let base = std::env::temp_dir().join("wind_phrase_no_toml");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let store = Arc::new(Store::open(base.join("s.redb")).unwrap());
+        store
+            .legacy_put_phrase("yx", "me@x.com", 1800, 0, true, false, false, "")
+            .unwrap();
+        let c = Coordinator::new_headless_with_store(Config::default(), Some(&base), store.clone());
+        assert!(store.migrated_p3());
+        assert!(store.list_phrases().unwrap().iter().any(|p| p.code == "yx"));
+        assert!(c.debug_phrase_texts("yx").contains(&"me@x.com".to_string()));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     /// 删除遮蔽行 → 系统条目露出来（用户预期：删掉我加的那条，就该回到系统默认）。
     #[test]
     fn removing_shadowing_phrase_restores_system_entry() {
@@ -10239,21 +10292,12 @@ mod phrase_shadowing_tests {
     /// 「清空用户短语」同理，且**不得**顺带重置用户对系统短语的编辑。
     #[test]
     fn clearing_user_phrases_restores_system_entry_without_resetting_edits() {
-        let (c, base) = coord_with_sys_phrase("clear");
+        let (c, base) = coord_with_sys_toml(
+            "clear",
+            "[[phrases]]\ncode = 'other'\ntext = '别的'\nweight = 1\nposition = 0\n",
+        );
         let store = c.user_store().cloned().unwrap();
-        // 另加一条纯系统短语并由用户改过权重（模拟在系统短语列表里调过）
-        store
-            .add_phrase("other", "别的", 0, 1)
-            .and_then(|_| {
-                store.reclaim_system_phrases(&[wind_store::phrases::SystemPhrase {
-                    code: "other".into(),
-                    text: "别的".into(),
-                    weight: 1,
-                    position: 0,
-                    category: String::new(),
-                }])
-            })
-            .unwrap();
+        // 另一条系统短语由用户改过权重（在系统短语列表里调过）
         store
             .update_phrase("other", "别的", None, None, Some(7), Some(4321))
             .unwrap();
