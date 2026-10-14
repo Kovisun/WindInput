@@ -12,7 +12,7 @@ mod user;
 pub use draft::draft_alive;
 pub use freq::FreqRec;
 pub use temp::{TEMP_WORD_MAX_WEIGHT, TempWord};
-pub use user::{USER_CODE_MAX_CHARS, USER_TEXT_MAX_CHARS, UserWord};
+pub use user::{RowEffect, USER_CODE_MAX_CHARS, USER_TEXT_MAX_CHARS, UserImportCounts, UserWord};
 
 use crate::engine::UserData;
 use std::collections::{BTreeSet, HashMap};

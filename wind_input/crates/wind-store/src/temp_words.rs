@@ -8,11 +8,9 @@
 //! 临时词权重固定为写入时的初值；晋升进用户词库时统一取 `PROMOTED_WEIGHT`（与已有
 //! 用户词取 max，不覆盖手动加词的更高权重）。
 
-use crate::abbrev_index;
-use crate::store::{Store, USER_ABBREV, USER_WORDS};
-use crate::user_words::{UserWordRecord, dec_val_ordered, enc_key, enc_val_ordered};
+use crate::store::Store;
+use crate::user_words::UserWordRecord;
 use crate::wdict;
-use redb::ReadableTable;
 
 /// 临时词权重硬上限（仅约束写入时的初值，权重不再随复选累加）
 pub const TEMP_WORD_MAX_WEIGHT: i32 = 10000;
@@ -272,60 +270,13 @@ impl Store {
     /// 权重统一取 `PROMOTED_WEIGHT`（与已存在的用户词权重取 max，不覆盖手动加词的更高权重，
     /// 不再沿用临时词自身权重）；count=temp+user，created_at 优先保留 user 旧值。
     pub fn promote_temp_word(&self, schema: &str, code: &str, text: &str) -> anyhow::Result<bool> {
-        // P1 起临时词在运行时引擎、用户词仍在 redb：先写用户词、再删临时词。崩溃在两步之间
-        // 两边各有一份，用户层去重兜得住；反过来会丢词。
+        // 先写用户词、再删临时词：崩溃在两步之间两边各有一份，用户层去重兜得住；反过来会丢词。
+        // `add_user_word` 本身就是「已存在则权重取 max、0 边界补齐」，与旧事务里的合并一致；
+        // count 相加不再保留（用户词 P2 起没有 count）。
         let Some(tw) = self.runtime().temp_word(schema, code, text) else {
             return Ok(false);
         };
-        let (tc, tca, tb) = (tw.count, tw.created_at, tw.boundary);
-        let key = enc_key(schema, code, text);
-        self.with_db(|db| {
-            let txn = db.begin_write()?;
-            {
-                let mut user_t = txn.open_table(USER_WORDS)?;
-                // boundary 随词一起晋升：临时词由造词算得（有边界），用户词侧若已有
-                // 非 0 值则沿用（同 code/text 的切分确定，且旧值来源未必更差）。
-                let existing = user_t
-                    .get(key.as_str())?
-                    .and_then(|g| dec_val_ordered(g.value()));
-                // order：已在用户词表里的沿用原号，新晋升的领一个新号。
-                // 不可用 24B 的 `enc_val` 写这里 —— 那会把导入词条既有的入库序号
-                // 抹成 0，把它顶到该 code 下所有词之前，且「用过一阵子」才显形。
-                let (nw, nc, nca, nb, no) = match existing {
-                    Some((uw, uc, uca, ub, uo)) => (
-                        uw.max(PROMOTED_WEIGHT),
-                        tc + uc,
-                        uca,
-                        if ub != 0 { ub } else { tb },
-                        uo,
-                    ),
-                    None => (
-                        PROMOTED_WEIGHT,
-                        tc,
-                        tca,
-                        tb,
-                        crate::user_words::take_word_orders(&txn, 1)?,
-                    ),
-                };
-                user_t.insert(
-                    key.as_str(),
-                    enc_val_ordered(nw, nc, nca, nb, no).as_slice(),
-                )?;
-                // ⚠️ **本文件里唯一写用户词表的路径**。按文件名去数用户词的写路径
-                // 必漏这一处——晋升住在临时词模块里。漏了它，自动学习晋升上来的词
-                // 就永远进不了简拼索引，且要「用一段时间后」才显形。
-                abbrev_index::shift(
-                    &mut txn.open_table(USER_ABBREV)?,
-                    schema,
-                    code,
-                    text,
-                    existing.map(|(_, _, _, ub, _)| ub),
-                    nb,
-                )?;
-            }
-            txn.commit()?;
-            Ok(())
-        })?;
+        self.add_user_word(schema, code, text, PROMOTED_WEIGHT, tw.boundary)?;
         self.runtime().remove_temp(schema, code, text)?;
         self.bump_words_gen(schema);
         self.after_write();
@@ -454,94 +405,6 @@ mod tests {
             .unwrap();
         s.clear_temp_words("py").unwrap();
         assert!(hit("zj").is_empty(), "clear 应清索引");
-        let _ = std::fs::remove_file(&p);
-    }
-
-    /// 复选只加 count，不该动索引——这正是索引 value 留空的收益。
-    #[test]
-    fn temp_count_bump_does_not_touch_the_index() {
-        let p = tmp("wind_temp_abbrev_count.redb");
-        let s = Store::open(&p).unwrap();
-        s.learn_temp_word("py", "nihao", "你好", 500, 0b101)
-            .unwrap();
-        let before = s.abbrev_index_len();
-        s.learn_temp_word("py", "nihao", "你好", 500, 0b101)
-            .unwrap();
-        s.increment_temp_if_exists("py", "nihao", "你好").unwrap();
-        assert_eq!(s.abbrev_index_len(), before, "索引条数不该变");
-        assert_eq!(
-            s.search_temp_words_by_abbrev("py", "nh", 0).unwrap().len(),
-            1
-        );
-        let _ = std::fs::remove_file(&p);
-    }
-
-    /// **重开库时自动补建**：老库升级上来索引是空的，若等调用方来判断就会漏
-    /// （`Store::open` 有协调器/设置页/备份还原等多个入口），而漏掉的表现是静默失效。
-    #[test]
-    fn reopening_an_unindexed_db_backfills_automatically() {
-        let p = tmp("wind_abbrev_backfill.redb");
-        {
-            let s = Store::open(&p).unwrap();
-            s.add_user_word("py", "nihao", "你好", 500, 0b101).unwrap();
-            s.learn_temp_word("py", "haoya", "好呀", 500, 0b1001)
-                .unwrap();
-            // 模拟老库：主表有数据、索引为空
-            s.with_db(|db| {
-                let txn = db.begin_write()?;
-                abbrev_index::clear_schema(&mut txn.open_table(USER_ABBREV)?, "py")?;
-                txn.commit()?;
-                Ok(())
-            })
-            .unwrap();
-            assert_eq!(s.abbrev_index_len(), 0, "前提：索引确实被清空了");
-        }
-        let s = Store::open(&p).unwrap();
-        assert_eq!(
-            s.abbrev_index_len(),
-            1,
-            "重开时应自动补建（只有用户词在 redb 索引里）"
-        );
-        assert_eq!(
-            s.search_user_words_by_abbrev("py", "nh", 0).unwrap().len(),
-            1
-        );
-        assert_eq!(
-            s.search_temp_words_by_abbrev("py", "hy", 0).unwrap().len(),
-            1
-        );
-        let _ = std::fs::remove_file(&p);
-    }
-
-    /// 存量用户词补建简拼索引；临时词（P1 起在运行时引擎）的简拼不依赖 redb 索引，补建后照样可召回。
-    #[test]
-    fn rebuild_covers_both_tables() {
-        let p = tmp("wind_temp_abbrev_rebuild.redb");
-        let s = Store::open(&p).unwrap();
-        s.add_user_word("py", "nihao", "你好", 500, 0b101).unwrap();
-        s.learn_temp_word("py", "haoya", "好呀", 500, 0b1001)
-            .unwrap();
-
-        // 模拟老库：主表有数据、两张索引都空
-        s.with_db(|db| {
-            let txn = db.begin_write()?;
-            abbrev_index::clear_schema(&mut txn.open_table(USER_ABBREV)?, "py")?;
-            txn.commit()?;
-            Ok(())
-        })
-        .unwrap();
-        assert_eq!(s.abbrev_index_len(), 0, "前提：索引确实被清空了");
-
-        assert_eq!(s.rebuild_abbrev_indexes().unwrap(), 1);
-        assert_eq!(
-            s.search_user_words_by_abbrev("py", "nh", 0).unwrap().len(),
-            1
-        );
-        assert_eq!(
-            s.search_temp_words_by_abbrev("py", "hy", 0).unwrap().len(),
-            1,
-            "临时词简拼走引擎，不受 redb 索引影响"
-        );
         let _ = std::fs::remove_file(&p);
     }
 
@@ -744,10 +607,9 @@ mod tests {
         assert!(s.promote_temp_word("wb", "a", "工").unwrap());
         // 临时库已删
         assert!(s.get_temp_words("wb", "a").unwrap().is_empty());
-        // 晋升权重统一取 PROMOTED_WEIGHT（不沿用临时权重），count 累计保留
+        // 晋升权重统一取 PROMOTED_WEIGHT（不沿用临时权重）；用户词 P2 起没有 count
         let u = s.get_user_words("wb", "a").unwrap();
         assert_eq!(u[0].weight, PROMOTED_WEIGHT);
-        assert_eq!(u[0].count, 2);
         // 已存在更高权重的手动加词：晋升不应下调，取 max
         s.add_user_word("wb", "b", "戈", 1200, 0).unwrap();
         s.learn_temp_word("wb", "b", "戈", 800, 0).unwrap();

@@ -7,8 +7,13 @@ use crate::engine::Op;
 use crate::record::{OpKind, Payload, Target};
 use crate::snapshot::SnapshotEntry;
 
-/// 与 `wind-store` 的 `USER_WORD_TEXT_MAX_CHARS` / `USER_WORD_CODE_MAX_CHARS` 同值。
+/// 手动加词文本长度上限（字符数）。`add_user_word` 是所有手动加词路径（快捷加词、命令栏
+/// `dict.add` 显式给码、设置页词库管理）的共同写入闸口；10000 字是兜底防线，防病态输入。
+/// 导入也逐行校验。
 pub const USER_TEXT_MAX_CHARS: usize = 10_000;
+/// 手动加词编码长度上限（字符数）。真正收紧的是拼音音节边界 `boundary: u64`——码超过 64 字节
+/// 边界位掩码就装不下。真实方案远小于它（五笔 4 位、英文 32、10 字词组全拼约 60），128 留出
+/// 两倍余量，又能挡住把 text 错填进 code 这类输入。
 pub const USER_CODE_MAX_CHARS: usize = 128;
 
 const U: Target = Target::User;
@@ -31,6 +36,47 @@ impl From<SnapshotEntry> for UserWord {
             weight: e.weight,
             boundary: e.boundary,
             order: e.order,
+        }
+    }
+}
+
+/// 一行导入会落成什么（与 `user_upsert_op` 同一判据：权重更大或补上 0 边界才写）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RowEffect {
+    Added,
+    Updated,
+    Unchanged,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct UserImportCounts {
+    pub added: usize,
+    pub updated: usize,
+    pub unchanged: usize,
+}
+
+impl UserImportCounts {
+    fn add(&mut self, e: RowEffect) {
+        match e {
+            RowEffect::Added => self.added += 1,
+            RowEffect::Updated => self.updated += 1,
+            RowEffect::Unchanged => self.unchanged += 1,
+        }
+    }
+}
+
+/// 已有 (权重, 边界) 遇到一行导入：效果与合并后的值。
+fn merge_row(existing: Option<(i32, u64)>, row: &UserWord) -> (RowEffect, (i32, u64)) {
+    match existing {
+        None => (RowEffect::Added, (row.weight, row.boundary)),
+        Some((w, b)) => {
+            let merged = (w.max(row.weight), if b != 0 { b } else { row.boundary });
+            let effect = if merged != (w, b) {
+                RowEffect::Updated
+            } else {
+                RowEffect::Unchanged
+            };
+            (effect, merged)
         }
     }
 }
@@ -175,11 +221,48 @@ impl Runtime {
         Ok(n)
     }
 
+    pub fn user_row_effect(&self, schema: &str, row: &UserWord) -> RowEffect {
+        let existing = self
+            .ud
+            .get(U, schema, &row.code, &row.text)
+            .map(|e| (e.weight, e.boundary));
+        merge_row(existing, row).0
+    }
+
+    /// 逐行分类（导入预览与导入共用）：同批重复的键，第二次出现按「本批已合并」的结果判定。
+    pub fn classify_user_rows(&self, schema: &str, rows: &[UserWord]) -> Vec<RowEffect> {
+        let mut seen: std::collections::HashMap<(&str, &str), (i32, u64)> =
+            std::collections::HashMap::new();
+        rows.iter()
+            .map(|r| {
+                let key = (r.code.as_str(), r.text.as_str());
+                let existing = seen.get(&key).copied().or_else(|| {
+                    self.ud
+                        .get(U, schema, &r.code, &r.text)
+                        .map(|e| (e.weight, e.boundary))
+                });
+                let (effect, merged) = merge_row(existing, r);
+                seen.insert(key, merged);
+                effect
+            })
+            .collect()
+    }
+
     /// 导入（合并）：已存在取 max 权重、补 0 边界；新词按行序追加。已绑定文本时立即折回进文本——
-    /// 导入是用户的显式动作，不等空闲。
-    pub fn import_user_rows(&self, schema: &str, rows: &[UserWord]) -> anyhow::Result<usize> {
+    /// 导入是用户的显式动作，不等空闲。同批重复的键，第二次出现按「本批已合并」的结果分类。
+    pub fn import_user_rows(
+        &self,
+        schema: &str,
+        rows: &[UserWord],
+    ) -> anyhow::Result<UserImportCounts> {
         for r in rows {
             check_len(&r.code, &r.text)?;
+        }
+        // 文本隔离时整批拒绝：否则词已进 delta、列表里看得见，导入却报失败
+        self.ud.check_text_writable(U, schema)?;
+        let mut counts = UserImportCounts::default();
+        for e in self.classify_user_rows(schema, rows) {
+            counts.add(e);
         }
         let ops: Vec<Op> = rows
             .iter()
@@ -192,6 +275,6 @@ impl Runtime {
             self.ud.fold_text(U, schema)?;
         }
         self.bump_words(schema);
-        Ok(rows.len())
+        Ok(counts)
     }
 }

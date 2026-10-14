@@ -6,8 +6,9 @@
 use std::path::Path;
 
 /// 本版本认识的格式版本。1 = 纯 redb；2 = P1：临时词 / 草稿 / 词频 / 联想历史在运行时引擎
-/// （`local_dir()/state/`）。每个 P 阶段迁移完成 +1。
-pub const KNOWN_FORMAT_VERSION: u32 = 2;
+/// （`local_dir()/state/`）；3 = P2：用户词在 `user/<schema>/user.dict.yaml`。每个 P 阶段迁移
+/// 完成 +1。
+pub const KNOWN_FORMAT_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct UserMeta {
@@ -41,8 +42,10 @@ pub fn load_or_init(user_dir: &Path) -> MetaCheck {
             Err(e) => MetaCheck::Unreadable(e.to_string()),
         },
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // 旁边已有旧版 redb：记 1，等迁移完成由协调器升级；否则是全新目录，直接记最新
+            let fresh = !user_dir.join("userdata.redb").exists();
             let m = UserMeta {
-                format_version: KNOWN_FORMAT_VERSION,
+                format_version: if fresh { KNOWN_FORMAT_VERSION } else { 1 },
                 dir_id: uuid::Uuid::new_v4().simple().to_string(),
             };
             let _ = std::fs::create_dir_all(user_dir);
@@ -87,6 +90,18 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    /// 旁边已有旧版 `userdata.redb`：初次生成的 meta 记 1，等迁移完成再升（否则迁移还没跑就先
+    /// 写成最新版本号，迁移失败后回退的旧版本被误判成只读）。
+    #[test]
+    fn fresh_meta_beside_legacy_redb_starts_at_1() {
+        let d = dir("legacy_redb");
+        std::fs::write(d.join("userdata.redb"), b"x").unwrap();
+        match load_or_init(&d) {
+            MetaCheck::Ok(m) => assert_eq!(m.format_version, 1),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

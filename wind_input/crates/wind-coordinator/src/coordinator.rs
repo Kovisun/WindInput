@@ -4780,6 +4780,13 @@ impl Coordinator {
                 // 文本查表、与编码域无关，本就不是某个方案的属性。自带变更检测（只看
                 // enabled/categories），未变即空操作。
                 self.sync_emoji_dict();
+                // 用户词文本手改后，保存配置 / 设置页触发热重载时一并生效（设计 §5）。
+                if let Some(store) = &self.store {
+                    let changed = store.sync_user_texts();
+                    if !changed.is_empty() {
+                        info!("用户词文本已重新载入：{} 个方案", changed.len());
+                    }
+                }
                 // 语言栏图标的呈现参数同理跟随全局配置（`[ui.langbar]`），也不属 schema。
                 // 少了这一步，改角标形状/配色要重启才生效——「改了没反应、重启就好」正是
                 // 本仓反复出现的那类缺陷（运行时镜像态没回灌）。自带变更检测，未变即空操作。

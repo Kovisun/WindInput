@@ -4,198 +4,59 @@
 //! shadow 是 ShadowProvider，引擎排序后应用）——本文件只负责"用户词/临时词作为查询层"。
 
 use crate::Store;
-use crate::user_words::UserWordRecord;
 use std::sync::Arc;
-use wind_candidate::{Candidate, better};
+use wind_candidate::Candidate;
 use wind_dict::{DictLayer, LayerType};
 
-/// 把用户/临时词记录映射为候选；`is_temp` 决定 meta 标记，`is_prefix` 标记前缀补全。
-///
-/// ⚠️ **`boundary` 必须显式带上**。P2a 贯通边界时改的是 `SystemDictLayer`，但有两条旁路
-/// 绕开它：`PinyinEngine` 直接持有 `CachedDict`（P2b 已补），以及本层——记录里
-/// （`user_words.rs` 的 24B value）明明存着边界、`search_user_words_prefix` 也读了出来，
-/// 到这里被 `..Default::default()` 吃掉，于是**用户词候选的 boundary 恒为 0**，
-/// 双拼边界校验、长词上浮判据、自动造词沿用边界四处一并失效。
-/// 见 docs/design/pinyin-code-domains.md §3 L2。
-fn record_to_candidate(r: UserWordRecord, is_temp: bool, is_prefix: bool) -> Candidate {
-    let mut c = Candidate {
-        // 库里存的就是真实文本（含真换行），**此处不做任何转义处理**。
-        //
-        // 转义只发生在系统边界上：文本文件（`.dict.yaml`/导入/导出）与设置页 UI
-        // 各自进出时转换，数据库与内存中一律是真实文本。若在这里反转义，等于要求
-        // 每个写入端都先转义过——而写入端有 8 条（设置页 ×3、快捷加词、自动造词、
-        // 导入、临时词、备份还原），漏一条，该路径写入的 `C:\note` 就会被展开成
-        // `C:` + 换行 + `ote`，且静默无感。
-        text: r.text,
-        code: r.code,
-        weight: r.weight,
-        boundary: r.boundary,
-        is_prefix,
-        // 入库先后序号 → 候选的自然序（t80）。`better()` 的排序链是
-        // weight 降 → base_order 升 → **natural_order 升** → code → text：此前这里取
-        // `Default`（恒 0），同码等权的用户词全被打平，退化成按 text 字典序，于是从别的
-        // 平台迁进来的词库丢掉了原有词序。dict 侧本就用二进制格式里的 `order` 做这一档，
-        // 补上它两条路径才同口径。
-        //
-        // `min` 是防御性饱和：order 是 u32、natural_order 是 i32，真跑到 21 亿条也不会
-        // 折成负数（负数会让这些词跳到所有词前面，比无序更糟）。
-        natural_order: r.order.min(i32::MAX as u32) as i32,
-        ..Default::default()
-    };
-    c.meta.raw_weight = r.weight;
-    if is_temp {
-        c.meta.is_temp_dict = true;
-    } else {
-        c.meta.is_user_dict = true;
-    }
-    c
-}
-
-fn sort_trunc(mut v: Vec<Candidate>, limit: usize) -> Vec<Candidate> {
-    v.sort_by(better);
-    if limit > 0 {
-        v.truncate(limit);
-    }
-    v
-}
-
-/// 通配结果的排序截断：等长档在前（[`wind_dict::layer::cmp_pattern`]）。
-fn sort_trunc_pattern(mut v: Vec<Candidate>, pattern_len: usize, limit: usize) -> Vec<Candidate> {
-    v.sort_by(|a, b| wind_dict::layer::cmp_pattern(pattern_len, a, b));
-    if limit > 0 {
-        v.truncate(limit);
-    }
-    v
-}
-
-/// 两层共用：字面前缀扫描（`limit = 0` 不截断）→ 过滤 → 排序截断。
-///
-/// ⚠️ **不能把 `limit` 传进 redb**：`search_*_words_prefix` 按 key 字典序数够就停，
-/// 通配过滤发生在那之后，于是「数够的那一批里没有匹配项」就会整批落空——比
-/// `search_prefix` 那条「先截断后排序」的已知局限（见 `StoreUserLayer::search_prefix`）
-/// 严重得多。用户词 / 临时词表规模小，按字面前缀全扫可接受；首位通配时即全方案扫描。
-fn pattern_from_records(
-    recs: Vec<UserWordRecord>,
-    pattern: &str,
-    wildcard: char,
-    limit: usize,
-    with_prefix: bool,
-    is_temp: bool,
-) -> Vec<Candidate> {
-    if pattern.is_empty() || limit == 0 {
-        return Vec::new();
-    }
-    let n = pattern.chars().count();
-    let cands = recs
-        .into_iter()
-        .filter(|r| wind_dict::layer::pattern_matches(pattern, wildcard, &r.code, with_prefix))
-        .map(|r| {
-            let longer = r.code.chars().count() > n;
-            record_to_candidate(r, is_temp, longer)
-        })
-        .collect();
-    sort_trunc_pattern(cands, n, limit)
-}
-
-/// 用户造词层（redb 后端，可变；写经 Store 的 add/remove/update）。
+/// 用户造词层（P2 起数据在 `user/<schema>/user.dict.yaml` + 运行时引擎；本类型是
+/// `UserDataUserLayer` 的薄包装，保留 `StoreUserLayer::new(store, schema)` 这个入口，调用方不动）。
+/// 构造时把该方案绑定到文本（之后手改文件经 sync 生效）。
 pub struct StoreUserLayer {
-    store: Arc<Store>,
-    schema_id: String,
-    name: String,
+    inner: wind_userdata::layer::UserDataUserLayer,
 }
 
 impl StoreUserLayer {
     pub fn new(store: Arc<Store>, schema_id: impl Into<String>) -> Self {
         let schema_id = schema_id.into();
-        let name = format!("user:{schema_id}");
+        store.ensure_user_text(&schema_id);
         Self {
-            store,
-            schema_id,
-            name,
+            inner: wind_userdata::layer::UserDataUserLayer::new(
+                store.runtime().data().clone(),
+                &schema_id,
+            ),
         }
     }
 }
 
+/// 全部转发给引擎层：名字（`user:{schema}`）、稳定摘要、精确 / 前缀 / 简拼（分组索引，无边界词走
+/// 首字符兜底组）/ 通配，与 redb 版同语义；`natural_order` 取文本行号（未折回的新词排最后）。
 impl DictLayer for StoreUserLayer {
     fn name(&self) -> &str {
-        &self.name
+        self.inner.name()
     }
 
     fn layer_type(&self) -> LayerType {
-        LayerType::User
+        self.inner.layer_type()
     }
 
-    /// 本层**没有**覆盖 `for_each_entry`（枚举恒空），对派生索引的贡献恒为「无」，
-    /// 故可以给一个稳定摘要——否则挂着用户词层的英文引擎永远落不了盘。
-    ///
-    /// ⚠️ 哪天给本层实现了 `for_each_entry`，这里必须同时改成反映其内容的摘要，
-    /// 否则用户词的增删不会让英文词组索引失效。
     fn entries_digest(&self) -> Option<String> {
-        Some(format!("{}|enumerates-nothing", self.name))
+        self.inner.entries_digest()
     }
 
     fn search(&self, code: &str, limit: usize) -> Vec<Candidate> {
-        let recs = self
-            .store
-            .get_user_words(&self.schema_id, code)
-            .unwrap_or_default();
-        let cands = recs
-            .into_iter()
-            .map(|r| record_to_candidate(r, false, false))
-            .collect();
-        sort_trunc(cands, limit)
+        self.inner.search(code, limit)
     }
 
-    /// ⚠️ **已知局限：`limit` 先截断、后排序**（t80 的已知边界，非本次引入）。
-    ///
-    /// `search_user_words_prefix` 按 redb 的 **key 字典序**扫，数够 `limit` 条就 `break`；
-    /// 随后 `sort_trunc` 才按 `better()`（含 `natural_order`）排。于是「该排第一但 key
-    /// 字典序靠后」的词条可能**压根没进这个列表**，order 再正确也救不回来。
-    ///
-    /// 举例：`abc` 前缀下有 60 个词，导入时排第 1 的那条其 key 字典序在第 55 位，
-    /// `limit = 30` ⇒ 它不在候选里。
-    ///
-    /// 改动前 `natural_order` 恒 0，截断只会漏掉低权重词，危害有限；补上 order 之后，
-    /// 这条局限会直接表现为「导入词序有时对、有时不对」。真要修得让截断也走排序口径
-    /// （堆选 top-k，或不截断后排），那会动到候选路径的性能与既有语义，不在 t80 的范围内。
-    ///
-    /// 导出路径不受影响：`collect_user_word_rows` 传的是 `limit = 0`（不截断）。
     fn search_prefix(&self, prefix: &str, limit: usize) -> Vec<Candidate> {
-        let recs = self
-            .store
-            .search_user_words_prefix(&self.schema_id, prefix, limit)
-            .unwrap_or_default();
-        let cands = recs
-            .into_iter()
-            .map(|r| record_to_candidate(r, false, true))
-            .collect();
-        sort_trunc(cands, limit)
+        self.inner.search_prefix(prefix, limit)
     }
 
-    /// `is_prefix = false`：简拼命中的是**整词**，不是前缀补全。引擎侧会据此
-    /// 把它归入简拼层（`is_abbrev`），与 `is_prefix` 的补全层是两回事。
     fn search_abbrev(&self, abbrev: &str, limit: usize) -> Vec<Candidate> {
-        let recs = self
-            .store
-            .search_user_words_by_abbrev(&self.schema_id, abbrev, limit)
-            .unwrap_or_default();
-        let cands = recs
-            .into_iter()
-            .map(|r| record_to_candidate(r, false, false))
-            .collect();
-        sort_trunc(cands, limit)
+        self.inner.search_abbrev(abbrev, limit)
     }
 
     fn search_abbrev_exact(&self, abbrev: &str, limit: usize) -> Vec<Candidate> {
-        let recs = self
-            .store
-            .search_user_words_by_abbrev_exact(&self.schema_id, abbrev, limit)
-            .unwrap_or_default();
-        let cands = recs
-            .into_iter()
-            .map(|r| record_to_candidate(r, false, false))
-            .collect();
-        sort_trunc(cands, limit)
+        self.inner.search_abbrev_exact(abbrev, limit)
     }
 
     fn search_pattern(
@@ -205,15 +66,8 @@ impl DictLayer for StoreUserLayer {
         limit: usize,
         with_prefix: bool,
     ) -> Vec<Candidate> {
-        if pattern.is_empty() || limit == 0 {
-            return Vec::new();
-        }
-        let lit = wind_dict::layer::literal_prefix(pattern, wildcard);
-        let recs = self
-            .store
-            .search_user_words_prefix(&self.schema_id, lit, 0)
-            .unwrap_or_default();
-        pattern_from_records(recs, pattern, wildcard, limit, with_prefix, false)
+        self.inner
+            .search_pattern(pattern, wildcard, limit, with_prefix)
     }
 }
 
@@ -616,5 +470,54 @@ mod tests {
         assert_eq!(got.len(), 2);
         assert!(got.iter().any(|c| c.text == "你" && c.meta.is_user_dict));
         assert!(got.iter().any(|c| c.text == "拟" && c.meta.is_temp_dict));
+    }
+
+    /// 用户词层读引擎：精确、简拼（无边界词靠首字符兜底组）都经引擎分组索引。
+    #[test]
+    fn user_layer_reads_engine_and_text() {
+        let p = std::env::temp_dir().join(format!("wind_sl_user_{}.redb", std::process::id()));
+        let _ = std::fs::remove_file(&p);
+        let s = Arc::new(Store::open(&p).unwrap());
+        s.add_user_word("pinyin", "nihao", "你好", 9, 0b101)
+            .unwrap();
+        s.add_user_word("pinyin", "xianning", "西安宁", 5, 0)
+            .unwrap();
+        let l = StoreUserLayer::new(s.clone(), "pinyin");
+        let hit = l.search("nihao", 0);
+        assert_eq!(hit[0].text, "你好");
+        assert!(hit[0].meta.is_user_dict);
+        assert_eq!(l.search_abbrev("nh", 0)[0].text, "你好");
+        assert!(l.search_abbrev("xan", 0).iter().any(|c| c.text == "西安宁"));
+        assert_eq!(
+            s.search_user_words_by_abbrev_exact("pinyin", "nh", 0)
+                .unwrap()[0]
+                .text,
+            "你好"
+        );
+    }
+
+    /// 晋升：临时词进用户词（边界随词），临时词删掉，用户词落文本。
+    #[test]
+    fn promote_writes_user_word_through_engine() {
+        let p = std::env::temp_dir().join(format!("wind_sl_promote_{}.redb", std::process::id()));
+        let _ = std::fs::remove_file(&p);
+        let s = Store::open(&p).unwrap();
+        s.learn_temp_word("pinyin", "nihao", "你好", 1, 0b101)
+            .unwrap();
+        assert!(s.promote_temp_word("pinyin", "nihao", "你好").unwrap());
+        assert!(s.runtime().temp_word("pinyin", "nihao", "你好").is_none());
+        assert_eq!(
+            s.get_user_words("pinyin", "nihao").unwrap()[0].boundary,
+            0b101
+        );
+        s.runtime()
+            .data()
+            .fold(wind_userdata::record::Target::User, "pinyin")
+            .unwrap();
+        assert!(
+            std::fs::read_to_string(s.user_text_path("pinyin"))
+                .unwrap()
+                .contains("你好\tni hao")
+        );
     }
 }

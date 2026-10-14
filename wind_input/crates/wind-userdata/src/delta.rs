@@ -89,6 +89,29 @@ impl Delta {
         Self::freeze(all)
     }
 
+    /// 一次加一批：尾巴装得下就只克隆尾巴，否则整体并入冻结层**一次**——逐条 `with` 会每满
+    /// 128 条重排一遍全表，大批导入成平方级。
+    pub fn with_all(&self, es: Vec<Entry>) -> Delta {
+        if self.tail.len() + es.len() <= TAIL_MAX {
+            let mut d = self.clone();
+            let mut counts = (*d.counts).clone();
+            for e in &es {
+                *counts.entry((e.target, e.schema.clone())).or_insert(0) += 1;
+            }
+            d.tail.extend(es);
+            d.counts = Arc::new(counts);
+            return d;
+        }
+        let all: Vec<Entry> = self
+            .frozen
+            .iter()
+            .cloned()
+            .chain(self.tail.iter().cloned())
+            .chain(es)
+            .collect();
+        Self::freeze(all)
+    }
+
     fn freeze(mut all: Vec<Entry>) -> Delta {
         all.sort_by(|a, b| key(a).cmp(&key(b)));
         let mut groups: BTreeMap<GroupKey, Vec<usize>> = BTreeMap::new();

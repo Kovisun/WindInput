@@ -548,6 +548,10 @@ fn web_data_dispatch<H: WebDataRpc + ?Sized>(
         // 批量写：成功后立即回收页缓存，见 `BULK_WRITE_METHODS`。
         "dict.import" => h.web_dict_import(params),
         "dict.previewImport" => h.web_dict_preview_import(params),
+        // 用户词文本手改后重新载入（设计 §5）；带 paths 只同步这几个文件，越界拒绝。
+        "dict.reload" => h.web_dict_reload(params),
+        // 显式折回全部待写回的数据（备份 / 导出 / 调试前）。
+        "dict.flush" => h.web_dict_flush(),
 
         // ── temp.*（临时词，redb）─────────────────────────────
         "temp.list" => h.web_temp_list(params),
@@ -1142,6 +1146,33 @@ pub trait WebDataRpc: WebDataHost {
         // text 同理：列表给的是转义形态、key 是真实文本，不还原一样删不掉。
         let (code, _) = wind_store::wdict::split_spaced_code(code);
         store.remove_user_word(&schema, &code, &store_text(text))?;
+        Ok(json!({ "ok": true }))
+    }
+
+    /// `dict.reload {paths?: [string]}` → `{reloaded: [schema]}`：不带 paths 全量扫描。
+    fn web_dict_reload(&self, params: &Value) -> anyhow::Result<Value> {
+        let store = self
+            .user_store()
+            .ok_or_else(|| anyhow::anyhow!("无持久化存储"))?;
+        let reloaded = match params.get("paths").and_then(|v| v.as_array()) {
+            Some(arr) => {
+                let paths: Vec<String> = arr
+                    .iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect();
+                store.reload_user_text_paths(&paths)?
+            }
+            None => store.sync_user_texts(),
+        };
+        Ok(json!({ "reloaded": reloaded }))
+    }
+
+    /// `dict.flush` → `{ok: true}`。
+    fn web_dict_flush(&self) -> anyhow::Result<Value> {
+        let store = self
+            .user_store()
+            .ok_or_else(|| anyhow::anyhow!("无持久化存储"))?;
+        store.flush_user_data()?;
         Ok(json!({ "ok": true }))
     }
 
@@ -5313,6 +5344,20 @@ outside: rare
                 );
             }
         }
+    }
+
+    /// dict.reload / dict.flush：分派在表里；reload 越界路径报错。
+    #[test]
+    fn dict_reload_and_flush_are_dispatched() {
+        let c = coord("dict_reload_flush");
+        let r = c.web_data_rpc("dict.reload", &json!({})).unwrap();
+        assert!(r.get("reloaded").is_some_and(|v| v.is_array()), "{r}");
+        let r = c.web_data_rpc("dict.flush", &json!({})).unwrap();
+        assert_eq!(r, json!({"ok": true}));
+        assert!(
+            c.web_data_rpc("dict.reload", &json!({"paths": ["/etc/passwd"]}))
+                .is_err()
+        );
     }
 
     /// ★ S3 复审 M3：这些方法也扫整表 / 是批量写，名单里不能缺。

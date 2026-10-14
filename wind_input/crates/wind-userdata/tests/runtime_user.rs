@@ -157,7 +157,11 @@ fn import_merges_max_and_keeps_existing_order() {
             &[row("a", "工", 30), row("abc", "甲", 5), row("abc", "乙", 5)]
         )
         .unwrap(),
-        3
+        wind_userdata::runtime::UserImportCounts {
+            added: 2,
+            updated: 0,
+            unchanged: 1
+        }
     );
     assert_eq!(
         r.user_word("wb", "a", "工").unwrap().weight,
@@ -248,4 +252,94 @@ fn filled_boundary_is_persisted() {
     assert_eq!(r.user_word("py", "nihao", "你好").unwrap().boundary, 0b101);
     r.add_user_word("py", "nihao", "你好", 5, 0b101).unwrap();
     assert_eq!(r.data().pending(Target::User, "py"), 0);
+}
+
+/// 导入分类：新键 added；权重更大或补边界 updated；其余 unchanged。预览判据与落盘一致。
+#[test]
+fn import_classifies_rows_like_wind_store() {
+    use wind_userdata::runtime::{RowEffect, UserImportCounts};
+    let env = Env::new("classify");
+    let r = env.open(&["py"]);
+    r.add_user_word("py", "nihao", "你好", 100, 0).unwrap();
+    r.add_user_word("py", "ta", "他", 50, 0b1).unwrap();
+    let rows = [
+        row("nihao", "你好", 10),
+        UserWord {
+            boundary: 0b101,
+            ..row("nihao", "你好", 10)
+        },
+        row("ta", "他", 80),
+        row("xin", "新", 1),
+        row("xin", "新", 5),
+    ];
+    assert_eq!(r.user_row_effect("py", &rows[0]), RowEffect::Unchanged);
+    assert_eq!(r.user_row_effect("py", &rows[1]), RowEffect::Updated);
+    assert_eq!(r.user_row_effect("py", &rows[3]), RowEffect::Added);
+    let c = r.import_user_rows("py", &rows[1..]).unwrap();
+    assert_eq!(
+        c,
+        UserImportCounts {
+            added: 1,
+            updated: 3,
+            unchanged: 0
+        },
+        "同批第二次出现的新键按「已存在」判定：权重更大 ⇒ updated"
+    );
+    assert_eq!(r.user_word("py", "nihao", "你好").unwrap().boundary, 0b101);
+    assert_eq!(r.user_word("py", "xin", "新").unwrap().weight, 5);
+}
+
+/// 审查 I1：大批导入线性——6 万条一次导入（含折回进文本）不能是平方级。
+#[test]
+fn large_import_is_not_quadratic() {
+    let env = Env::new("bigimport");
+    let r = env.open(&["wb"]);
+    let rows: Vec<UserWord> = (0..60_000)
+        .map(|i| row(&format!("c{i:05}"), &format!("词{i:05}"), 1))
+        .collect();
+    let t = std::time::Instant::now();
+    let c = r.import_user_rows("wb", &rows).unwrap();
+    assert!(
+        t.elapsed() < std::time::Duration::from_secs(5),
+        "{:?}",
+        t.elapsed()
+    );
+    assert_eq!(c.added, 60_000);
+    assert_eq!(r.count_user_words("wb"), 60_000);
+}
+
+/// 审查 I3 / I4：文本隔离（头部坏）时导入整体拒绝、不留暂存；清空（用户显式的整体替换）照样成功。
+#[test]
+fn isolated_text_rejects_import_but_clear_still_replaces() {
+    let env = Env::new("isolated");
+    let r = env.open(&["wb"]);
+    r.add_user_word("wb", "a", "工", 1, 0).unwrap();
+    flush(&r, "wb");
+    let f = env.dir.join("user").join("wb").join("user.dict.yaml");
+    std::fs::write(&f, "---\nname: [\n...\n").unwrap();
+    r.add_user_word("wb", "b", "了", 1, 0).unwrap(); // 隔离期间的写入：留在 delta
+    assert!(r.import_user_rows("wb", &[row("c", "以", 1)]).is_err());
+    assert!(r.user_word("wb", "c", "以").is_none(), "导入失败不留暂存");
+    r.clear_user_words("wb").unwrap();
+    assert_eq!(r.count_user_words("wb"), 0);
+    assert!(
+        !std::fs::read_to_string(&f).unwrap().contains("name: ["),
+        "整文件替换"
+    );
+    drop(r);
+    let r = env.open(&["wb"]);
+    assert_eq!(r.count_user_words("wb"), 0, "隔离期间暂存的写入不复活");
+}
+
+/// 审查 I2：方案 id 是路径分量，不能越出状态 / 文本目录。
+#[test]
+fn unsafe_schema_ids_are_rejected() {
+    let env = Env::new("schemaid");
+    let r = env.open(&[]);
+    for bad in ["../evil", "a/b", "a\\b", "..", ".", "", "x:y", " x", "x."] {
+        assert!(r.add_user_word(bad, "a", "工", 1, 0).is_err(), "{bad:?}");
+    }
+    assert!(!env.dir.join("evil").exists());
+    assert!(r.add_user_word("wubi86_pinyin", "a", "工", 1, 0).is_ok());
+    assert!(r.add_user_word("我的方案", "a", "工", 1, 0).is_ok());
 }

@@ -345,3 +345,44 @@ fn incr_only_fold_does_not_rebuild_segment() {
     assert_eq!(ud.pending(Target::User, "py"), 0);
     assert_eq!(wdats(&d), g1);
 }
+
+/// 后台节拍：没有新写入也会把空闲够久的文本目标折回；引擎释放后线程自行退出。
+#[test]
+fn ticker_folds_idle_text_without_further_writes() {
+    let (_d, ud, file) = setup("ticker");
+    bind(&ud, &file);
+    up(&ud, "nihao", "你好", 9, 0b101);
+    ud.set_text_idle_for_test(std::time::Duration::ZERO);
+    let h = ud
+        .spawn_ticker(std::time::Duration::from_millis(20))
+        .unwrap();
+    let t0 = std::time::Instant::now();
+    while !file.is_file() && t0.elapsed() < std::time::Duration::from_secs(5) {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(file.is_file(), "节拍应把空闲的文本目标折回");
+    drop(ud);
+    let t0 = std::time::Instant::now();
+    while !h.is_finished() && t0.elapsed() < std::time::Duration::from_secs(5) {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(h.is_finished(), "引擎释放后节拍线程退出");
+}
+
+/// 审查 M4：绑定一个从没用过的方案（文件不在、没有段）不建空快照目录。
+#[test]
+fn binding_an_unused_schema_creates_nothing() {
+    let (d, ud, _file) = setup("unused");
+    ud.bind_text(
+        Target::User,
+        "never",
+        TextBinding {
+            path: d.join("user").join("never").join("user.dict.yaml"),
+            name: "never.user".into(),
+            lowercase: false,
+            syllable_codes: false,
+        },
+    )
+    .unwrap();
+    assert!(!d.join("state").join("never").exists());
+}

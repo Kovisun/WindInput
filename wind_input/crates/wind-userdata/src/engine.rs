@@ -23,6 +23,23 @@ pub const JOURNAL_MAX_BYTES: u64 = 8 << 20;
 /// 文本目标的空闲折回间隔（§3.5：文本目标的操作来自用户主动动作，空闲 30 秒再写回）。
 pub const TEXT_IDLE: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// 方案 id 会成为状态目录 / 文本目录下的一个路径分量：拒绝不能安全充当单个分量的 id（空、`.` /
+/// `..`、含路径分隔符或 Windows 保留字符、控制字符、首尾是点或空格、过长）。不限定 ASCII——用户自建
+/// 方案的 id 可以是中文。
+pub fn check_schema_id(schema: &str) -> anyhow::Result<()> {
+    let bad = schema.is_empty()
+        || schema.len() > 128
+        || schema
+            .chars()
+            .any(|c| c.is_control() || "/\\:*?\"<>|".contains(c))
+        || schema.starts_with(['.', ' '])
+        || schema.ends_with(['.', ' ']);
+    if bad {
+        bail!("非法方案 id：{schema:?}");
+    }
+    Ok(())
+}
+
 /// 文本目标折回失败（隔离 / 读不了 / 编辑器竞争）后的退避：首次 30 秒，逐次翻倍，封顶 30 分钟。
 fn text_retry_backoff(fails: u32) -> std::time::Duration {
     TEXT_IDLE
@@ -108,6 +125,8 @@ pub struct UserData {
     last_write: Mutex<BTreeMap<TargetKey, std::time::Instant>>,
     /// 文本目标折回失败的退避：(连续失败次数, 下次可重试时刻)。成功即清。
     text_retry: Mutex<BTreeMap<TargetKey, (u32, std::time::Instant)>>,
+    /// 文本目标的空闲时长（默认 `TEXT_IDLE`；测试可改）。
+    text_idle: Mutex<std::time::Duration>,
     view: RwLock<Arc<View>>,
     state: Mutex<State>,
     lock: Option<Lock>,
@@ -445,7 +464,7 @@ impl UserData {
         // 回放：每条记录只在 seq 高于「该目标快照内嵌水位」与「state 记的折回水位」两者的
         // 较大者时进 delta——state 丢了也不会把已折回的记录再应用一遍（§3.6）。快照坏了的
         // 目标水位不可信，整份回放。
-        let mut delta = Delta::default();
+        let mut replayed = Vec::new();
         for r in records {
             let key = (r.target, r.schema.clone());
             let wm = if broken.contains(&key) {
@@ -462,9 +481,10 @@ impl UserData {
             if r.seq > wm
                 && let Some(e) = entry_from_record(&r)
             {
-                delta = delta.with(e);
+                replayed.push(e);
             }
         }
+        let delta = Delta::default().with_all(replayed);
         Ok(UserData {
             dirs,
             journal: Mutex::new(journal),
@@ -474,6 +494,7 @@ impl UserData {
             text_bindings: Mutex::new(BTreeMap::new()),
             last_write: Mutex::new(BTreeMap::new()),
             text_retry: Mutex::new(BTreeMap::new()),
+            text_idle: Mutex::new(TEXT_IDLE),
             view: RwLock::new(Arc::new(View {
                 snapshots,
                 delta: Arc::new(delta),
@@ -530,6 +551,9 @@ impl UserData {
         let Some(j) = guard.as_mut() else {
             bail!("只读模式");
         };
+        for op in ops {
+            check_schema_id(&op.schema)?;
+        }
         let now = now_ms();
         let mut recs = Vec::with_capacity(ops.len());
         let mut entries = Vec::with_capacity(ops.len());
@@ -558,10 +582,7 @@ impl UserData {
             seqs.push(rec.seq);
         }
         let cur = self.view();
-        let mut delta = (*cur.delta).clone();
-        for e in entries {
-            delta = delta.with(e);
-        }
+        let delta = cur.delta.with_all(entries);
         self.publish(View {
             snapshots: cur.snapshots.clone(),
             delta: Arc::new(delta),
@@ -586,6 +607,7 @@ impl UserData {
         if self.readonly() {
             bail!("只读模式");
         }
+        check_schema_id(schema)?;
         if self.text_owned(target, schema) {
             bail!(
                 "归文本管的目标不走 fold_with（清空 / 导入用 rewrite_text；未绑定时先 bind_text），免得绕过真源"
@@ -684,6 +706,7 @@ impl UserData {
     /// 绑定文本文件，随即 `sync_text` 一次（文件比段新就由文本重建）。同步失败（隔离 / 读不了）
     /// 时绑定照样生效，之后的折回 / 同步会重试。只读实例只登记绑定、不同步（它不写快照与 state）。
     pub fn bind_text(&self, target: Target, schema: &str, b: TextBinding) -> anyhow::Result<()> {
+        check_schema_id(schema)?;
         self.text_bindings
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -926,6 +949,10 @@ impl UserData {
         if old_fp.as_deref() == Some(fp.as_str()) && snap_wm.is_some() {
             return Ok(false);
         }
+        if cur.is_none() && snap_wm.is_none() && old_fp.is_none() {
+            // 从没用过的方案：没有文件、没有段，什么都不建（查询一个方案不该留下空目录）
+            return Ok(false);
+        }
         let entries = match &cur {
             Some((bytes, _)) => Self::text_entries(bytes, &b)?,
             None => Vec::new(),
@@ -950,13 +977,35 @@ impl UserData {
             .text_binding(target, schema)
             .ok_or_else(|| anyhow::anyhow!("目标未绑定文本"))?;
         let _f = self.fold_lock.lock().unwrap_or_else(|e| e.into_inner());
-        self.fold_text_locked(&b, target, schema)?;
+        // 先把待处理操作折回，迁移 / 导入的整写才不会盖掉它们。折回失败（文本隔离 / 编辑器竞争）
+        // 不拦整体替换：`rows` 就是新全集（清空、还原是用户显式的整体动作），下面按水位把这些
+        // 操作一并摘掉——否则文件一坏，清空 / 备份还原就永远做不成。
+        if let Err(e) = self.fold_text_locked(&b, target, schema) {
+            tracing::warn!("整文件替换前折回失败，待处理操作由新全集取代：{e:#}");
+        }
         let (upto, _) = self.upto_and_view()?;
         let content = crate::text::render(&b.name, b.syllable_codes, rows);
         crate::text::fold::commit_text(&b.path, content.as_bytes(), None)?;
         let entries = Self::text_entries(content.as_bytes(), &b)?;
         let fp = crate::text::fold::fingerprint(Some(content.as_bytes()));
         self.install_text_segment(target, schema, entries, upto, Some(upto), fp, Some(upto))
+    }
+
+    /// 文本目标的文件此刻能否往里补丁（不存在 = 能，会新建；读不了 / 解析不了 = 不能）。批量写入
+    /// 之前先问一声：文件隔离时整批拒绝，不把一大批操作留在 delta 里干等。
+    pub fn check_text_writable(&self, target: Target, schema: &str) -> anyhow::Result<()> {
+        let Some(b) = self.text_binding(target, schema) else {
+            return Ok(());
+        };
+        if let Some((bytes, _)) = crate::text::fold::read_text(&b.path)? {
+            crate::text::parse(&bytes, &b.path, b.lowercase).map_err(|e| {
+                anyhow::anyhow!(
+                    "用户词文本 {} 无法解析（{e:?}），请先修复或删除它",
+                    b.path.display()
+                )
+            })?;
+        }
+        Ok(())
     }
 
     /// 已绑定、有待处理操作、且距最后一次写入 ≥ `idle` 的文本目标。
@@ -1155,7 +1204,7 @@ impl UserData {
             .targets()
             .iter()
             .any(|k| v.delta.pending(k.0, &k.1) >= threshold && !self.text_owned(k.0, &k.1))
-            || !self.idle_text_targets(TEXT_IDLE).is_empty()
+            || !self.idle_text_targets(self.text_idle()).is_empty()
             || self.journal_len() > max_bytes
     }
 
@@ -1173,11 +1222,44 @@ impl UserData {
                 n += 1;
             }
         }
-        n += self.maintain_text_idle(TEXT_IDLE)?;
+        n += self.maintain_text_idle(self.text_idle())?;
         if self.journal_len() > max_bytes {
             self.compact()?;
         }
         Ok(n)
+    }
+
+    fn text_idle(&self) -> std::time::Duration {
+        *self.text_idle.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    #[doc(hidden)]
+    pub fn set_text_idle_for_test(&self, d: std::time::Duration) {
+        *self.text_idle.lock().unwrap_or_else(|e| e.into_inner()) = d;
+    }
+
+    /// 低频后台节拍：每 `every` 看一次是否需要维护（含文本目标空闲折回），需要就起后台折回。
+    /// 只持 `Weak`，引擎释放后下一拍退出。只读实例不起。
+    pub fn spawn_ticker(
+        self: &Arc<Self>,
+        every: std::time::Duration,
+    ) -> Option<std::thread::JoinHandle<()>> {
+        if self.readonly() {
+            return None;
+        }
+        let weak = Arc::downgrade(self);
+        std::thread::Builder::new()
+            .name("userdata-tick".into())
+            .spawn(move || {
+                loop {
+                    std::thread::sleep(every);
+                    let Some(me) = weak.upgrade() else { return };
+                    if me.needs_maintain() {
+                        me.spawn_maintain();
+                    }
+                }
+            })
+            .ok()
     }
 
     pub fn maintain(&self) -> anyhow::Result<usize> {

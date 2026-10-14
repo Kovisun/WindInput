@@ -25,7 +25,7 @@ pub const CURRENT_VERSION: u32 = 1;
 /// 常规输入根本填不满缓存，只有设置页的词库列举（全表顺序扫）会填一次。故本值真正的
 /// 作用是**给超大词库一个显式上界**（50 万词的库约 90 MB），而不是解决 19 万词的内存。
 ///
-/// ## 取值：由 `perf_cache_size.rs` 双向标定
+/// ## 取值：由 `perf_cache_size.rs` 双向标定（用户词 P2 迁出 redb 后该探针已删，结论留作记录）
 ///
 /// 读路径（简拼召回 / 前缀补全 / 全量列举）对本值**几乎不敏感**：redb 2.x 不是 mmap，
 /// 未命中走 `read` 系统调用、由 OS 页缓存供数据，是 µs 级 syscall 而非磁盘寻道——
@@ -49,6 +49,9 @@ pub const SCAN_RECLAIM_IDLE: std::time::Duration = std::time::Duration::from_sec
 /// 回收线程的采样拍长。短档只有 3 秒，拍长须远小于它。只在有东西待回收时按它醒；
 /// 闲置时按它的 [`IDLE_TICK_FACTOR`] 倍睡（生产 10 秒），来了标记就被叫醒。
 pub const RECLAIM_TICK: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// 用户数据后台节拍：文本目标（用户词）空闲折回不依赖下一次写入，停手后这么久之内一定写回。
+pub const USERDATA_TICK: std::time::Duration = std::time::Duration::from_secs(5);
 /// 闲置慢拍 = `tick` × 本值。
 const IDLE_TICK_FACTOR: u32 = 10;
 /// [`Store::mark_scan_pending_rows`] 的门槛：后台扫描走过的行数不到它就不标记。
@@ -69,15 +72,15 @@ fn open_db(path: &Path, cache_bytes: usize) -> Result<Database, redb::DatabaseEr
 }
 
 // ── 表定义（key 编码见 store.md §2：复合 key 带 schema 前缀，redb 扁平）──
-/// 用户词：key = "{schema}\0{code}\0{text}"，value = 序列化记录
+/// 用户词（旧表）：key = "{schema}\0{code}\0{text}"，value = 序列化记录。P2 起真源是
+/// `user/<schema>/user.dict.yaml`，本表只供迁移读、只读保留到 P4。
 pub(crate) const USER_WORDS: TableDefinition<&str, &[u8]> = TableDefinition::new("user_words");
 /// 临时词：同上
 pub(crate) const TEMP_WORDS: TableDefinition<&str, &[u8]> = TableDefinition::new("temp_words");
 /// 用户词**简拼索引**：key = `"{schema}\0{group}\0{code}\0{text}"`，value 空。
 /// 键的构成、分组规则与维护契约全在 [`crate::abbrev_index`]。
 ///
-/// 新表无需迁移：`init_tables` 在写事务里 `open_table` 即创建；存量数据的索引由
-/// [`Store::rebuild_abbrev_indexes`] 在首次发现索引为空时补建。
+/// P2 起退役：用户词简拼走引擎的分组索引，本表只读保留到 P4。
 pub(crate) const USER_ABBREV: TableDefinition<&str, &[u8]> = TableDefinition::new("user_abbrev");
 /// 临时词**简拼索引**：与 [`USER_ABBREV`] 同构，索引 `TEMP_WORDS`。
 ///
@@ -153,11 +156,14 @@ enum Dropped {
     Busy,
 }
 
-/// 引擎状态目录与目录 id（设计 §2.1 / §3.7）。生产 = `local_dir()/state` + `meta.toml` 的 dir_id。
+/// 引擎状态目录、目录 id 与用户词文本目录（设计 §2.1 / §3.7）。生产 = `local_dir()/state/runtime/<dir_id>`
+/// + `meta.toml` 的 dir_id + `<userdata>/user`。
 #[derive(Clone, Debug)]
 pub struct StateLoc {
     pub state_dir: PathBuf,
     pub dir_id: String,
+    /// 用户词文本的根：`<text_dir>/<schema>/user.dict.yaml`。
+    pub text_dir: PathBuf,
 }
 
 /// `Store::open(path)` 的引擎状态目录：redb 文件名后追加 `.state`。测试与工具用；生产走
@@ -168,6 +174,13 @@ pub fn derived_state_dir(path: &Path) -> PathBuf {
     PathBuf::from(s)
 }
 
+/// `Store::open(path)` 的用户词文本目录：redb 文件名后追加 `.user`（与派生状态目录一起随新库清空）。
+pub fn derived_text_dir(path: &Path) -> PathBuf {
+    let mut s = path.as_os_str().to_os_string();
+    s.push(".user");
+    PathBuf::from(s)
+}
+
 /// 存储引擎（redb）。`db` 为 None 表示已暂停（pause，释放文件锁供热替换）。
 pub struct Store {
     path: PathBuf,
@@ -175,6 +188,8 @@ pub struct Store {
     runtime: std::sync::Arc<wind_userdata::runtime::Runtime>,
     /// 引擎状态目录（迁移标记也在这里）。
     state_dir: PathBuf,
+    /// 用户词文本根目录（P2 起用户词的真源）。
+    text_dir: PathBuf,
     db: Mutex<Option<Database>>,
     /// 本库的页缓存上限；`resume` 重开时要用同一个值，故随实例存着。
     cache_bytes: usize,
@@ -232,15 +247,17 @@ impl Store {
         Self::open_inner(path.as_ref(), DEFAULT_CACHE_SIZE_BYTES, loc)
     }
 
-    /// 指定页缓存上限打开（状态目录同 [`Self::open`]）。供 `perf_cache_size.rs` 标定用。
+    /// 指定页缓存上限打开（状态目录同 [`Self::open`]）。
     pub fn open_with_cache_size(
         path: impl AsRef<Path>,
         cache_bytes: usize,
     ) -> anyhow::Result<Self> {
         let path = path.as_ref();
         let derived = derived_state_dir(path);
+        let text_dir = derived_text_dir(path);
         if !path.exists() {
             let _ = std::fs::remove_dir_all(&derived);
+            let _ = std::fs::remove_dir_all(&text_dir);
         }
         Self::open_inner(
             path,
@@ -248,6 +265,7 @@ impl Store {
             StateLoc {
                 state_dir: derived,
                 dir_id: "derived".into(),
+                text_dir,
             },
         )
     }
@@ -271,6 +289,7 @@ impl Store {
             path,
             runtime,
             state_dir: state_dir.clone(),
+            text_dir: loc.text_dir.clone(),
             db: Mutex::new(Some(db)),
             cache_bytes,
             touched: std::sync::atomic::AtomicBool::new(false),
@@ -283,12 +302,16 @@ impl Store {
             words_epoch: std::sync::atomic::AtomicU64::new(0),
         };
         store.run_migrations()?;
-        store.backfill_abbrev_indexes();
+        store.bind_user_texts_at_open();
         if let Err(e) = store.migrate_p1_if_needed(&state_dir) {
             // 迁移失败不阻断启动：标记没写，下次启动重做（与引擎已有数据合并，这一轮的写入
             // 不会被旧表盖掉）；本次运行只能看到已迁成的那些目标。协调器据 `migrated_p1()`
             // 决定是否升 format_version——没迁完就不升，旧版本回退后仍可用旧表。
             warn!("P1 迁移失败，下次启动重试：{e}");
+        }
+        if let Err(e) = store.migrate_p2_if_needed(&state_dir) {
+            // 同 P1：不阻断启动，标记没写下次重做（合并，幂等）；没迁完不升 format_version
+            warn!("P2 迁移失败，下次启动重试：{e}");
         }
         info!(
             "Store opened: {} (v{})",
@@ -305,6 +328,72 @@ impl Store {
             .is_file()
     }
 
+    pub fn user_text_dir(&self) -> &Path {
+        &self.text_dir
+    }
+
+    /// 某数据方案的用户词文本：`<text_dir>/<schema>/user.dict.yaml`。
+    pub fn user_text_path(&self, schema: &str) -> PathBuf {
+        self.text_dir.join(schema).join("user.dict.yaml")
+    }
+
+    /// 该方案的用户词绑定到文本（已绑定即返回）。同步失败（文本隔离 / 读不了）只 WARN：绑定照样
+    /// 登记，之后的折回 / 同步会重试；查询按已有段与 delta 提供。
+    pub(crate) fn ensure_user_text(&self, schema: &str) {
+        use wind_userdata::record::Target;
+        let ud = self.runtime.data();
+        if ud.text_binding(Target::User, schema).is_some() {
+            return;
+        }
+        let b = wind_userdata::engine::TextBinding {
+            path: self.user_text_path(schema),
+            name: format!("{schema}.user"),
+            lowercase: false,
+            syllable_codes: schema == "pinyin",
+        };
+        if let Err(e) = ud.bind_text(Target::User, schema, b) {
+            warn!("用户词文本 {schema} 同步失败（按已有数据提供查询）：{e:#}");
+        }
+    }
+
+    /// 有用户词的方案：用户目录下已有文本的 ∪ 引擎里有用户词数据的。
+    pub(crate) fn user_text_schemas(&self) -> std::collections::BTreeSet<String> {
+        let mut schemas: std::collections::BTreeSet<String> = self
+            .runtime
+            .data()
+            .keys()
+            .into_iter()
+            .filter(|(t, _)| *t == wind_userdata::record::Target::User)
+            .map(|(_, s)| s)
+            .collect();
+        if let Ok(rd) = std::fs::read_dir(&self.text_dir) {
+            for e in rd.flatten() {
+                if e.path().join("user.dict.yaml").is_file()
+                    && let Some(n) = e.file_name().to_str()
+                {
+                    schemas.insert(n.to_string());
+                }
+            }
+        }
+        schemas
+    }
+
+    /// 打开时把已有用户词的方案都绑定上（重开后归文本管的目标要绑定了才能折回）。
+    fn bind_user_texts_at_open(&self) {
+        for s in self.user_text_schemas() {
+            self.ensure_user_text(&s);
+        }
+    }
+
+    /// 起用户数据后台节拍（生产由协调器起；测试 / 工具不起，靠显式折回）。只读实例不起。
+    pub fn spawn_userdata_ticker(&self, every: std::time::Duration) {
+        let _ = self.runtime.data().spawn_ticker(every);
+    }
+
+    pub(crate) fn state_dir(&self) -> &Path {
+        &self.state_dir
+    }
+
     /// 运行时数据引擎。
     pub fn runtime(&self) -> &std::sync::Arc<wind_userdata::runtime::Runtime> {
         &self.runtime
@@ -316,35 +405,6 @@ impl Store {
         let d = self.runtime.data();
         if d.needs_maintain() {
             d.spawn_maintain();
-        }
-    }
-
-    /// 存量库补建简拼索引：升级到带索引的版本时，老库里的词一条索引都没有，
-    /// 不补建则简拼**静默召不回**（比慢更糟）。
-    ///
-    /// 放在 `open` 里而不是交给调用方判断，是因为 `Store::open` 有多个入口（协调器、
-    /// 设置页、备份还原、各类测试）——留给调用方就等于留一个「忘了调」的口子，
-    /// 而这类遗漏的表现是静默失效。
-    ///
-    /// 常态开销 O(1)：索引条目数与主表条目数恒等（每条词正好一条索引），
-    /// 故只有「索引空而主表非空」时才会真正扫一遍。失败只记日志不阻断启动——
-    /// 简拼召不回是退化，打不开词库是故障，不该用后者换前者。
-    fn backfill_abbrev_indexes(&self) {
-        let need = self
-            .with_db(|db| {
-                use redb::ReadableTableMetadata;
-                let txn = db.begin_read()?;
-                let idx = txn.open_table(USER_ABBREV)?.len()?;
-                let main = txn.open_table(USER_WORDS)?.len()?;
-                Ok(idx == 0 && main > 0)
-            })
-            .unwrap_or(false);
-        if !need {
-            return;
-        }
-        match self.rebuild_abbrev_indexes() {
-            Ok(n) => info!("简拼索引补建完成：{} 条", n),
-            Err(e) => warn!("简拼索引补建失败（简拼召回将失效）：{}", e),
         }
     }
 
@@ -841,8 +901,9 @@ impl Store {
         let mut set = std::collections::BTreeSet::new();
         self.with_db(|db| {
             let txn = db.begin_read()?;
-            // 临时词 / 词频 / 联想历史 P1 起在运行时引擎（旧表只读保留，不再代表现状）
-            for table in [USER_WORDS, SHADOW] {
+            // 临时词 / 词频 / 联想历史（P1）与用户词（P2）在运行时引擎，`runtime.schemas()` 已含；
+            // 旧表只读保留，不再代表现状
+            for table in [SHADOW] {
                 let t = txn.open_table(table)?;
                 for item in t.range::<&str>(..)? {
                     let (k, _) = item?;
@@ -944,6 +1005,7 @@ mod tests {
         let loc = || StateLoc {
             state_dir: st.clone(),
             dir_id: "dir-x".into(),
+            text_dir: st.join("user"),
         };
         let s = Store::open_with_state(&p, loc()).unwrap();
         s.runtime().learn_temp("py", "a", "甲", 1, 0).unwrap();
@@ -955,5 +1017,37 @@ mod tests {
             "显式状态目录不随 redb 清空"
         );
         assert!(!derived_state_dir(&p).exists());
+    }
+
+    /// 一次很长的 `with_db`（单事务导入、冷扫描）期间不许回收；空闲要从它**结束**时算起——
+    /// 否则它一结束回收线程就立刻关库重开（还会与批量写之后的立即回收撞在一起）。
+    /// （原在 `tests/scan_reclaim.rs`，借用户词遍历的回调制造长操作；P2 起用户词不经 redb，挪到
+    /// 这里直接用 `with_db`。）
+    #[test]
+    fn a_long_operation_is_not_idle_time() {
+        use std::time::Duration;
+        let tick = Duration::from_millis(20);
+        let scan_idle = Duration::from_millis(100);
+        let p = tmp_db("long_op");
+        let _ = std::fs::remove_file(&p);
+        let s = std::sync::Arc::new(Store::open(&p).unwrap());
+        s.spawn_idle_cache_reclaimer(Duration::from_secs(3600), scan_idle, tick);
+        s.mark_scan_pending();
+        s.with_db(|_| {
+            std::thread::sleep(scan_idle * 4);
+            Ok(())
+        })
+        .unwrap();
+        std::thread::sleep(scan_idle / 2);
+        assert_eq!(
+            s.page_cache_drops(),
+            0,
+            "长操作刚结束、还没空闲满短档，不该回收"
+        );
+        let t0 = std::time::Instant::now();
+        while s.page_cache_drops() < 1 && t0.elapsed() < scan_idle * 20 {
+            std::thread::sleep(tick / 2);
+        }
+        assert!(s.page_cache_drops() >= 1, "结束后空闲满短档才回收");
     }
 }

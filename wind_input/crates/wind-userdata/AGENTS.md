@@ -46,6 +46,9 @@ P1b 起 `wind-store::Store` 持有一个 `Runtime`，临时词 / 草稿 / 词频
 - **文本目标**（`bind_text` 绑定的 (目标, 方案)）：`fold` 自动走 `fold_text`（§3.5 次序：读 + 指纹 → 补丁 → tmp + fsync → 复核原文件指纹 → `.bak` + rename + fsync 目录 → 由文本重建段 → 换入 → state 记 `text_fp`）；`fold_with` 对它们直接报错（清空 / 导入用 `rewrite_text` / 逐条 Upsert）。手改文件后 `sync_text` 由文本重建段，水位不回退、已折回记录不回放、未折回的操作仍叠加。文本目标不按条数折回，空闲 `TEXT_IDLE`（30 s）后折回。计数 / 时间（Incr / Touch）不进文本，只有它们且文件未被手改时折回不重建段。
 - **归文本管 = 已绑定，或 state 记过 `text_fp`**：重开后绑定前，这类目标 `fold` / `fold_with` 报错，`maintain` / `compact` 跳过——它们的操作只能绑定后经 `fold_text` 进文本。所以接线时 `bind_text` 要先于对它的显式折回。只读实例 `bind_text` 只登记、不同步。
 - **文本折回失败**（隔离 / 读不了 / 编辑器竞争）只拦该目标：WARN + 退避（30 s 起翻倍，封顶 30 min），别的目标与压实照常。
+- **空闲折回靠节拍**：`spawn_ticker(every)`（只持 `Weak`、只读不起）每拍看 `needs_maintain`，需要就 `spawn_maintain`——没有后续写入时文本也会在空闲后写回。生产由 `Store::spawn_userdata_ticker` 起。
+- **拼音文本里单个汉字的无空格码 = 单音节（0b1）**：空格载体表达不了 0b1，一个汉字只对应一个音节；非汉字单字符（emoji）仍为 0。
+- **导入分类**：`classify_user_rows` / `user_row_effect` 与 `import_user_rows` 同一判据（权重更大或补上 0 边界 = updated；同批重复键按「本批已合并」判），预览与落盘一致。
 - **写出的文件正文首行是 `# no comment`**（文本列在行首，`#` 开头的词不能被读成注释）；往没有它的旧文件追加 `#` 开头的行时补一行。
 - **sidecar 每行带 `order`**（28 字节，头 version 2）：文本目标 = 行号，用户词层的 `natural_order` 取它；`order` 与 wdat 叶内序号是两回事（后者仍是 sidecar 定位的依据）。
 - **时间单位**：sidecar 与领域 API 是 unix 秒（同 `wind-store`）；日志 `ts_ms` 是毫秒。

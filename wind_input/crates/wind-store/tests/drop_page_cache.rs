@@ -12,7 +12,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use wind_store::{Store, wdict::WordIo};
+use wind_store::Store;
 
 fn store(tag: &str) -> (Arc<Store>, std::path::PathBuf) {
     let p = std::env::temp_dir().join(format!("wind_dpc_{}_{tag}.redb", std::process::id()));
@@ -20,15 +20,18 @@ fn store(tag: &str) -> (Arc<Store>, std::path::PathBuf) {
     (Arc::new(Store::open(&p).expect("开库")), p)
 }
 
-fn rows(n: usize) -> Vec<WordIo> {
+/// 负载用短语表：P2 起用户词不在 redb，页缓存机制要拿仍在 redb 的表来测。
+fn rows(n: usize) -> Vec<(String, String)> {
     (0..n)
-        .map(|i| WordIo {
-            code: format!("a{i:04}"),
-            text: format!("词{i:04}"),
-            weight: 100,
-            count: 0,
-            boundary: None,
-        })
+        .map(|i| (format!("a{i:04}"), format!("词{i:04}")))
+        .collect()
+}
+
+fn listed(s: &Store) -> Vec<(String, String)> {
+    s.list_phrases()
+        .expect("扫")
+        .into_iter()
+        .map(|p| (p.code, p.text))
         .collect()
 }
 
@@ -36,19 +39,19 @@ fn rows(n: usize) -> Vec<WordIo> {
 #[test]
 fn dropping_the_cache_keeps_every_row() {
     let (s, p) = store("rows");
-    s.import_user_words("py", &rows(500)).expect("导入");
-    let before = s.search_user_words_prefix("py", "", 0).expect("扫");
+    s.import_phrases_appending(&rows(500), 100).expect("导入");
+    let before = listed(&s);
 
     s.drop_page_cache().expect("丢缓存");
 
-    let after = s.search_user_words_prefix("py", "", 0).expect("扫");
+    let after = listed(&s);
     assert_eq!(after, before, "丢缓存前后必须逐条相同");
     assert_eq!(after.len(), 500);
     assert!(!s.is_paused(), "结束时不得停在暂停态");
 
     // 还能继续写。
-    s.add_user_word("py", "zz", "新词", 100, 0).expect("写");
-    assert_eq!(s.count_user_words("py").expect("计数"), 501);
+    s.add_phrase("zz", "新词", 0, 100).expect("写");
+    assert_eq!(listed(&s).len(), 501);
 
     let _ = std::fs::remove_file(&p);
 }
@@ -68,7 +71,7 @@ fn dropping_the_cache_keeps_every_row() {
 #[test]
 fn concurrent_reads_survive_a_cache_drop() {
     let (s, p) = store("concurrent");
-    s.import_user_words("py", &rows(2000)).expect("导入");
+    s.import_phrases_appending(&rows(2000), 100).expect("导入");
 
     let stop = Arc::new(AtomicBool::new(false));
     let failures = Arc::new(AtomicUsize::new(0));
@@ -84,7 +87,7 @@ fn concurrent_reads_survive_a_cache_drop() {
             );
             std::thread::spawn(move || {
                 while !stop.load(Ordering::Relaxed) {
-                    match s.search_user_words_prefix("py", "a01", 10) {
+                    match s.list_user_phrases_paged(Some("a01"), 0, 10) {
                         Ok(_) => reads.fetch_add(1, Ordering::Relaxed),
                         Err(_) => failures.fetch_add(1, Ordering::Relaxed),
                     };

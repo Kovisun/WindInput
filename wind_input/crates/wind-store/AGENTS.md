@@ -5,18 +5,20 @@
 
 ## Purpose
 
-用户数据门面。用户词、Shadow 规则、全局用户短语仍在 redb；**临时词、草稿、词频、联想历史自 P1b 起委托给 `wind-userdata` 的 `Runtime`**（门面方法签名不变，调用方与测试零改动；设计 `docs/design/user-data-storage-redesign.md` §6、计划 `docs/design/user-data-storage-plan-p1b.md`）。三个查询层 `StoreUserLayer` / `StoreTempLayer` / `StoreDraftLayer` 也在本 crate（后两者是引擎层的薄包装）。
+用户数据门面。Shadow 规则、全局用户短语仍在 redb；**临时词、草稿、词频、联想历史自 P1b 起委托给 `wind-userdata` 的 `Runtime`，用户词自 P2b 起真源是 `user/<schema>/user.dict.yaml`、同样委托 `Runtime`**（门面方法签名不变，调用方与测试零改动；设计 `docs/design/user-data-storage-redesign.md` §6、计划 `user-data-storage-plan-p1b.md` / `-p2b.md`）。三个查询层 `StoreUserLayer` / `StoreTempLayer` / `StoreDraftLayer` 也在本 crate，都是引擎层的薄包装。
 
 ## Key Files
 
 | File | Description |
 |------|-------------|
 | `src/store.rs` | `Store` 核心：redb `Database` 包装；7 张扁平 table 定义；`with_db` 闭包是所有读写的唯一安全入口；`pause`/`resume` 释放并重开文件锁（Windows 热替换）；版本迁移框架 |
-| `src/user_words.rs` | 用户词 CRUD；key=`schema\0code\0text`；value 定长 16B（weight i32 + count u32 + created_at i64）；`add_user_word` 重复取 max 权重；`on_word_selected` 阈值累加调权 |
-| `src/temp_words.rs` | 临时学习词：门面委托 `Runtime`；`promote_temp_word` 先写 redb 用户词再删引擎临时词 |
+| `src/user_words.rs` | 用户词：门面委托 `Runtime`（文本 + 引擎）；`count` / `created_at` 恒 0；`sync_user_text(s)` / `reload_user_text_paths`（`dict.reload`）/ `flush_user_data`（`dict.flush`）；旧表编解码只剩迁移用 |
+| `src/temp_words.rs` | 临时学习词：门面委托 `Runtime`；`promote_temp_word` 先写用户词再删临时词 |
+| `src/abbrev_index.rs` | 用户词 / 临时词简拼：包引擎层 `search_abbrev`（redb 倒排表 P2 起退役） |
 | `src/draft_words.rs` / `src/assoc_history.rs` | 草稿、联想历史：门面委托 `Runtime`；`dec_draft` 只剩迁移读旧表用 |
-| `src/store_layer.rs` | 三个 `DictLayer`：`StoreUserLayer`（redb）、`StoreTempLayer` / `StoreDraftLayer`（包 `UserDataTempLayer` / `UserDataDraftLayer`） |
-| `src/migrate_p1.rs` | 首次打开时把旧表 temp_words / draft_words / freq / assoc_history 按目标整体替换进引擎，完成写 `state/migrated-p1`；`legacy_counts` 供 `examples/p1_migrate_check.rs` 比对 |
+| `src/store_layer.rs` | 三个 `DictLayer`：包 `UserDataUserLayer` / `UserDataTempLayer` / `UserDataDraftLayer` |
+| `src/migrate_p1.rs` | 首次打开时把旧表 temp_words / draft_words / freq / assoc_history 合并进引擎，完成写 `state/migrated-p1`；`legacy_counts` 供 `examples/p1_migrate_check.rs` 比对 |
+| `src/migrate_p2.rs` | 首次打开时把旧表 user_words 迁成文本（文件不在整写、在则逐条合并），完成写 `state/migrated-p2`；`examples/p2_migrate_check.rs` 逐码比对 |
 | `src/phrases.rs` | 用户短语（**全局，不分方案**）；key=`code\0text`；`set_phrase_enabled` 软删除（记录保留，`enabled=false`） |
 | `src/shadow.rs` | `ShadowRecord`（pinned/deleted）规则；内存 `ShadowStore`（JSON 文件，coordinator 过渡用）+ redb `Store` 扩展方法；`cand_id` 精准去重（动态短语 R2） |
 | `src/freq.rs` | `FreqRecord`；门面委托 `Runtime`；`FreqProfile` 拼音衰减分；legacy `FreqTracker`（过渡期文件式，待移除）；`dec_freq` 只剩迁移读旧表用 |
@@ -29,7 +31,9 @@
 
 - **临时词 / 草稿 / 词频 / 联想历史不在 redb 里了**（P1b）：这四组门面方法委托 `self.runtime()`，**不经 `with_db`**——按键路径不再碰 redb Mutex（`temp_hot_path_does_not_touch_redb` / `draft_freq_assoc_hot_paths_do_not_touch_redb` 用 `pause()` 守着）。旧表 `TEMP_WORDS` / `TEMP_ABBREV` / `DRAFT_WORDS` / `FREQ` / `ASSOC_HIST` 只读保留到 P4，**不要再往里写**；`words_generation` 系列代次仍由门面推进，时机与旧实现逐条一致。
 - **状态目录**：`Store::open(path)` 把引擎状态放在 `<path>.state/`，redb 文件此前不存在时先清空它（测试反复用同一路径不串数据）；生产走 `Store::open_with_state(path, StateLoc)`（协调器传 `Config::state_dir()/runtime/<dir_id>`——按用户目录分开，换目录不串数据），从不清空。迁移**合并**而非替换：重做时引擎已有条目为准、count 取大，上一轮失败后的写入不丢；`migrated_p1()` 为真协调器才升 `format_version`。
-- **迁移以标记为准**：`state/migrated-p1` 在就不迁；不在就整体重做（按目标替换，重跑不翻倍）。迁移成功后协调器把 `meta.toml` 的 `format_version` 升到 2，旧版本随之只读。
+- **迁移以标记为准**：`state/migrated-p1` / `migrated-p2` 在就不迁；不在就整体重做（合并，重跑不翻倍）。P1 完成升 `format_version` 到 2，P1 + P2 都完成升到 3，旧版本随之只读。
+- **用户词文本位置**：`StateLoc.text_dir`（生产 `<userdata>/user`，派生模式 `<redb>.user/`，随新库清空）。`Store` 打开时把「目录下有文本的 ∪ 引擎里有用户词的」方案都 `bind_text`；其余在首次访问时 `ensure_user_text` 按需绑定（文本隔离 / 读不了只 WARN，绑定照样登记）。`lowercase` 恒 false，`syllable_codes` = 方案为 `pinyin`。改动停手 30 秒由后台节拍（`spawn_userdata_ticker`，协调器起）写回；手改文件在切方案 / 配置重载 / `dict.reload` 时 `sync`，变了推进代次。
+- **redb 只剩短语 / Shadow / 覆盖表 / 小文件**：页缓存回收那套测试（`drop_page_cache.rs` 等）用短语表做负载。
 
 - **所有读写必须经 `Store::with_db`**：不要直接访问 `Store.db` 字段。`with_db` 持 `Mutex` 锁并检查暂停态——`pause()` 后 `with_db` 返回 `"store is paused"` 错误，绕过它会破坏 pause/resume 语义或导致 panic。
 

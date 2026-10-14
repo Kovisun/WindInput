@@ -146,13 +146,15 @@ pub fn parse_draft_key(key: &str) -> Option<(&str, &str, &str)> {
 
 #[cfg(test)]
 pub(crate) fn now_for_test() -> i64 {
-    crate::user_words::now_secs()
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::user_words::now_secs;
+    use now_for_test as now_secs;
 
     /// 以给定时刻写草稿（模拟「很久以前写的」）：P1 起草稿在运行时引擎，有效期基准是 last_used。
     fn drafts_at(s: &Store, rows: &[(&str, &str, &str, i64)]) {

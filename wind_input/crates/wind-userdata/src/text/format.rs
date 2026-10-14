@@ -7,7 +7,7 @@ use std::path::Path;
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct WindHeader {
     pub kind: Option<String>,
-    /// `code_spacing: syllable`：码以空格分音节；无空格码 = 边界未知（0）。
+    /// `code_spacing: syllable`：码以空格分音节；无空格码 = 边界未知（0），文本为单个汉字时为单音节。
     pub syllable_codes: bool,
     /// `escape: true`：text 列按 `escape_text_field` 规则转义。
     pub escape: bool,
@@ -64,6 +64,18 @@ pub fn normalize_key(code: &str, text: &str, lowercase: bool) -> (String, u64, S
     }
     let text = wind_utils::text::normalize_input(text).into_owned();
     (flat, boundary, text)
+}
+
+/// 文本恰为一个 CJK 统一表意文字（含扩展区与兼容区）。
+fn is_single_han(text: &str) -> bool {
+    let mut it = text.chars();
+    match (it.next(), it.next()) {
+        (Some(c), None) => matches!(
+            c as u32,
+            0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xF900..=0xFAFF | 0x20000..=0x3134F
+        ),
+        _ => false,
+    }
 }
 
 pub fn parse(bytes: &[u8], path: &Path, lowercase: bool) -> Result<TextDict, ParseError> {
@@ -125,11 +137,19 @@ pub fn parse(bytes: &[u8], path: &Path, lowercase: bool) -> Result<TextDict, Par
             (*text).to_string()
         };
         let (code, boundary, text) = normalize_key(code, &text, lowercase);
+        let boundary = if !header.syllable_codes {
+            0
+        } else if boundary == 0 && is_single_han(&text) {
+            // 空格载体表达不了单音节；一个汉字只对应一个音节
+            0b1
+        } else {
+            boundary
+        };
         entries.push(TextEntry {
             line: idx,
             code,
             text,
-            boundary: if header.syllable_codes { boundary } else { 0 },
+            boundary,
             weight,
         });
     }
@@ -169,12 +189,26 @@ mod tests {
             e,
             vec![
                 ("nihao", "你好", 0b101, 100),
-                ("xian", "先", 0, 5),
+                ("xian", "先", 0b1, 5),
                 ("xian", "西安", 0b101, 0)
             ],
-            "无空格码 = 边界未知（0），不是单音节；空权重 = 0"
+            "单个汉字 = 单音节；空权重 = 0"
         );
         assert_eq!(d.entries[0].line, 8, "行号含头部行");
+    }
+
+    /// 单字词的单音节边界：空格载体表达不了 0b1，但一个汉字只对应一个音节——拼音文件里码无空格、
+    /// 文本恰为一个汉字 ⇒ 0b1。非汉字的单字符（emoji 等）码可能是多音节，仍为 0。
+    #[test]
+    fn single_han_char_without_spaces_is_one_syllable() {
+        let d = p(
+            &format!("{HEAD}先\txian\t5\n😊\txiaolian\t1\n西安\txian\t1\n"),
+            false,
+        );
+        let b: Vec<u64> = d.entries.iter().map(|e| e.boundary).collect();
+        assert_eq!(b, vec![0b1, 0, 0]);
+        let wb = p("---\nname: wb.user\n...\n工\taaaa\t3\n", false);
+        assert_eq!(wb.entries[0].boundary, 0, "非拼音文件不推断");
     }
 
     #[test]

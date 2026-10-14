@@ -128,6 +128,9 @@ pub fn patch(
             .push(e.line);
     }
     let mut added: Vec<Added> = Vec::new();
+    // 同键在一轮内至多一条活的新增行（Upsert 命中就合并），按键索引即可，免得大批追加成平方级
+    let mut added_at: std::collections::HashMap<(String, String), usize> =
+        std::collections::HashMap::new();
     for op in ops {
         let (code, text) = match op {
             PatchOp::Upsert { code, text, .. }
@@ -139,7 +142,7 @@ pub fn patch(
         let first_line = by_key
             .get(&key)
             .and_then(|v| v.iter().copied().find(|i| lines[*i].is_some()));
-        let first_added = added.iter().position(|a| a.alive && a.key == key);
+        let first_added = added_at.get(&key).copied().filter(|&i| added[i].alive);
         match op {
             PatchOp::Upsert {
                 boundary, weight, ..
@@ -163,7 +166,11 @@ pub fn patch(
                     lines[i] = Some(line);
                 } else if let Some(a) = first_added {
                     added[a].weight = added[a].weight.max(*weight);
+                    if added[a].boundary == 0 {
+                        added[a].boundary = *boundary;
+                    }
                 } else {
+                    added_at.insert(key.clone(), added.len());
                     added.push(Added {
                         key,
                         code: flat,
@@ -179,8 +186,8 @@ pub fn patch(
                         lines[i] = None;
                     }
                 }
-                for a in added.iter_mut().filter(|a| a.key == key) {
-                    a.alive = false;
+                if let Some(&i) = added_at.get(&key) {
+                    added[i].alive = false;
                 }
             }
             PatchOp::SetWeight {
@@ -348,7 +355,8 @@ mod tests {
         );
     }
 
-    /// Review Focus 5：边界未知的词写回无空格码，再解析边界仍为 0。
+    /// Review Focus 5：边界未知的词写回无空格码，再解析边界仍为 0（单个汉字除外，见
+    /// `format::single_han_char_without_spaces_is_one_syllable`）。
     #[test]
     fn unknown_boundary_roundtrips_as_zero() {
         let out = run(
@@ -361,7 +369,11 @@ mod tests {
             .iter()
             .map(|e| (e.code.clone(), e.boundary))
             .collect();
-        assert_eq!(b, vec![("xianning".into(), 0), ("xian".into(), 0)]);
+        assert_eq!(
+            b,
+            vec![("xianning".into(), 0), ("xian".into(), 0b1)],
+            "多音节未知仍为 0；单个汉字由解析推断为单音节"
+        );
         assert!(
             out.starts_with("---\nname: pinyin.user\n"),
             "空文件先渲染头"
@@ -391,5 +403,21 @@ mod tests {
             s.contains("columns: [text, code, weight]") && s.contains("code_spacing: syllable")
         );
         assert!(s.ends_with("...\n# no comment\n你好\tni hao\t3\n"));
+    }
+
+    /// 大批追加线性：6 万条新词一轮补丁（导入 / 迁移走这条）不能是平方级。
+    #[test]
+    fn appending_many_rows_is_linear() {
+        let ops: Vec<PatchOp> = (0..60_000)
+            .map(|i| up(&format!("c{i:05}"), &format!("词{i:05}"), 0, 1))
+            .collect();
+        let t = std::time::Instant::now();
+        let out = run("", &ops);
+        assert!(
+            t.elapsed() < std::time::Duration::from_secs(3),
+            "{:?}",
+            t.elapsed()
+        );
+        assert_eq!(out.lines().filter(|l| l.contains('\t')).count(), 60_000);
     }
 }

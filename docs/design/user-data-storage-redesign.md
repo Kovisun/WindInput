@@ -80,7 +80,6 @@
     charsets/*.yaml                      字符集用户层（已有交换格式）
     <schema>/
       user.dict.yaml                     主动造词 / 导入词（折回目标）
-      *.dict.yaml                        用户自放分库（只读，须登记或匹配白名单）
       shadow.dict.yaml                   pin / delete 规则
 
 <localdata>/
@@ -272,8 +271,7 @@ state (postcard, 版本化)
 
 `CompositeDict::merge_search` 的去重、继承权重、前缀取最短码语义不变；每层各自 limit，临时词不会被用户词挤占名额。
 
-- 段数预算：用户层默认最多 8 段；用户分库超出时，启动时把只读分库合并成一段 `merged-ro.wdat`（指纹为各分库指纹的有序摘要，同 `.wridx` 的二级指纹）。
-- 删除只读分库里的词：转为 Shadow delete 记录，不改分库。
+- 用户自放的只读词库走扩展词库目录（系统层，见 §10 P2c），不进用户层；删除其中的词照旧是 Shadow delete。
 - 临时词晋升：`temp Delete + user Upsert` 两条记录，同一 seq 对；晋升阈值判断读 sidecar 的 count 与 delta 的 Incr 之和。
 - `on_word_selected` 阈值调权：count 走 Incr，满阈值时追加 SetWeight；语义与现状一致。
 - 英文学词：`meta.is_temp_dict` 对应 target = temp；先查后写在同步写路径下成立。
@@ -283,7 +281,6 @@ state (postcard, 版本化)
 - `dict.reload(paths?: [string])`：路径限定在 `<userdata>/user/` 内，越界拒绝。带路径只校验并重建这几个文件；空参数全量扫描。供设置页与日后同步组件使用。
 - 快速扫描：先比 `len + mtime`，**不同则必算指纹；相同只作「大概率未变」提示，仍对声明过 `wind: {verify: content}` 或上次指纹时间超过 24 小时的文件算一次内容指纹**（`rsync -t`、同步工具会保留 mtime，`cache_fp` 当初拒绝 mtime 的原因同样适用）。触发：启动、切方案、配置热重载、`dict.reload`。
 - `dict.flush`：显式折回全部目标，供备份 / 导出 / 调试。
-- 分库发现排除同步盘冲突副本的命名模式（`*-<主机名>.dict.yaml`、`* (1).dict.yaml`、`.icloud`），且只认 schema override 登记或白名单匹配的文件。
 
 ## 6 redb 各表去向
 
@@ -354,7 +351,8 @@ P4 结束后 `wind-store` 删除 `store.rs` 与 redb 依赖，保留编解码与
 | P1a | 引擎补强（时间、叠加唯一、delta 二分、fold_with、零条目快照、state 版本、压实与后台折回）；`Runtime` 四组领域 API；临时词层 / 草稿层 | **已实现**（计划 `user-data-storage-plan-p1a.md`）：领域 API 与 `wind-store` 对拍测试全绿 |
 | P1b | 接线：协调器写路径、`EngineManager` 换层、设置页 IPC、备份 / 导出、联想索引改走 `Runtime`；redb → 引擎一次性迁移；`format_version` → 2；退役 5 张表 | **已实现**（计划 `user-data-storage-plan-p1b.md`）：与设计的差异——**`Store` 做门面**，四组方法签名不变、方法体委托 `Runtime`，调用方零改动、现有测试即对拍；为此 `wdict` 拆成 `wind-wdict`、Store 三层挪进 `wind-store`。全量回归 4930 条 0 失败；按键路径不经 redb Mutex（`pause()` 测试守）。运行时状态按用户目录分开（`state/runtime/<dir_id>/`）；迁移为合并语义、完成才升 `format_version`。独立审查探针：5000 临时词 + 19 万词频的库迁移 451–476 ms、再开 86–89 ms；真实用户库等价待靶机（`examples/p1_migrate_check.rs`） |
 | P2a | 文本层引擎：`user.dict.yaml` 解析与 `normalize_key`、按行补丁、文本目标折回 / 同步 / 整文件替换、sidecar 记行序、用户词层与领域 API | **已实现**（计划 `user-data-storage-plan-p2a.md`）。与设计的差异：文本只存 text / code / weight（用户词 count / created_at 不进文本）；段放在引擎状态目录（沿用 sidecar 提交点，可由文本重建）；`sync_text` 总算内容指纹，不走长度 + mtime 快路径；写出的正文以 `# no comment` 开头；补齐的音节边界改写该行码列；归文本管的目标绑定前不折回；单个文本目标折回失败只退避该目标 |
-| P2b | 接线：`wind-store` 用户词门面委托、redb `USER_WORDS` → `user.dict.yaml` 迁移、`format_version` → 3、`dict.reload` / `dict.flush`、启动 / 切方案 / 配置重载时 `sync_text`、用户分库；退役 2 张表 | 折回往返测试；崩溃测试；手改生效 |
+| P2b | 接线：`wind-store` 用户词门面委托、redb `USER_WORDS` → `user.dict.yaml` 迁移、`format_version` → 3、`dict.reload` / `dict.flush`、启动 / 切方案 / 配置重载时 `sync_text`；退役 2 张表 | **已实现**（计划 `user-data-storage-plan-p2b.md`）。与设计的差异：用户分库移到 P2c；用户词 count / created_at 不再保留，`on_word_selected` 删除（无生产调用方）；`lowercase` 未按方案下发；拼音文本里单个汉字的无空格码按单音节解析（空格载体表达不了 0b1）；空闲写回由 5 秒一拍的后台节拍驱动。合成 19 万词旧库迁移 674 ms、逐码比对 0 不一致 |
+| P2c | 用户分库 | **并入现有扩展词库目录，不另建机制**（2026-10-14 裁定）：用户自放的只读 `*.dict.yaml` 已由 `[[dictionary_dirs]]` / 默认 `<主词库目录>/ext`（`inject_dir_dicts`，用户目录优先）识别，按方案 override 逐个开关即「登记」，设置页有入口（`schema-dict-discovery.md`）。再在 `user/<schema>/` 下开第二个入口只会让同一件事两处配置。`user/<schema>/` 只认 `user.dict.yaml`，其余文件不读 |
 | P3 | 短语与 Shadow 文本化；设置页列表 / 编辑改走新层；系统短语覆盖语义 | 短语软删除、pin 次序、cand_id 去重回归 |
 | P4 | 覆盖表与小文件；`meta.toml`；备份 / 导入导出按类别路由；删除 redb 依赖 | `cargo tree` 无 redb；备份还原全量回归 |
 | P5 | 同步协议（日志交换、Incr 求和、LWW） | 另立设计 |

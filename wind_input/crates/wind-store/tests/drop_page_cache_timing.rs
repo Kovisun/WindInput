@@ -25,17 +25,15 @@ fn time_drop_page_cache_on_a_real_store() {
     println!("开库 {:?}", t.elapsed());
     for round in 1..=5 {
         let t = Instant::now();
-        let n = s
-            .search_user_words_prefix("pinyin", "", 0)
-            .expect("全表扫")
-            .len();
+        // P2 起用户词不在 redb；全表扫换成仍在 redb 的短语表
+        let n = s.list_phrases().expect("全表扫").len();
         let scan = t.elapsed();
         let t = Instant::now();
         s.drop_page_cache().expect("回收");
         let drop = t.elapsed();
         let t = Instant::now();
         let _ = s
-            .search_user_words_prefix("pinyin", "ni", 20)
+            .list_user_phrases_paged(Some("ni"), 0, 20)
             .expect("冷查询");
         let cold = t.elapsed();
         println!(

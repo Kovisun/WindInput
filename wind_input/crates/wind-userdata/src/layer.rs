@@ -23,6 +23,10 @@ fn sort_trunc(mut v: Vec<Candidate>, limit: usize) -> Vec<Candidate> {
     v
 }
 
+/// 还没折回进文本的新词的入库顺序：大于任何文本行号，又给调用方的 `+1` 之类运算留足余量
+/// （取 `i32::MAX` 会让「下一个顺序号」溢出）。
+pub const UNFOLDED_ORDER: u32 = 1 << 30;
+
 /// 临时词层与用户词层共用的查询核心：按 `target` 读快照 + delta，`user` 决定候选标记与自然序。
 struct WordLayer {
     ud: Arc<UserData>,
@@ -67,11 +71,8 @@ impl WordLayer {
         if self.user {
             c.meta.is_user_dict = true;
             // 还没折回进文本的新词（order 0）排在已有词之后，与折回后取到的行号同向
-            c.natural_order = if order == 0 {
-                i32::MAX
-            } else {
-                order.min(i32::MAX as u32) as i32
-            };
+            let o = if order == 0 { UNFOLDED_ORDER } else { order };
+            c.natural_order = o.min(UNFOLDED_ORDER) as i32;
         } else {
             c.meta.is_temp_dict = true;
         }
