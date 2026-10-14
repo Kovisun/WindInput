@@ -2528,6 +2528,7 @@ dependencies = [
  "wind-candidate",
  "wind-store",
  "wind-utils",
+ "wind-wdict",
  "windows",
 ]
 
@@ -2680,6 +2681,7 @@ dependencies = [
  "uuid",
  "wind-cmdbar",
  "wind-utils",
+ "wind-wdict",
 ]
 
 [[package]]
@@ -2790,6 +2792,14 @@ dependencies = [
 [[package]]
 name = "wind-utils"
 version = "0.1.0"
+
+[[package]]
+name = "wind-wdict"
+version = "0.1.0"
+dependencies = [
+ "wind-cmdbar",
+ "wind-utils",
+]
 
 [[package]]
 name = "wind-webdata"

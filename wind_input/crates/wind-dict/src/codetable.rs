@@ -973,8 +973,8 @@ fn parse_rime_line(
     // 的「编码在前」写法手写进「文本在前」的词库，文件级判定按多数票不会为这一行让步，
     // 结果 text=`u`、code=`$SS(...)`，这条短语永远打不出来，也没有任何提示。
     // 只认 marker、不单凭 `{`：`{` 可以是编码字符集里的正经键位。
-    let (code_col, text_col) = if wind_store::wdict::is_misplaced_cmdbar_code(parts[spec.code_col])
-        && !wind_store::wdict::is_cmdbar_text(parts[spec.text_col])
+    let (code_col, text_col) = if wind_wdict::is_misplaced_cmdbar_code(parts[spec.code_col])
+        && !wind_wdict::is_cmdbar_text(parts[spec.text_col])
     {
         (spec.text_col, spec.code_col)
     } else {
@@ -1060,7 +1060,7 @@ fn parse_rime_line(
         //
         // 注：`PARSE_SEMANTICS_VERSION` 已 +1（见 `cache_fp.rs`）——本次改动会让含
         // `$CC` 且带反斜杠的词库解析出不同结果，不 bump 则存量 .wdat 静默复用旧结果。
-        text: wind_store::wdict::unescape_text_field(text),
+        text: wind_wdict::unescape_text_field(text),
         weight,
         boundary,
     })

@@ -28,6 +28,7 @@ members = [
     "crates/wind-coordinator",
     "crates/wind-webdata",
     "crates/wind-userdata",
+    "crates/wind-wdict",
     "crates/wind-rpc",
     "apps/service",
     "apps/rpc",
