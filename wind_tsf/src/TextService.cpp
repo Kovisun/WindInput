@@ -7229,6 +7229,27 @@ BOOL CTextService::ReplacePrecedingChars(int count, const std::wstring& text)
 
 // 多行文本的粘贴上屏（compat `multiline_commit = "paste"`），由 CCommitTextEditSession 在组合结束后调用。
 // 剪贴板不备份也不恢复：恢复会让剪贴板历史工具多记一条，且宿主何时处理 Ctrl+V 不可知，恢复早了会贴出旧内容。
+// 给剪贴板追加一个注册格式，值为 DWORD。须在 OpenClipboard 之后、CloseClipboard 之前调用。
+static void SetClipboardDwordFormat(const wchar_t* name, DWORD value)
+{
+    const UINT fmt = RegisterClipboardFormatW(name);
+    if (fmt == 0)
+        return;
+    HGLOBAL h = GlobalAlloc(GMEM_MOVEABLE, sizeof(DWORD));
+    if (h == nullptr)
+        return;
+    DWORD* p = static_cast<DWORD*>(GlobalLock(h));
+    if (p == nullptr)
+    {
+        GlobalFree(h);
+        return;
+    }
+    *p = value;
+    GlobalUnlock(h);
+    if (SetClipboardData(fmt, h) == nullptr)
+        GlobalFree(h);
+}
+
 BOOL CTextService::_PasteTextViaClipboard(const std::wstring& text)
 {
     const std::wstring crlf = wind::multiline::NormalizeToCrlf(text);
@@ -7282,6 +7303,13 @@ BOOL CTextService::_PasteTextViaClipboard(const std::wstring& text)
         }
         if (!written)
             GlobalFree(hMem); // SetClipboardData 成功后内存归系统，失败才由我们释放
+    }
+    if (written)
+    {
+        // 这份内容只是上屏的载体：不进 Win+V 历史、不同步云剪贴板，并请第三方剪贴板工具忽略。
+        SetClipboardDwordFormat(L"CanIncludeInClipboardHistory", 0);
+        SetClipboardDwordFormat(L"CanUploadToCloudClipboard", 0);
+        SetClipboardDwordFormat(L"ExcludeClipboardContentFromMonitorProcessing", 0);
     }
     const DWORD clipErr = written ? 0 : GetLastError();
     CloseClipboard();
