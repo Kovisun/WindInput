@@ -167,6 +167,10 @@ pub struct StateLoc {
     pub dir_id: String,
     /// 用户词文本的根：`<text_dir>/<schema>/user.dict.yaml`。
     pub text_dir: PathBuf,
+    /// 用户目录已记为迁完（协调器据 `meta.toml` 的 `format_version` 判定）。为真时不再从旧 redb
+    /// 迁移：本机状态目录里的迁移标记丢了（清 state、换机）也只补写标记——重迁会把升级后删掉的
+    /// 数据从旧表合并回来。
+    pub legacy_done: bool,
 }
 
 /// `Store::open(path)` 的引擎状态目录：redb 文件名后追加 `.state`。测试与工具用；生产走
@@ -298,6 +302,7 @@ impl Store {
                 state_dir: derived,
                 dir_id: "derived".into(),
                 text_dir,
+                legacy_done: false,
             },
         )
     }
@@ -307,8 +312,26 @@ impl Store {
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        let db = open_db(&path, cache_bytes)?;
-        Self::init_tables(&db)?;
+        // 迁移全部完成过的库不再打开旧 redb：不锁、不写，文件原样留给回退的旧版本。
+        let fully_migrated = loc.legacy_done
+            || crate::migrate_p3::ALL_MIGRATION_MARKERS
+                .iter()
+                .all(|m| loc.state_dir.join(m).is_file());
+        if loc.legacy_done {
+            for m in crate::migrate_p3::ALL_MIGRATION_MARKERS {
+                let f = loc.state_dir.join(m);
+                if !f.is_file() {
+                    wind_userdata::state::atomic_write(&f, b"1\n")?;
+                }
+            }
+        }
+        let db = if fully_migrated {
+            None
+        } else {
+            let db = open_db(&path, cache_bytes)?;
+            Self::init_tables(&db)?;
+            Some(db)
+        };
         let state_dir = loc.state_dir.clone();
         let ud = wind_userdata::engine::UserData::open(wind_userdata::engine::Dirs {
             state_dir: loc.state_dir.clone(),
@@ -331,7 +354,7 @@ impl Store {
             common_doc: std::sync::OnceLock::new(),
             charsets_fp: Mutex::new(None),
             phrase_table: std::sync::OnceLock::new(),
-            db: Mutex::new(Some(db)),
+            db: Mutex::new(db),
             cache_bytes,
             touched: std::sync::atomic::AtomicBool::new(false),
             drops: std::sync::atomic::AtomicU64::new(0),
@@ -342,6 +365,15 @@ impl Store {
             words_gen_by_schema: Default::default(),
             words_epoch: std::sync::atomic::AtomicU64::new(0),
         };
+        if fully_migrated {
+            store.bind_user_texts_at_open();
+            store.remember_charsets_fp();
+            info!(
+                "Store opened: {}（旧库已迁完，不再打开）",
+                store.path.display()
+            );
+            return Ok(store);
+        }
         store.run_migrations()?;
         store.bind_user_texts_at_open();
         if let Err(e) = store.migrate_p1_if_needed(&state_dir) {
@@ -367,7 +399,20 @@ impl Store {
             store.path.display(),
             store.version().unwrap_or(0)
         );
+        store.release_legacy_db_if_migrated();
         Ok(store)
+    }
+
+    /// 迁移全部完成就放下旧 redb（释放文件锁）。短语迁移要等系统短语，常是最后一步，
+    /// 故打开时与短语迁移之后各查一次。
+    pub(crate) fn release_legacy_db_if_migrated(&self) {
+        if self.format_version_reached() != Some(crate::migrate_p3::FULLY_MIGRATED_VERSION) {
+            return;
+        }
+        let mut guard = self.db.lock().unwrap_or_else(|e| e.into_inner());
+        if guard.take().is_some() {
+            info!("旧库已全部迁完，释放：{}", self.path.display());
+        }
     }
 
     /// P1 迁移是否已完成（标记 `migrated-p1` 在）。协调器据此决定能否升 `format_version`。
@@ -984,6 +1029,113 @@ impl Store {
 mod tests {
     use super::*;
 
+    /// redb 在同一进程里对已打开的文件拒绝再开：能另开一份 ⇒ Store 没握着它（不锁文件）。
+    fn redb_is_released(path: &Path) -> bool {
+        Database::open(path).is_ok()
+    }
+
+    /// 迁移全部完成（短语迁移是最后一步）后立即放下旧库：不再锁文件。
+    #[test]
+    fn legacy_db_is_released_once_fully_migrated() {
+        let path =
+            std::env::temp_dir().join(format!("wind_store_release-{}.redb", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir_all(derived_state_dir(&path));
+        let _ = std::fs::remove_dir_all(derived_text_dir(&path));
+        let s = Store::open(&path).unwrap();
+        assert!(!redb_is_released(&path), "短语还没迁，旧库要留着");
+        s.migrate_phrases_now().unwrap();
+        assert!(s.migrated_p3() && s.migrated_p4());
+        assert!(redb_is_released(&path), "全部迁完就放下旧库");
+        drop(s);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir_all(derived_state_dir(&path));
+        let _ = std::fs::remove_dir_all(derived_text_dir(&path));
+    }
+
+    /// 用户目录已记为迁完（`legacy_done`，来自 meta.toml 的 format_version）时，state 里的迁移
+    /// 标记被删了也不再从 redb 重迁：升级后删掉的词不会被旧表带回来，redb 不开、不写；
+    /// 标记补写回去，其余依赖标记的判断照旧。
+    #[test]
+    fn legacy_done_skips_remigration_even_if_markers_are_deleted() {
+        let path =
+            std::env::temp_dir().join(format!("wind_store_ldone-{}.redb", std::process::id()));
+        let st =
+            std::env::temp_dir().join(format!("wind_store_ldone_state-{}", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir_all(&st);
+        let loc = |done: bool| StateLoc {
+            state_dir: st.clone(),
+            dir_id: "d".into(),
+            text_dir: st.join("user"),
+            legacy_done: done,
+        };
+        let del_markers = || {
+            for m in crate::migrate_p3::ALL_MIGRATION_MARKERS {
+                let _ = std::fs::remove_file(st.join(m));
+            }
+        };
+        {
+            let s = Store::open_with_state(&path, loc(false)).unwrap();
+            s.legacy_put_user("wb", "a", "工", 1, 0, 0).unwrap();
+        }
+        // 旧表里的词迁成文本，然后用户在新版本里删掉它
+        del_markers();
+        {
+            let s = Store::open_with_state(&path, loc(false)).unwrap();
+            s.migrate_phrases_now().unwrap();
+            assert_eq!(s.get_user_words("wb", "a").unwrap().len(), 1, "迁进来了");
+            s.remove_user_word("wb", "a", "工").unwrap();
+            s.flush_user_data().unwrap();
+        }
+        del_markers();
+        let before = std::fs::read(&path).unwrap();
+        let s = Store::open_with_state(&path, loc(true)).unwrap();
+        assert!(
+            s.get_user_words("wb", "a").unwrap().is_empty(),
+            "删掉的词不被旧表带回"
+        );
+        assert!(redb_is_released(&path), "不打开旧库");
+        assert!(
+            crate::migrate_p3::ALL_MIGRATION_MARKERS
+                .iter()
+                .all(|m| st.join(m).is_file()),
+            "标记补写回去"
+        );
+        drop(s);
+        assert!(std::fs::read(&path).unwrap() == before, "旧库文件不被写");
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir_all(&st);
+    }
+
+    /// 已经迁完的库再打开：根本不碰 redb（不锁、不写——文件逐字节不变，留给回退的旧版本）。
+    #[test]
+    fn fully_migrated_store_never_opens_legacy_db() {
+        let path =
+            std::env::temp_dir().join(format!("wind_store_noopen-{}.redb", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir_all(derived_state_dir(&path));
+        let _ = std::fs::remove_dir_all(derived_text_dir(&path));
+        {
+            let s = Store::open(&path).unwrap();
+            s.migrate_phrases_now().unwrap();
+        }
+        let before = std::fs::read(&path).unwrap();
+        let s = Store::open(&path).unwrap();
+        assert!(redb_is_released(&path), "迁完的库重开不再打开旧库");
+        s.add_user_word("wb", "a", "工", 1, 0).unwrap();
+        assert_eq!(
+            s.get_user_words("wb", "a").unwrap()[0].text,
+            "工",
+            "照常读写"
+        );
+        drop(s);
+        assert!(std::fs::read(&path).unwrap() == before, "旧库文件不被写");
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir_all(derived_state_dir(&path));
+        let _ = std::fs::remove_dir_all(derived_text_dir(&path));
+    }
+
     #[test]
     fn list_data_schemas_across_tables() {
         let path = std::env::temp_dir().join("wind_store_schemas_test.redb");
@@ -1067,6 +1219,7 @@ mod tests {
             state_dir: st.clone(),
             dir_id: "dir-x".into(),
             text_dir: st.join("user"),
+            legacy_done: false,
         };
         let s = Store::open_with_state(&p, loc()).unwrap();
         s.runtime().learn_temp("py", "a", "甲", 1, 0).unwrap();

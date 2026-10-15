@@ -1514,6 +1514,7 @@ mod tests {
             state_dir: base.join(st),
             dir_id: "d".into(),
             text_dir: base.join("user"),
+            legacy_done: false,
         };
         {
             let s = Store::open_with_state(base.join("a.redb"), loc("state1")).unwrap();

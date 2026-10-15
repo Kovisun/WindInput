@@ -12,6 +12,18 @@ use std::path::Path;
 pub const MIGRATED_P3_SHADOW: &str = "migrated-p3-shadow";
 pub const MIGRATED_P3_PHRASES: &str = "migrated-p3-phrases";
 
+/// 全部迁移完成时 [`Store::format_version_reached`] 的值。
+pub const FULLY_MIGRATED_VERSION: u32 = 5;
+
+/// 全部迁移的完成标记。都在 ⇒ 旧 redb 不再需要打开。
+pub(crate) const ALL_MIGRATION_MARKERS: [&str; 5] = [
+    crate::migrate_p1::MIGRATED_P1,
+    crate::migrate_p2::MIGRATED_P2,
+    MIGRATED_P3_SHADOW,
+    MIGRATED_P3_PHRASES,
+    crate::migrate_p4::MIGRATED_P4,
+];
+
 impl Store {
     /// 短语迁移（`set_system_phrases` 里调）：标记缺失才做。
     pub(crate) fn migrate_p3_phrases_if_needed(
@@ -25,6 +37,7 @@ impl Store {
         let n = self.merge_legacy_phrases(sys)?;
         wind_userdata::state::atomic_write(&marker, b"1\n")?;
         tracing::info!("P3 短语迁移完成：{n} 行从 redb 迁成文本");
+        self.release_legacy_db_if_migrated();
         Ok(())
     }
 
@@ -37,7 +50,7 @@ impl Store {
             self.migrated_p3(),
             self.migrated_p4(),
         ) {
-            (true, true, true, true) => Some(5),
+            (true, true, true, true) => Some(FULLY_MIGRATED_VERSION),
             (true, true, true, false) => Some(4),
             (true, true, false, _) => Some(3),
             (true, false, _, _) => Some(2),

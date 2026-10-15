@@ -5406,10 +5406,10 @@ outside: rare
         );
     }
 
-    /// ★ S3：设置页翻页（`dict.listPaged`，每次都扫整表）只标记待回收、不逐页回收；
-    /// 停手满短档后回收**一次**。另验窄查询（`dict.search` 带 limit）不标记。
+    /// 协调器起来就迁完了全部旧数据、放下了 redb：设置页翻页（`dict.listPaged`）与窄查询照常，
+    /// 不再触发 redb 页缓存回收（无缓存可回收）。
     #[test]
-    fn dict_list_paged_marks_scan_and_reclaims_once_after_short_idle() {
+    fn dict_list_paged_after_migration_has_no_redb_to_reclaim() {
         use std::time::Duration;
         const TICK: Duration = Duration::from_millis(20);
         const SCAN_IDLE: Duration = Duration::from_millis(300);
@@ -5435,11 +5435,7 @@ outside: rare
         )
         .unwrap();
         std::thread::sleep(SCAN_IDLE * 3);
-        assert_eq!(
-            store.page_cache_drops(),
-            0,
-            "带 limit 的前缀查询不该触发短档"
-        );
+        assert_eq!(store.page_cache_drops(), 0, "窄查询不触发回收");
 
         let c = coord("scan_reclaim");
         let store = c.user_store().expect("有 store").clone();
@@ -5450,15 +5446,11 @@ outside: rare
         let page = json!({ "schemaId": "pinyin", "offset": 0, "limit": 50 });
         let first = c.web_data_rpc("dict.listPaged", &page).unwrap();
         let second = c.web_data_rpc("dict.listPaged", &page).unwrap();
-        assert_eq!(store.page_cache_drops(), 0, "连续翻页只标记，不逐页回收");
-
+        assert!(store.is_paused(), "迁完即放下旧库");
         assert!(
-            wait_drops(&store, 1, SCAN_IDLE * 20),
-            "停手满短档后该回收一次"
+            !wait_drops(&store, 1, SCAN_IDLE * 3),
+            "没有 redb 页缓存可回收"
         );
-        std::thread::sleep(SCAN_IDLE * 3);
-        assert_eq!(store.page_cache_drops(), 1, "只回收一次，不重复");
-        // 回收后查询结果不变。
         let after = c.web_data_rpc("dict.listPaged", &page).unwrap();
         assert_eq!(first, second);
         assert_eq!(first, after);

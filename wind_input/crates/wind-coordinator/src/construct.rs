@@ -32,6 +32,7 @@ pub(crate) fn runtime_state_loc(
     state_base: &Path,
     dir_id: &str,
     user_dir: &Path,
+    legacy_done: bool,
 ) -> wind_store::store::StateLoc {
     let safe: String = dir_id
         .chars()
@@ -46,6 +47,7 @@ pub(crate) fn runtime_state_loc(
         state_dir: state_base.join("runtime").join(safe),
         dir_id: dir_id.to_string(),
         text_dir: user_dir.join("user"),
+        legacy_done,
     }
 }
 
@@ -397,7 +399,13 @@ impl Coordinator {
         let Some(d) = dir else { return (None, None) };
         match wind_config::user_meta::load_or_init(d) {
             wind_config::user_meta::MetaCheck::Ok(meta) => {
-                (Self::open_user_store(d, choice, &meta.dir_id), None)
+                // 用户目录记为迁完 ⇒ 不再从旧库重迁（state 被清也一样）
+                let legacy_done =
+                    meta.format_version >= wind_store::migrate_p3::FULLY_MIGRATED_VERSION;
+                (
+                    Self::open_user_store(d, choice, &meta.dir_id, legacy_done),
+                    None,
+                )
             }
             wind_config::user_meta::MetaCheck::Incompatible { found, known } => {
                 let reason = format!(
@@ -421,14 +429,16 @@ impl Coordinator {
         dir: &Path,
         choice: StateChoice,
         dir_id: &str,
+        legacy_done: bool,
     ) -> Option<Arc<Store>> {
         let _ = std::fs::create_dir_all(dir);
         let p = dir.join("userdata.redb");
         let opened = match choice {
             StateChoice::Production => match Config::state_dir() {
-                Some(state_base) => {
-                    Store::open_with_state(&p, runtime_state_loc(&state_base, dir_id, dir))
-                }
+                Some(state_base) => Store::open_with_state(
+                    &p,
+                    runtime_state_loc(&state_base, dir_id, dir, legacy_done),
+                ),
                 None => {
                     // 文本仍在真实用户目录里：它是真源，不能跟着派生目录走
                     warn!("取不到本机状态目录，运行时数据放在 redb 旁的派生目录");
@@ -438,6 +448,7 @@ impl Coordinator {
                             state_dir: wind_store::store::derived_state_dir(&p),
                             dir_id: dir_id.into(),
                             text_dir: dir.join("user"),
+                            legacy_done,
                         },
                     )
                 }
@@ -445,8 +456,9 @@ impl Coordinator {
             StateChoice::Derived => {
                 // 运行时状态放 redb 旁的派生目录（新库时清空，测试反复用同一路径不串数据）；用户词
                 // 文本是真源，同生产一样在 `<用户目录>/user/`，从不跟着清（移动端也走这条）。
+                // 用户目录已记为迁完时本就没有 redb（全新目录不建），不在不代表是新库。
                 let state_dir = wind_store::store::derived_state_dir(&p);
-                if !p.exists() {
+                if !p.exists() && !legacy_done {
                     let _ = std::fs::remove_dir_all(&state_dir);
                 }
                 Store::open_with_state(
@@ -455,6 +467,7 @@ impl Coordinator {
                         state_dir,
                         dir_id: "derived".into(),
                         text_dir: dir.join("user"),
+                        legacy_done,
                     },
                 )
             }
@@ -650,7 +663,8 @@ mod p1_meta_tests {
         s.flush_user_data().unwrap();
         assert!(d.join("user").join("wb").join("user.dict.yaml").is_file());
         drop(s);
-        std::fs::remove_file(d.join("userdata.redb")).unwrap();
+        // 全新目录本就不建 redb；有的话也删掉——两种情形文本都要原样读回
+        let _ = std::fs::remove_file(d.join("userdata.redb"));
         let (store, _) = Coordinator::open_user_store_checked(Some(&d), StateChoice::Derived);
         let s = store.unwrap();
         assert_eq!(s.get_user_words("wb", "a").unwrap()[0].weight, 7);
@@ -658,11 +672,31 @@ mod p1_meta_tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
+    /// 全新目录（meta 直接是最新格式）根本不建 redb：派生模式不能因「redb 不在」就把它当新库、
+    /// 每次打开都清掉运行时状态（移动端走派生模式，那等于每次启动丢掉学到的词）。
+    #[test]
+    fn derived_mode_fresh_dir_keeps_learned_data_across_reopen() {
+        let d = std::env::temp_dir().join(format!("wind_fresh_keep-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let (store, _) = Coordinator::open_user_store_checked(Some(&d), StateChoice::Derived);
+        let s = store.unwrap();
+        assert!(!d.join("userdata.redb").exists(), "全新目录不建旧库");
+        s.learn_temp_word("py", "ni", "你", 1, 0).unwrap();
+        drop(s);
+        let (store, _) = Coordinator::open_user_store_checked(Some(&d), StateChoice::Derived);
+        let s = store.unwrap();
+        assert!(
+            !s.get_temp_words("py", "ni").unwrap().is_empty(),
+            "重开后学到的词还在"
+        );
+        drop(s);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     /// P3 迁完（短语迁移要等 set_system_phrases）后升到最新（P4a 在打开时已迁完 ⇒ 5）。
     #[test]
     fn format_version_reaches_latest_after_phrase_migration() {
-        let d = std::env::temp_dir().join(format!("wind_p3_fv-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
+        let d = legacy_user_dir("p3fv");
         let (store, _) = Coordinator::open_user_store_checked(Some(&d), StateChoice::Derived);
         let s = store.unwrap();
         assert!(!s.migrated_p3(), "短语迁移要等系统短语");
@@ -687,7 +721,7 @@ mod p1_meta_tests {
         let _ = std::fs::remove_dir_all(&a);
         let sa = Store::open_with_state(
             a.join("userdata.redb"),
-            runtime_state_loc(&base, "dir-A", &a),
+            runtime_state_loc(&base, "dir-A", &a, false),
         )
         .unwrap();
         sa.learn_temp_word("py", "jiade", "甲的", 800, 0).unwrap();
@@ -695,7 +729,7 @@ mod p1_meta_tests {
         let b = legacy_user_dir("perdir");
         let sb = Store::open_with_state(
             b.join("userdata.redb"),
-            runtime_state_loc(&base, "dir-B", &b),
+            runtime_state_loc(&base, "dir-B", &b, false),
         )
         .unwrap();
         assert!(sb.migrated_p1());
