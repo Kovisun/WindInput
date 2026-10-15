@@ -507,6 +507,15 @@ pub struct EngineManager {
     /// `aux_settings_cache` 的失效代次：每次清表（持锁）+1。未命中时先记代次再算，回填前
     /// （同一把锁下）代次变了就不回填——否则「算到一半被清」的旧值会被插回去，一直留到下次失效。
     aux_settings_gen: std::sync::atomic::AtomicU64,
+    /// 码表设置缓存（(schema_id, 是否按混输解析) → 生效设置），供 [`EngineManager::codetable_settings`]。
+    ///
+    /// **必须缓存**：单字过滤、建候选、短语自动上屏每键各取一次，每次 `read_schema` 混输方案
+    /// 再读主码表方案——不缓存就是每键 6 次读盘 + TOML 解析 + 扫词库目录。键里带「是否混输」：
+    /// 它取决于引擎加载了没有，加载前后解析结果不同，不能共用一条。失效同 `aux_settings_cache`：
+    /// 任一方案失效或配置重载都整表清（混输引用主码表方案，按 id 局部清会漏）。
+    codetable_settings_cache: Mutex<HashMap<(String, bool), wind_config::CodetableGlobal>>,
+    /// `codetable_settings_cache` 的失效代次（同 `aux_settings_gen`）。
+    codetable_settings_gen: std::sync::atomic::AtomicU64,
     /// 方案引擎类型缓存（`schema_engine_type`）。**按 id 缓存，reload/invalidate 时清**，
     /// 与 `freq_cache`/`name_cache` 同生命周期。
     ///
@@ -937,6 +946,8 @@ impl EngineManager {
             freq_cache: Mutex::new(HashMap::new()),
             aux_settings_cache: Mutex::new(HashMap::new()),
             aux_settings_gen: std::sync::atomic::AtomicU64::new(0),
+            codetable_settings_cache: Mutex::new(HashMap::new()),
+            codetable_settings_gen: std::sync::atomic::AtomicU64::new(0),
             schema_type_cache: Mutex::new(HashMap::new()),
             key_actions_cache: Mutex::new(HashMap::new()),
             session_actions_cache: Mutex::new(HashMap::new()),
@@ -4042,6 +4053,7 @@ impl EngineManager {
             .unwrap_or_else(|e| e.into_inner())
             .remove(schema_id);
         self.invalidate_aux_settings_cache();
+        self.invalidate_codetable_settings_cache();
         self.invalidate_data_facts();
         self.schema_type_cache
             .lock()
@@ -4252,6 +4264,7 @@ impl EngineManager {
             .unwrap_or_else(|e| e.into_inner())
             .clear();
         self.invalidate_aux_settings_cache();
+        self.invalidate_codetable_settings_cache();
         self.invalidate_data_facts();
         self.schema_type_cache
             .lock()
@@ -4937,13 +4950,70 @@ impl EngineManager {
     /// 的注释。用 `loaded_engine_type(schema_id)` 而非 `current_engine_type()` 判混输，
     /// 理由同上：后者也是问活跃方案。
     fn codetable_settings_of(&self, schema_id: &str) -> wind_config::CodetableGlobal {
+        let mixed = matches!(self.loaded_engine_type(schema_id), Some(EngineType::Mixed));
+        let key = (schema_id.to_string(), mixed);
+        if let Some(s) = self
+            .codetable_settings_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&key)
+        {
+            return s.clone();
+        }
+        let generation = self
+            .codetable_settings_gen
+            .load(std::sync::atomic::Ordering::Acquire);
+        let s = self.resolve_codetable_settings(schema_id, mixed);
+        self.cache_codetable_settings(key, s.clone(), generation);
+        s
+    }
+
+    /// 清 `codetable_settings_cache` 并推进失效代次（持锁完成）。
+    fn invalidate_codetable_settings_cache(&self) {
+        let mut cache = self
+            .codetable_settings_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        cache.clear();
+        self.codetable_settings_gen
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    }
+
+    /// 回填 `codetable_settings_cache`：算之前记下的代次已过期（期间被清过）就丢弃。
+    fn cache_codetable_settings(
+        &self,
+        key: (String, bool),
+        s: wind_config::CodetableGlobal,
+        generation: u64,
+    ) -> bool {
+        let mut cache = self
+            .codetable_settings_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if self
+            .codetable_settings_gen
+            .load(std::sync::atomic::Ordering::Acquire)
+            != generation
+        {
+            return false;
+        }
+        cache.insert(key, s);
+        true
+    }
+
+    /// 不带缓存的解析（读方案文件）。
+    fn resolve_codetable_settings(
+        &self,
+        schema_id: &str,
+        mixed: bool,
+    ) -> wind_config::CodetableGlobal {
         let global = self
             .codetable
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
         // 混输方案自身无独立 codetable 配置，override 从其 primary_schema（主码表方案）读取
-        let resolve_id = if matches!(self.loaded_engine_type(schema_id), Some(EngineType::Mixed)) {
+        let resolve_id = if mixed {
             Self::read_schema(
                 schema_id,
                 self.data_dir.as_deref(),
@@ -8523,6 +8593,81 @@ mod tests {
             .load(std::sync::atomic::Ordering::Acquire);
         assert_ne!(now, before, "清表推进代次");
         assert!(mgr.cache_aux_settings("x".into(), AuxCodeSettings::default(), now));
+        assert!(cached(&mgr), "代次未变照常回填");
+    }
+
+    /// 码表设置每次按键要取好几次（单字过滤、建候选、短语自动上屏），不能每次都重读方案文件。
+    fn codetable_cache_fixture(name: &str, auto_commit: bool) -> std::path::PathBuf {
+        let base =
+            std::env::temp_dir().join(format!("wind_eng_ct_cache-{name}-{}", std::process::id()));
+        let schemas = base.join("schemas");
+        std::fs::create_dir_all(&schemas).unwrap();
+        std::fs::write(
+            schemas.join("wb_c.schema.toml"),
+            format!(
+                "[schema]\nid = \"wb_c\"\n[engine]\ntype = \"codetable\"\n[engine.codetable]\nmax_code_length = 4\nauto_commit_at_full = {auto_commit}\n"
+            ),
+        )
+        .unwrap();
+        base
+    }
+
+    #[test]
+    fn codetable_settings_are_cached_until_schema_invalidated() {
+        let base = codetable_cache_fixture("inv", true);
+        let mgr = EngineManager::new(&Config::default(), Some(&base));
+        assert!(mgr.codetable_settings_of("wb_c").auto_commit_at_full);
+        codetable_cache_fixture("inv", false);
+        assert!(
+            mgr.codetable_settings_of("wb_c").auto_commit_at_full,
+            "命中缓存：不重读方案文件"
+        );
+        mgr.invalidate_schema("wb_c");
+        assert!(
+            !mgr.codetable_settings_of("wb_c").auto_commit_at_full,
+            "方案失效后重读"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 全局 `schema.codetable` 是缓存值的基线：配置重载后必须重算（设置页改了要立即生效）。
+    #[test]
+    fn codetable_settings_follow_config_reload() {
+        let base = codetable_cache_fixture("reload", true);
+        let mut cfg = Config::default();
+        cfg.schema.codetable.z_key_repeat = false;
+        let mgr = EngineManager::new(&cfg, Some(&base));
+        assert!(!mgr.codetable_settings_of("wb_c").z_key_repeat);
+        cfg.schema.codetable.z_key_repeat = true;
+        mgr.reload_from_config(&cfg);
+        assert!(
+            mgr.codetable_settings_of("wb_c").z_key_repeat,
+            "重载后用新的全局基线"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 回填竞态同辅助码缓存：算的途中被清过，旧值不得回填。
+    #[test]
+    fn codetable_settings_cache_drops_stale_fill() {
+        let mgr = EngineManager::new(&Config::default(), None);
+        let key = ("x".to_string(), false);
+        let cached = |m: &EngineManager| {
+            m.codetable_settings_cache
+                .lock()
+                .unwrap()
+                .contains_key(&key)
+        };
+        let before = mgr
+            .codetable_settings_gen
+            .load(std::sync::atomic::Ordering::Acquire);
+        mgr.invalidate_codetable_settings_cache();
+        assert!(!mgr.cache_codetable_settings(key.clone(), Default::default(), before));
+        assert!(!cached(&mgr), "过期代次不得回填");
+        let now = mgr
+            .codetable_settings_gen
+            .load(std::sync::atomic::Ordering::Acquire);
+        assert!(mgr.cache_codetable_settings(key.clone(), Default::default(), now));
         assert!(cached(&mgr), "代次未变照常回填");
     }
 
