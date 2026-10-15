@@ -1237,15 +1237,23 @@ impl UserData {
                 ((code, text), v)
             })
             .collect();
-        let out =
-            crate::text::codec::patch(&bytes, &b.path, spec, b.lowercase, b.syllable_codes, &edits)
-                .map_err(|e| {
-                    tracing::warn!("文本 {} 隔离（{e:?}）：不往里写", b.path.display());
-                    crate::issues::report(&b.path, crate::issues::IssueKind::Isolated);
-                    anyhow::anyhow!("文本 {} 解析失败：{e:?}", b.path.display())
-                })?;
+        // 补丁顺带给出结果的解码：大文件省一遍全文解析
+        let (out, decoded) = crate::text::codec::patch_decoded(
+            &bytes,
+            &b.path,
+            spec,
+            b.lowercase,
+            b.syllable_codes,
+            &edits,
+        )
+        .map_err(|e| {
+            tracing::warn!("文本 {} 隔离（{e:?}）：不往里写", b.path.display());
+            crate::issues::report(&b.path, crate::issues::IssueKind::Isolated);
+            anyhow::anyhow!("文本 {} 解析失败：{e:?}", b.path.display())
+        })?;
         crate::text::fold::commit_text(&b.path, &out, Some(&fp_before))?;
-        let entries = Self::text_entries(&out, b)?;
+        crate::issues::report_parse(&b.path, decoded.bad_lines);
+        let entries = decoded.entries;
         let fp = crate::text::fold::fingerprint(Some(&out));
         self.install_text_segment(target, schema, entries, upto, Some(upto), fp, Some(upto))
     }

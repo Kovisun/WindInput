@@ -65,7 +65,7 @@ struct RawWind {
 /// 读：按 escape 设置反转义。命令栏文本例外——它的反斜杠归命令栏 lexer 管，`\n` / `\t` 是字面
 /// 序列，这里原样保留（`escape_text_field` 对它只把真实换行 / 制表符写成 `\n` / `\t`，lexer 读到
 /// 两者等价；而 `unescape_text_field` 对它不是逆函数，用了就会在第一次保存后改写用户的文本）。
-fn unescape(escape: bool, s: &str) -> String {
+pub(crate) fn unescape(escape: bool, s: &str) -> String {
     if escape && !wind_wdict::is_cmdbar_text(s) {
         wind_wdict::unescape_text_field(s)
     } else {

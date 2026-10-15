@@ -248,6 +248,19 @@ pub fn patch(
     syllable: bool,
     edits: &BTreeMap<(String, String), Option<SnapshotEntry>>,
 ) -> Result<Vec<u8>, ParseError> {
+    patch_decoded(bytes, path, spec, lowercase, syllable, edits).map(|(b, _)| b)
+}
+
+/// 同 [`patch`]，并顺带给出补丁结果的解码（与对结果再 [`decode`] 一遍逐项相同，含行号与坏行数），
+/// 省掉折回时的第二遍全文解析。
+pub fn patch_decoded(
+    bytes: &[u8],
+    path: &Path,
+    spec: &TableSpec,
+    lowercase: bool,
+    syllable: bool,
+    edits: &BTreeMap<(String, String), Option<SnapshotEntry>>,
+) -> Result<(Vec<u8>, Decoded), ParseError> {
     let fresh;
     let bytes: &[u8] = if bytes.is_empty() {
         fresh = header(spec, syllable);
@@ -266,7 +279,8 @@ pub fn patch(
         .is_some_and(|i| i > 0 && body.as_bytes()[i - 1] == b'\r');
     let nl = if crlf { "\r\n" } else { "\n" };
     let idx = column_index(&doc, spec);
-    let render_row = |e: &SnapshotEntry| -> String {
+    // 新行：按文件列序的已转义字段
+    let render_fields = |e: &SnapshotEntry| -> Vec<String> {
         doc.columns
             .iter()
             .map(|fc| {
@@ -278,31 +292,46 @@ pub fn patch(
                     .unwrap_or_default();
                 escape(doc.escape, &v)
             })
-            .collect::<Vec<_>>()
-            .join("\t")
+            .collect()
+    };
+    // 新行读回来是什么（与 parse_table + decode_row 同一规则）
+    let reread = |fields: &[String]| -> Option<SnapshotEntry> {
+        let un: Vec<String> = fields
+            .iter()
+            .map(|f| super::table::unescape(doc.escape, f))
+            .collect();
+        decode_row(&un, &idx, spec, lowercase, syllable)
     };
     let ends_with_nl = body.ends_with('\n');
     let mut lines: Vec<Option<String>> = body.split('\n').map(|l| Some(l.to_string())).collect();
     if ends_with_nl {
         lines.pop();
     }
-    // 各键在文件里出现的行
-    let mut hits: HashMap<(&str, &str), Vec<usize>> = HashMap::new();
-    let decoded: Vec<(usize, SnapshotEntry)> = doc
-        .rows
-        .iter()
-        .filter_map(|r| decode_row(&r.fields, &idx, spec, lowercase, syllable).map(|e| (r.line, e)))
-        .collect();
-    for (line, e) in &decoded {
-        if edits.contains_key(&(e.code.clone(), e.text.clone())) {
-            hits.entry((e.code.as_str(), e.text.as_str()))
-                .or_default()
-                .push(*line);
+    // 每行读出的条目（None = 非数据行或坏行）
+    let mut line_entry: Vec<Option<SnapshotEntry>> = vec![None; lines.len()];
+    let mut bad_lines = 0usize;
+    for r in &doc.rows {
+        match decode_row(&r.fields, &idx, spec, lowercase, syllable) {
+            Some(e) => line_entry[r.line] = Some(e),
+            None => bad_lines += 1,
         }
     }
-    let mut appended = Vec::new();
-    for ((code, text), new) in edits {
-        match hits.get(&(code.as_str(), text.as_str())) {
+    let (_, comment_cutoff) = wind_dict::rime_body_layout(body).ok_or(ParseError::NoBody)?;
+    // `# no comment` 所在行号（之前的行都在注释区）
+    let cutoff_line = comment_cutoff.map(|c| body[..c].matches('\n').count());
+    let mut hits: HashMap<(String, String), Vec<usize>> = HashMap::new();
+    for (i, e) in line_entry.iter().enumerate() {
+        if let Some(e) = e
+            && edits.contains_key(&(e.code.clone(), e.text.clone()))
+        {
+            hits.entry((e.code.clone(), e.text.clone()))
+                .or_default()
+                .push(i);
+        }
+    }
+    let mut appended: Vec<(String, Option<SnapshotEntry>)> = Vec::new();
+    for (key, new) in edits {
+        match hits.get(key) {
             Some(ls) => {
                 let first = ls[0];
                 let cr = if lines[first].as_deref().is_some_and(|l| l.ends_with('\r')) {
@@ -312,40 +341,65 @@ pub fn patch(
                 };
                 for &i in ls {
                     lines[i] = None;
+                    line_entry[i] = None;
                 }
                 if let Some(e) = new {
-                    lines[first] = Some(format!("{}{cr}", render_row(e)));
+                    let f = render_fields(e);
+                    let text = f.join("\t");
+                    // 换上的行落在注释区里且以 # 开头 ⇒ 读回来是注释
+                    let comment = text.starts_with('#') && cutoff_line.is_none_or(|c| first <= c);
+                    line_entry[first] = if comment { None } else { reread(&f) };
+                    lines[first] = Some(format!("{text}{cr}"));
                 }
             }
             None => {
                 if let Some(e) = new {
-                    appended.push(render_row(e));
+                    let f = render_fields(e);
+                    let entry = reread(&f);
+                    appended.push((f.join("\t"), entry));
                 }
             }
         }
     }
     let mut out = String::with_capacity(bytes.len() + appended.len() * 32);
     out.push_str(bom);
-    let kept: Vec<&String> = lines.iter().flatten().collect();
-    for (i, l) in kept.iter().enumerate() {
+    let mut entries: Vec<SnapshotEntry> = Vec::new();
+    let mut n = 0usize;
+    let kept_total = lines.iter().flatten().count();
+    for (l, e) in lines.iter().zip(line_entry) {
+        let Some(l) = l else { continue };
         out.push_str(l);
-        if i + 1 < kept.len() || ends_with_nl {
+        if n + 1 < kept_total || ends_with_nl {
             out.push('\n');
         }
+        if let Some(mut e) = e {
+            e.order = n as u32;
+            entries.push(e);
+        }
+        n += 1;
     }
     if !appended.is_empty() && !out.is_empty() && !out.ends_with('\n') {
         out.push_str(nl);
     }
-    let (_, comment_cutoff) = wind_dict::rime_body_layout(body).ok_or(ParseError::NoBody)?;
-    if comment_cutoff.is_none() && appended.iter().any(|r| r.starts_with('#')) {
+    if comment_cutoff.is_none() && appended.iter().any(|(r, _)| r.starts_with('#')) {
         out.push_str("# no comment");
         out.push_str(nl);
+        n += 1;
     }
-    for r in appended {
+    for (r, e) in appended {
         out.push_str(&r);
         out.push_str(nl);
+        if let Some(mut e) = e {
+            e.order = n as u32;
+            entries.push(e);
+        }
+        n += 1;
     }
-    Ok(out.into_bytes())
+    entries.sort_by(|a, b| {
+        (a.code.as_str(), a.text.as_str()).cmp(&(b.code.as_str(), b.text.as_str()))
+    });
+    entries.dedup_by(|a, b| a.code == b.code && a.text == b.text);
+    Ok((out.into_bytes(), Decoded { entries, bad_lines }))
 }
 
 #[cfg(test)]
@@ -514,6 +568,36 @@ mod tests {
         let d = decode(out.as_bytes(), Path::new("f"), &FREQ, false, false).unwrap();
         assert_eq!(d.entries.len(), 1);
         assert!(out.contains("kind: freq"));
+    }
+
+    /// 补丁顺带给出的条目必须与重新解析补丁结果逐项相同（含行号、坏行数）。
+    #[test]
+    fn patched_entries_equal_reparsing_the_output() {
+        let head = render(&TEMP, true, &[]);
+        let crlf_head = head.replace('\n', "\r\n");
+        let cases = [
+            format!("{head}你好\tni hao\t3\t2\t9\n坏\n# 注\n你好\tni hao\t1\t1\t1\n先\txian\t1\t1\t1"),
+            format!("\u{feff}{crlf_head}啊\ta\t1\t1\t1\r\n"),
+            "---\ncolumns: [text, code, weight, count, created_at]\nwind: {kind: temp}\n...\n啊\ta\t1\t1\t1\n".to_string(),
+            String::new(),
+        ];
+        let mut edits = BTreeMap::new();
+        edits.insert(
+            ("nihao".to_string(), "你好".to_string()),
+            Some(e("nihao", "你好", 9, 9, 9, 9, 0b101)),
+        );
+        edits.insert(("a".to_string(), "啊".to_string()), None);
+        edits.insert(
+            ("xin".to_string(), "#新".to_string()),
+            Some(e("xin", "#新", 1, 1, 1, 1, 0b1)),
+        );
+        for src in &cases {
+            let (out, got) =
+                patch_decoded(src.as_bytes(), Path::new("t"), &TEMP, false, true, &edits).unwrap();
+            let want = decode(&out, Path::new("t"), &TEMP, false, true).unwrap();
+            assert_eq!(got.entries, want.entries, "{src:?}");
+            assert_eq!(got.bad_lines, want.bad_lines, "{src:?}");
+        }
     }
 
     #[test]
