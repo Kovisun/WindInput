@@ -1398,7 +1398,7 @@ do_installer() {
 # 【不含 userdata/】—— 那是便携版的用户数据目录(配置/词频/用户词库), 打进包等于把打包机
 # 的个人数据分发给所有人。
 # 缺 wind_setting.exe / wind_portable.exe 时照常出包: build_setting/build_portable 在伴生仓
-# 缺失时自行跳过(见其函数首行), 此处不二次判定 —— 这也让没有私有伴生仓的环境能出便携包。
+# 缺失时自行跳过(见其函数首行), 此处不二次判定 —— 这也让没有伴生仓的环境能出便携包。
 do_portable_zip() {
     local skip="${1:-}"
     if [ "$skip" = "skip" ]; then
