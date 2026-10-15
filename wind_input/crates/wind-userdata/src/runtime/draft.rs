@@ -173,11 +173,6 @@ impl Runtime {
     }
 
     pub fn clear_drafts(&self, schema: &str) -> anyhow::Result<usize> {
-        let mut n = 0;
-        self.ud.fold_with(D, schema, &mut |v| {
-            n = v.len();
-            Vec::new()
-        })?;
-        Ok(n)
+        self.ud.clear(D, schema)
     }
 }

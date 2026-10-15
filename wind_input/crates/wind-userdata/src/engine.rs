@@ -22,6 +22,9 @@ pub const FOLD_THRESHOLD: usize = 4000;
 pub const JOURNAL_MAX_BYTES: u64 = 8 << 20;
 /// 文本目标的空闲折回间隔（§3.5：文本目标的操作来自用户主动动作，空闲 30 秒再写回）。
 pub const TEXT_IDLE: std::time::Duration = std::time::Duration::from_secs(30);
+/// 文本目标最老的待处理操作超过这么久，即使一直有新写入（连续打字从不空闲）也折回：
+/// 学到的数据最多这么久就进用户目录（P5：复制用户目录 / 删 state 时的缺口上限）。
+pub const TEXT_MAX_PENDING: std::time::Duration = std::time::Duration::from_secs(300);
 
 /// 方案 id 会成为状态目录 / 文本目录下的一个路径分量：拒绝不能安全充当单个分量的 id（空、`.` /
 /// `..`、含路径分隔符或 Windows 保留字符、控制字符、首尾是点或空格、过长）。不限定 ASCII——用户自建
@@ -55,11 +58,25 @@ pub struct TextBinding {
     pub name: String,
     /// 方案的 `lowercase_code`：匹配键规范化用。
     pub lowercase: bool,
-    /// 新建文件时是否声明 `code_spacing: syllable`（拼音族）。
+    /// 新建文件时是否声明 `code_spacing: syllable`（拼音族）。表格文本里它决定码列是否写音节空格。
     pub syllable_codes: bool,
+    /// 文件格式：用户词 `.dict.yaml`，或学到的数据的表格文本（§2.4）。
+    pub format: TextFormat,
+}
+
+/// 文本目标的文件格式。
+#[derive(Clone, Copy, Debug)]
+pub enum TextFormat {
+    /// `user.dict.yaml`：text / code / weight，计数与时间不进文本（P2a）。
+    Words,
+    /// 学到的数据：按列规格读写，计数与时间都进文本（P5）。
+    Table(&'static crate::text::codec::TableSpec),
 }
 
 type TargetKey = (Target, String);
+
+/// 文本绑定规则：给定 (目标, 方案) 返回它该绑定的文件；不归规则管 ⇒ None（P5：学到的数据）。
+pub type TextRule = Box<dyn Fn(Target, &str) -> Option<TextBinding> + Send + Sync>;
 
 pub struct Dirs {
     /// 本机状态目录（`<localdata>/state/`，设计 §2.1）。
@@ -127,6 +144,14 @@ pub struct UserData {
     text_retry: Mutex<BTreeMap<TargetKey, (u32, std::time::Instant)>>,
     /// 文本目标的空闲时长（默认 `TEXT_IDLE`；测试可改）。
     text_idle: Mutex<std::time::Duration>,
+    /// 待处理上限（默认 `TEXT_MAX_PENDING`；测试可改）。
+    text_max_pending: Mutex<std::time::Duration>,
+    /// 各文本目标本轮第一笔待处理写入的时刻（折回成功即清）。
+    first_pending: Mutex<BTreeMap<TargetKey, std::time::Instant>>,
+    /// 上次压实裁到的位置（`keep_from`）：裁不动时不再反复重写日志（审查 I-2）。
+    pruned_upto: std::sync::atomic::AtomicU64,
+    /// 自动绑定规则（P5）：维护 / 压实 / `fold_with` 前把规则管的未绑定目标绑上。
+    text_rule: Mutex<Option<Arc<TextRule>>>,
     view: RwLock<Arc<View>>,
     state: Mutex<State>,
     lock: Option<Lock>,
@@ -495,6 +520,10 @@ impl UserData {
             last_write: Mutex::new(BTreeMap::new()),
             text_retry: Mutex::new(BTreeMap::new()),
             text_idle: Mutex::new(TEXT_IDLE),
+            text_max_pending: Mutex::new(TEXT_MAX_PENDING),
+            first_pending: Mutex::new(BTreeMap::new()),
+            pruned_upto: std::sync::atomic::AtomicU64::new(0),
+            text_rule: Mutex::new(None),
             view: RwLock::new(Arc::new(View {
                 snapshots,
                 delta: Arc::new(delta),
@@ -589,8 +618,11 @@ impl UserData {
         });
         let now = std::time::Instant::now();
         let mut lw = self.last_write.lock().unwrap_or_else(|e| e.into_inner());
+        let mut fp = self.first_pending.lock().unwrap_or_else(|e| e.into_inner());
         for op in ops {
-            lw.insert((op.target, op.schema.clone()), now);
+            let k = (op.target, op.schema.clone());
+            fp.entry(k.clone()).or_insert(now);
+            lw.insert(k, now);
         }
         Ok(seqs)
     }
@@ -608,6 +640,14 @@ impl UserData {
             bail!("只读模式");
         }
         check_schema_id(schema)?;
+        if let Err(e) = self.bind_by_rule(target, schema) {
+            tracing::warn!("数据文件绑定失败：{e:#}");
+        }
+        if let Some(b) = self.text_binding(target, schema)
+            && let TextFormat::Table(spec) = b.format
+        {
+            return self.fold_table_with(&b, spec, target, schema, policy);
+        }
         if self.text_owned(target, schema) {
             bail!(
                 "归文本管的目标不走 fold_with（清空 / 导入用 rewrite_text；未绑定时先 bind_text），免得绕过真源"
@@ -705,17 +745,243 @@ impl UserData {
 
     /// 绑定文本文件，随即 `sync_text` 一次（文件比段新就由文本重建）。同步失败（隔离 / 读不了）
     /// 时绑定照样生效，之后的折回 / 同步会重试。只读实例只登记绑定、不同步（它不写快照与 state）。
+    ///
+    /// 表格文本目标的**采纳**（P5，§7.4 第 2 步）：从没归文本管过（未绑定、state 无指纹）、文件不在、
+    /// 但引擎里已有该目标的数据（v5 及以前只在快照里）⇒ 先由当前视图渲染出文本再绑定。不能由
+    /// 「文件不存在」推出「数据为空」——那会装上空段，把学到的数据清掉。
     pub fn bind_text(&self, target: Target, schema: &str, b: TextBinding) -> anyhow::Result<()> {
         check_schema_id(schema)?;
+        let adopt = !self.readonly()
+            && !self.text_owned(target, schema)
+            && !b.path.exists()
+            && self.has_data(target, schema);
+        if adopt {
+            // 先落成文本、成功了才登记绑定：失败时不留下一个「文件不在」的绑定，否则下一次
+            // 折回 / 同步会把只在快照里的数据当成空（审查 I-1）
+            self.adopt_view(&b, target, schema)?;
+        }
         self.text_bindings
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .insert((target, schema.to_string()), b);
-        if self.readonly() {
+            .insert((target, schema.to_string()), b.clone());
+        if self.readonly() || adopt {
             return Ok(());
         }
         self.sync_text(target, schema)?;
         Ok(())
+    }
+
+    /// 设定自动绑定规则（P5）。之后规则管的目标在维护、压实、`fold_with` 之前自动绑定。
+    pub fn set_text_rule(&self, rule: TextRule) {
+        *self.text_rule.lock().unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(rule));
+    }
+
+    /// 按规则绑定（已绑定 / 规则不管 ⇒ `Ok(false)`）。
+    pub fn bind_by_rule(&self, target: Target, schema: &str) -> anyhow::Result<bool> {
+        if self.text_binding(target, schema).is_some() {
+            return Ok(false);
+        }
+        let rule = self
+            .text_rule
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let Some(b) = rule.and_then(|r| r(target, schema)) else {
+            return Ok(false);
+        };
+        self.bind_text(target, schema, b)?;
+        Ok(true)
+    }
+
+    /// 把有数据（段或待处理操作）、规则管、尚未绑定的目标都绑上；单个失败只 WARN。
+    fn bind_all_by_rule(&self) {
+        if self
+            .text_rule
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_none()
+        {
+            return;
+        }
+        for (t, s) in self.keys() {
+            if let Err(e) = self.bind_by_rule(t, &s) {
+                tracing::warn!("数据文件绑定失败（按已有数据提供查询）：{e:#}");
+            }
+        }
+    }
+
+    /// 引擎里有该目标的段或未折回操作。
+    fn has_data(&self, target: Target, schema: &str) -> bool {
+        let v = self.view();
+        v.snapshots.contains_key(&(target, schema.to_string()))
+            || v.delta.pending(target, schema) > 0
+    }
+
+    /// 由当前视图（段 + delta）渲染出文本、写盘、装段推进水位。写入复核「文件仍不存在」。
+    fn adopt_view(&self, b: &TextBinding, target: Target, schema: &str) -> anyhow::Result<()> {
+        let _f = self.fold_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let (upto, base) = self.upto_and_view()?;
+        let entries = merge_for_fold(
+            base.snapshots
+                .get(&(target, schema.to_string()))
+                .map(|s| s.as_ref()),
+            &base.delta,
+            target,
+            schema,
+            upto,
+        );
+        let content = Self::render_text(b, &entries);
+        crate::text::fold::commit_text(
+            &b.path,
+            content.as_bytes(),
+            Some(&crate::text::fold::fingerprint(None)),
+        )?;
+        tracing::info!(
+            "{} 由已有数据生成（{} 条）",
+            b.path.display(),
+            entries.len()
+        );
+        let entries = Self::text_entries(content.as_bytes(), b)?;
+        let fp = crate::text::fold::fingerprint(Some(content.as_bytes()));
+        self.install_text_segment(target, schema, entries, upto, Some(upto), fp, Some(upto))
+    }
+
+    /// 整文件渲染（按绑定的格式）。
+    fn render_text(b: &TextBinding, entries: &[SnapshotEntry]) -> String {
+        match b.format {
+            TextFormat::Words => {
+                let rows: Vec<(String, String, u64, i32)> = entries
+                    .iter()
+                    .map(|e| (e.code.clone(), e.text.clone(), e.boundary, e.weight))
+                    .collect();
+                crate::text::render(&b.name, b.syllable_codes, &rows)
+            }
+            TextFormat::Table(spec) => crate::text::codec::render(spec, b.syllable_codes, entries),
+        }
+    }
+
+    /// 文件此刻解析不了（已绑定、文件在、按格式解析失败）。
+    pub fn text_isolated(&self, target: Target, schema: &str) -> bool {
+        let Some(b) = self.text_binding(target, schema) else {
+            return false;
+        };
+        match crate::text::fold::read_text(&b.path) {
+            Ok(Some((bytes, _))) => Self::text_entries(&bytes, &b).is_err(),
+            _ => false,
+        }
+    }
+
+    /// 显式整体替换之前：当前文件解析不了 ⇒ 另存为 `.corrupt-<时间>` 并登记（§2.5：坏文件不被覆盖）。
+    fn preserve_if_corrupt(b: &TextBinding) -> anyhow::Result<()> {
+        if let Some((bytes, _)) = crate::text::fold::read_text(&b.path)?
+            && Self::text_entries(&bytes, b).is_err()
+            && let Some(kept) = crate::text::fold::preserve_corrupt(&b.path)?
+        {
+            crate::issues::report(
+                &b.path,
+                crate::issues::IssueKind::Rebuilt {
+                    kept_as: kept
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default(),
+                },
+            );
+        }
+        Ok(())
+    }
+
+    /// 表格文本目标的 `fold_with`（清空 / 导入 / 淘汰）：由文件当前内容 + 待处理操作得全集，跑
+    /// `policy`，整文件写回。文件解析不了 ⇒ Err、不写（自动清理不得覆盖坏文件，§2.5）。
+    fn fold_table_with(
+        &self,
+        b: &TextBinding,
+        spec: &'static crate::text::codec::TableSpec,
+        target: Target,
+        schema: &str,
+        policy: &mut dyn FnMut(Vec<SnapshotEntry>) -> Vec<SnapshotEntry>,
+    ) -> anyhow::Result<()> {
+        let _f = self.fold_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let (upto, base) = self.upto_and_view()?;
+        let cur = crate::text::fold::read_text(&b.path)?;
+        let fp_before = crate::text::fold::fingerprint(cur.as_ref().map(|(x, _)| x.as_slice()));
+        let file_entries = match &cur {
+            Some((bytes, _)) => Self::text_entries(bytes, b)?,
+            None => Vec::new(),
+        };
+        let ops: Vec<&Entry> = base
+            .delta
+            .prefix(target, schema, "")
+            .into_iter()
+            .filter(|e| e.seq <= upto)
+            .collect();
+        let mut out = policy(overlay_entries(file_entries, ops));
+        out.sort_by(|a, b| {
+            (a.code.as_str(), a.text.as_str()).cmp(&(b.code.as_str(), b.text.as_str()))
+        });
+        out.dedup_by(|a, b| a.code == b.code && a.text == b.text);
+        let content = crate::text::codec::render(spec, b.syllable_codes, &out);
+        crate::text::fold::commit_text(&b.path, content.as_bytes(), Some(&fp_before))?;
+        let entries = Self::text_entries(content.as_bytes(), b)?;
+        let fp = crate::text::fold::fingerprint(Some(content.as_bytes()));
+        self.install_text_segment(target, schema, entries, upto, Some(upto), fp, Some(upto))
+    }
+
+    /// 清空一个目标（用户显式动作），返回清掉的条数。表格文本目标走整体替换（坏文件先另存留存），
+    /// 其余走 `fold_with`。
+    pub fn clear(&self, target: Target, schema: &str) -> anyhow::Result<usize> {
+        if let Some(b) = self.text_binding(target, schema)
+            && matches!(b.format, TextFormat::Table(_))
+        {
+            let n = {
+                let v = self.view();
+                merge_for_fold(
+                    v.snapshots
+                        .get(&(target, schema.to_string()))
+                        .map(|s| s.as_ref()),
+                    &v.delta,
+                    target,
+                    schema,
+                    u64::MAX,
+                )
+                .len()
+            };
+            self.replace_text_entries(target, schema, Vec::new())?;
+            return Ok(n);
+        }
+        let mut n = 0;
+        self.fold_with(target, schema, &mut |v| {
+            n = v.len();
+            Vec::new()
+        })?;
+        Ok(n)
+    }
+
+    /// 表格文本目标的显式整体替换（清空 / 导入 / 还原）：`entries` 就是新全集，待处理操作一并取代。
+    /// 当前文件解析不了 ⇒ 先另存留存再写。
+    pub fn replace_text_entries(
+        &self,
+        target: Target,
+        schema: &str,
+        mut entries: Vec<SnapshotEntry>,
+    ) -> anyhow::Result<()> {
+        if self.readonly() {
+            bail!("只读模式");
+        }
+        let b = self
+            .text_binding(target, schema)
+            .ok_or_else(|| anyhow::anyhow!("目标未绑定文本"))?;
+        let _f = self.fold_lock.lock().unwrap_or_else(|e| e.into_inner());
+        Self::preserve_if_corrupt(&b)?;
+        let (upto, _) = self.upto_and_view()?;
+        entries.sort_by(|a, b| {
+            (a.code.as_str(), a.text.as_str()).cmp(&(b.code.as_str(), b.text.as_str()))
+        });
+        entries.dedup_by(|a, b| a.code == b.code && a.text == b.text);
+        let content = Self::render_text(&b, &entries);
+        crate::text::fold::commit_text(&b.path, content.as_bytes(), None)?;
+        let entries = Self::text_entries(content.as_bytes(), &b)?;
+        let fp = crate::text::fold::fingerprint(Some(content.as_bytes()));
+        self.install_text_segment(target, schema, entries, upto, Some(upto), fp, Some(upto))
     }
 
     /// 取「折回起点」：写锁下的水位与视图（同 `fold_with`）。
@@ -735,13 +1001,28 @@ impl UserData {
 
     /// 文本 → 段条目：按 (code, text) 排序去重（同键多行取文件里第一行），`order` = 行号。
     fn text_entries(bytes: &[u8], b: &TextBinding) -> anyhow::Result<Vec<SnapshotEntry>> {
+        if let TextFormat::Table(spec) = b.format {
+            let d = crate::text::codec::decode(bytes, &b.path, spec, b.lowercase, b.syllable_codes)
+                .map_err(|e| {
+                    tracing::warn!(
+                        "文本 {} 隔离（{e:?}）：不往里写，按已有数据提供查询",
+                        b.path.display()
+                    );
+                    crate::issues::report(&b.path, crate::issues::IssueKind::Isolated);
+                    anyhow::anyhow!("文本 {} 解析失败：{e:?}", b.path.display())
+                })?;
+            crate::issues::report_parse(&b.path, d.bad_lines);
+            return Ok(d.entries);
+        }
         let dict = crate::text::parse(bytes, &b.path, b.lowercase).map_err(|e| {
             tracing::warn!(
                 "文本 {} 隔离（{e:?}）：不往里折回，按已有段提供查询",
                 b.path.display()
             );
+            crate::issues::report(&b.path, crate::issues::IssueKind::Isolated);
             anyhow::anyhow!("文本 {} 解析失败：{e:?}", b.path.display())
         })?;
+        crate::issues::report_parse(&b.path, dict.bad_lines);
         let mut v: Vec<SnapshotEntry> = dict
             .entries
             .into_iter()
@@ -815,6 +1096,9 @@ impl UserData {
         schema: &str,
     ) -> anyhow::Result<()> {
         use crate::text::PatchOp;
+        if let TextFormat::Table(spec) = b.format {
+            return self.fold_table_locked(b, spec, target, schema);
+        }
         let (upto, base) = self.upto_and_view()?;
         let pending: Vec<&Entry> = base
             .delta
@@ -883,6 +1167,7 @@ impl UserData {
             )
             .map_err(|e| {
                 tracing::warn!("文本 {} 隔离（{e:?}）：不往里折回", b.path.display());
+                crate::issues::report(&b.path, crate::issues::IssueKind::Isolated);
                 anyhow::anyhow!("文本 {} 解析失败：{e:?}", b.path.display())
             })?;
             // 2–4. tmp + fsync → 复核原文件指纹 → .bak + rename + fsync 目录
@@ -900,6 +1185,68 @@ impl UserData {
         } else {
             crate::text::fold::fingerprint(Some(&new_bytes))
         };
+        self.install_text_segment(target, schema, entries, upto, Some(upto), fp, Some(upto))
+    }
+
+    /// 表格文本目标折回（调用方已持 `fold_lock`）：待处理操作涉及的键，以**文件当前内容**为底按
+    /// seq 叠加出终值，按键补丁写回（计数与时间都进文本）。手改过的值就是新的底。
+    fn fold_table_locked(
+        &self,
+        b: &TextBinding,
+        spec: &'static crate::text::codec::TableSpec,
+        target: Target,
+        schema: &str,
+    ) -> anyhow::Result<()> {
+        let (upto, base) = self.upto_and_view()?;
+        let mut pending: Vec<&Entry> = base
+            .delta
+            .prefix(target, schema, "")
+            .into_iter()
+            .filter(|e| e.seq <= upto)
+            .collect();
+        if pending.is_empty() {
+            return Ok(());
+        }
+        pending.sort_by_key(|e| e.seq);
+        pending.dedup_by_key(|e| e.seq);
+        let cur = crate::text::fold::read_text(&b.path)?;
+        let fp_before = crate::text::fold::fingerprint(cur.as_ref().map(|(x, _)| x.as_slice()));
+        let (bytes, _) = cur.unwrap_or((Vec::new(), 0));
+        let file_entries = if bytes.is_empty() {
+            Vec::new()
+        } else {
+            Self::text_entries(&bytes, b)?
+        };
+        let mut by_key: BTreeMap<(String, String), Vec<&Entry>> = BTreeMap::new();
+        for op in pending {
+            by_key
+                .entry((op.code.clone(), op.text.clone()))
+                .or_default()
+                .push(op);
+        }
+        let mut file_map: BTreeMap<(String, String), SnapshotEntry> = file_entries
+            .into_iter()
+            .filter(|e| by_key.contains_key(&(e.code.clone(), e.text.clone())))
+            .map(|e| ((e.code.clone(), e.text.clone()), e))
+            .collect();
+        let edits: BTreeMap<(String, String), Option<SnapshotEntry>> = by_key
+            .into_iter()
+            .map(|((code, text), ops)| {
+                let base = file_map.remove(&(code.clone(), text.clone()));
+                let v = apply_ops(base, &ops, &code, &text);
+                ((code, text), v)
+            })
+            .collect();
+        let out =
+            crate::text::codec::patch(&bytes, &b.path, spec, b.lowercase, b.syllable_codes, &edits)
+                .map_err(|e| {
+                    tracing::warn!("文本 {} 隔离（{e:?}）：不往里写", b.path.display());
+                    crate::issues::report(&b.path, crate::issues::IssueKind::Isolated);
+                    anyhow::anyhow!("文本 {} 解析失败：{e:?}", b.path.display())
+                })?;
+        crate::text::fold::commit_text(&b.path, &out, Some(&fp_before))?;
+        let entries = Self::text_entries(&out, b)?;
+        let fp = crate::text::fold::fingerprint(Some(&out));
         self.install_text_segment(target, schema, entries, upto, Some(upto), fp, Some(upto))
     }
 
@@ -955,7 +1302,14 @@ impl UserData {
         }
         let entries = match &cur {
             Some((bytes, _)) => Self::text_entries(bytes, &b)?,
-            None => Vec::new(),
+            None if old_fp.is_none() && self.has_data(target, schema) => {
+                // 从没归文本管过的数据：文件不在不代表用户删了（§7.4），不装空段
+                bail!("{} 不存在而已有数据尚未落成文本，不清空", b.path.display());
+            }
+            None => {
+                crate::issues::clear(&b.path);
+                Vec::new()
+            }
         };
         let max_seq = folded.max(snap_wm.unwrap_or(0));
         self.install_text_segment(target, schema, entries, max_seq, None, fp, None)?;
@@ -983,6 +1337,7 @@ impl UserData {
         if let Err(e) = self.fold_text_locked(&b, target, schema) {
             tracing::warn!("整文件替换前折回失败，待处理操作由新全集取代：{e:#}");
         }
+        Self::preserve_if_corrupt(&b)?;
         let (upto, _) = self.upto_and_view()?;
         let content = crate::text::render(&b.name, b.syllable_codes, rows);
         crate::text::fold::commit_text(&b.path, content.as_bytes(), None)?;
@@ -998,32 +1353,45 @@ impl UserData {
             return Ok(());
         };
         if let Some((bytes, _)) = crate::text::fold::read_text(&b.path)? {
-            crate::text::parse(&bytes, &b.path, b.lowercase).map_err(|e| {
-                anyhow::anyhow!(
-                    "用户词文本 {} 无法解析（{e:?}），请先修复或删除它",
-                    b.path.display()
-                )
-            })?;
+            Self::text_entries(&bytes, &b)
+                .map_err(|e| anyhow::anyhow!("数据文件格式有误（{e:#}），请先修复或删除它"))?;
         }
         Ok(())
     }
 
-    /// 已绑定、有待处理操作、且距最后一次写入 ≥ `idle` 的文本目标。
+    /// 已绑定、有待处理操作、不在退避中，且距最后一次写入 ≥ `idle` 或最老的待处理写入已超过
+    /// 待处理上限（连续打字从不空闲也要定期落进文本）的文本目标。
     fn idle_text_targets(&self, idle: std::time::Duration) -> Vec<TargetKey> {
         let v = self.view();
+        let max_pending = *self
+            .text_max_pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let lw = self.last_write.lock().unwrap_or_else(|e| e.into_inner());
+        let fp = self.first_pending.lock().unwrap_or_else(|e| e.into_inner());
         let retry = self.text_retry.lock().unwrap_or_else(|e| e.into_inner());
         let now = std::time::Instant::now();
+        let aged = |m: &BTreeMap<TargetKey, std::time::Instant>, k: &TargetKey, d| {
+            m.get(k)
+                .is_none_or(|t| now.saturating_duration_since(*t) >= d)
+        };
         self.bound_keys()
             .into_iter()
             .filter(|k| {
                 v.delta.pending(k.0, &k.1) > 0
-                    && lw
-                        .get(k)
-                        .is_none_or(|t| now.saturating_duration_since(*t) >= idle)
+                    && (aged(&lw, k, idle) || aged(&fp, k, max_pending))
                     && retry.get(k).is_none_or(|(_, at)| now >= *at)
             })
             .collect()
+    }
+
+    /// 在退避中（上次折回失败、还没到重试时刻）。
+    fn in_text_backoff(&self, key: &TargetKey) -> bool {
+        self.text_retry
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(key)
+            .is_some_and(|(_, at)| std::time::Instant::now() < *at)
     }
 
     /// 折回空闲够久的文本目标；返回折回成功的目标数。单个目标失败（隔离 / 读不了 / 编辑器
@@ -1046,6 +1414,12 @@ impl UserData {
         match r {
             Ok(()) => {
                 retry.remove(&key);
+                if self.view().delta.pending(target, schema) == 0 {
+                    self.first_pending
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .remove(&key);
+                }
                 true
             }
             Err(e) => {
@@ -1151,11 +1525,15 @@ impl UserData {
         if self.readonly() {
             bail!("只读模式");
         }
+        self.bind_all_by_rule();
         // 归文本管的目标：已绑定的逐个折回，失败不拦压实（裁剪只到 delta 最小 seq，留在 delta
         // 里的操作不受影响）；未绑定的等绑定后再折回。
         for (t, s) in self.view().delta.targets() {
             if self.text_binding(t, &s).is_some() {
-                self.fold_text_logged(t, &s);
+                // 退避中的（文件隔离 / 读不了）不在压实时反复重试
+                if !self.in_text_backoff(&(t, s.clone())) {
+                    self.fold_text_logged(t, &s);
+                }
             } else if !self.text_owned(t, &s) {
                 self.fold_with(t, &s, &mut |v| v)?;
             }
@@ -1172,7 +1550,12 @@ impl UserData {
             .min_seq()
             .unwrap_or(u64::MAX)
             .min(j.next_seq());
-        j.prune_before(keep_from)?;
+        // 裁不动（卡在折不回的目标上）就不重写：整份重写 ≥ 8 MB 的日志换不来任何空间
+        if keep_from > self.pruned_upto.load(std::sync::atomic::Ordering::Acquire) {
+            j.prune_before(keep_from)?;
+            self.pruned_upto
+                .store(keep_from, std::sync::atomic::Ordering::Release);
+        }
         let jdir = self.dirs.state_dir.join("journal");
         for p in std::fs::read_dir(&jdir)
             .into_iter()
@@ -1205,7 +1588,27 @@ impl UserData {
             .iter()
             .any(|k| v.delta.pending(k.0, &k.1) >= threshold && !self.text_owned(k.0, &k.1))
             || !self.idle_text_targets(self.text_idle()).is_empty()
-            || self.journal_len() > max_bytes
+            || (self.journal_len() > max_bytes
+                && v.delta.min_seq().is_none_or(|m| {
+                    m > self.pruned_upto.load(std::sync::atomic::Ordering::Acquire)
+                }))
+            || self.has_unbound_ruled(&v)
+    }
+
+    /// 有待处理操作、规则管、却还没绑定的目标（要起一次维护把它绑上）。
+    fn has_unbound_ruled(&self, v: &View) -> bool {
+        let Some(rule) = self
+            .text_rule
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+        else {
+            return false;
+        };
+        v.delta
+            .targets()
+            .iter()
+            .any(|(t, s)| self.text_binding(*t, s).is_none() && rule(*t, s).is_some())
     }
 
     pub fn needs_maintain(&self) -> bool {
@@ -1214,6 +1617,7 @@ impl UserData {
 
     /// 折回 `pending ≥ threshold` 的目标；日志超 `max_bytes` 则压实。返回折回的目标数。
     pub fn maintain_with(&self, threshold: usize, max_bytes: u64) -> anyhow::Result<usize> {
+        self.bind_all_by_rule();
         let mut n = 0;
         let v = self.view();
         for (t, s) in v.delta.targets() {
@@ -1231,6 +1635,14 @@ impl UserData {
 
     fn text_idle(&self) -> std::time::Duration {
         *self.text_idle.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    #[doc(hidden)]
+    pub fn set_text_max_pending_for_test(&self, d: std::time::Duration) {
+        *self
+            .text_max_pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = d;
     }
 
     #[doc(hidden)]
@@ -1254,12 +1666,44 @@ impl UserData {
                 loop {
                     std::thread::sleep(every);
                     let Some(me) = weak.upgrade() else { return };
+                    if let Err(e) = me.sync_journal() {
+                        tracing::warn!("日志落盘失败：{e:#}");
+                    }
                     if me.needs_maintain() {
                         me.spawn_maintain();
                     }
                 }
             })
             .ok()
+    }
+
+    /// 日志有新写入就落盘一次（后台节拍每拍调）。只读实例没有日志写端 ⇒ `Ok(false)`。
+    pub fn sync_journal(&self) -> anyhow::Result<bool> {
+        // 锁内只取句柄，fsync 在锁外：追加（按键路径）不陪等
+        let handle = match self
+            .journal
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_mut()
+        {
+            Some(j) => j.take_sync_handle()?,
+            None => return Ok(false),
+        };
+        let Some(h) = handle else {
+            return Ok(false);
+        };
+        if let Err(e) = h.sync_data() {
+            if let Some(j) = self
+                .journal
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_mut()
+            {
+                j.mark_dirty();
+            }
+            return Err(anyhow::Error::from(e).context("刷日志"));
+        }
+        Ok(true)
     }
 
     pub fn maintain(&self) -> anyhow::Result<usize> {
@@ -1358,6 +1802,18 @@ mod tests {
             0,
         )
         .unwrap();
+    }
+
+    #[test]
+    fn sync_journal_reports_whether_it_synced() {
+        let (d, dirs) = dirs_for("syncj");
+        let ud = UserData::open(dirs).unwrap();
+        assert!(!ud.sync_journal().unwrap());
+        up(&ud, "a", "啊");
+        assert!(ud.sync_journal().unwrap());
+        assert!(!ud.sync_journal().unwrap());
+        drop(ud);
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     /// 折回写到一半崩溃（新 wdat 已写、sidecar 未写）：重开后已折回的与未折回的都在。

@@ -400,6 +400,26 @@ impl Store {
         }
     }
 
+    /// 学到的数据的文本被手改 / 换掉 ⇒ 由文本重建段（P5）。变了返回 true 并 bump 代次。
+    pub fn sync_learned_text(&self, target: wind_userdata::record::Target, schema: &str) -> bool {
+        let ud = self.runtime().data();
+        if let Err(e) = ud.bind_by_rule(target, schema) {
+            tracing::warn!("数据文件 {schema} 绑定失败：{e:#}");
+            return false;
+        }
+        match ud.sync_text(target, schema) {
+            Ok(true) => {
+                self.bump_words_gen(schema);
+                true
+            }
+            Ok(false) => false,
+            Err(e) => {
+                tracing::warn!("数据文件 {schema} 同步失败：{e:#}");
+                false
+            }
+        }
+    }
+
     /// 发现（用户目录下新出现的方案目录）+ 同步全部用户文本：各方案的用户词与 Shadow、全局短语。
     /// 返回变了的：方案名，短语变了另含 `"phrases"`（调用方据此重建输入期短语层）。
     /// 触发：配置热重载、`dict.reload` 不带路径（设计 §5）。
@@ -411,6 +431,11 @@ impl Store {
             .collect();
         for s in self.sync_shadows() {
             if !changed.contains(&s) {
+                changed.push(s);
+            }
+        }
+        for (t, s) in self.learned_text_keys() {
+            if self.sync_learned_text(t, &s) && !changed.contains(&s) {
                 changed.push(s);
             }
         }
@@ -446,6 +471,9 @@ impl Store {
                 TextPath::Charsets => self.sync_charsets().then(|| "charsets".to_string()),
                 TextPath::Words(s) => self.sync_user_text(&s).then_some(s),
                 TextPath::Shadow(s) => self.shadow_table_synced(&s).then_some(s),
+                TextPath::Learned(t, s) => self.sync_learned_text(t, &s).then_some(s),
+                TextPath::Completion => self.reload_completions().then(|| "completion".to_string()),
+                TextPath::Stats => None,
             };
             if let Some(n) = name
                 && !changed.contains(&n)
@@ -527,6 +555,11 @@ enum TextPath {
     Charsets,
     Words(String),
     Shadow(String),
+    /// 学到的数据（P5）：`<schema>/{temp,draft}.dict.yaml`、`{freq,assoc}.table.yaml`。
+    Learned(wind_userdata::record::Target, String),
+    Completion,
+    /// `stats/*.toml`：统计每次按需读文件，重载无需动作。
+    Stats,
 }
 
 /// 只认 `<base>/` 下的那几种文件。`fold_case`：按不分大小写的文件系统比较（Windows）；
@@ -562,17 +595,25 @@ fn classify_text_path(
     let is = |got: &String, want: &str| *got == fold(want);
     match rest {
         [f] if is(f, "phrases.dict.yaml") => Ok(TextPath::Phrases),
-        [f] if is(f, "quick_format.yaml") => Ok(TextPath::Quick),
+        [f] if is(f, "quick_format.toml") => Ok(TextPath::Quick),
         [f] if is(f, "common_chars.yaml") => Ok(TextPath::Common),
+        [f] if is(f, "completion.table.yaml") => Ok(TextPath::Completion),
         [d, f] if is(d, "charsets") && f.ends_with(&fold(".yaml")) => Ok(TextPath::Charsets),
+        [d, f] if is(d, "stats") && f.ends_with(&fold(".toml")) => Ok(TextPath::Stats),
         [d, f] => {
             let schema = schema_dir_name(base, d, fold_case);
             if is(f, "user.dict.yaml") {
                 Ok(TextPath::Words(schema))
             } else if is(f, "shadow.dict.yaml") {
                 Ok(TextPath::Shadow(schema))
+            } else if let Some(t) = crate::learned_text::LEARNED_TARGETS.into_iter().find(|t| {
+                crate::learned_text::learned_binding(base, *t, "s")
+                    .and_then(|b| b.path.file_name().map(|n| n.to_string_lossy().into_owned()))
+                    .is_some_and(|n| is(f, &n))
+            }) {
+                Ok(TextPath::Learned(t, schema))
             } else {
-                anyhow::bail!("不是用户词 / Shadow / 短语文件：{p}")
+                anyhow::bail!("不是可重载的用户数据文件：{p}")
             }
         }
         _ => Err(outside()),
@@ -1485,6 +1526,62 @@ mod tests {
         assert!(classify_text_path(&base, &p, false).is_err());
         assert!(classify_text_path(&base, &format!("{upper}/../X/user.dict.yaml"), true).is_err());
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// P5：学到的数据与补全历史也能经 dict.reload 指名重载。
+    #[test]
+    fn reload_accepts_learned_and_completion_paths() {
+        use wind_userdata::record::Target;
+        let base = std::path::Path::new("/u/data");
+        let p = |rel: &str| base.join(rel).to_string_lossy().into_owned();
+        assert!(matches!(
+            classify_text_path(base, &p("pinyin/freq.table.yaml"), false).unwrap(),
+            TextPath::Learned(Target::Freq, s) if s == "pinyin"
+        ));
+        assert!(matches!(
+            classify_text_path(base, &p("pinyin/temp.dict.yaml"), false).unwrap(),
+            TextPath::Learned(Target::Temp, _)
+        ));
+        assert!(matches!(
+            classify_text_path(base, &p("pinyin/draft.dict.yaml"), false).unwrap(),
+            TextPath::Learned(Target::Draft, _)
+        ));
+        assert!(matches!(
+            classify_text_path(base, &p("pinyin/assoc.table.yaml"), false).unwrap(),
+            TextPath::Learned(Target::Assoc, _)
+        ));
+        assert!(matches!(
+            classify_text_path(base, &p("completion.table.yaml"), false).unwrap(),
+            TextPath::Completion
+        ));
+        assert!(classify_text_path(base, &p("pinyin/other.yaml"), false).is_err());
+        assert!(
+            matches!(
+                classify_text_path(base, &p("stats/2026-10.toml"), false).unwrap(),
+                TextPath::Stats
+            ),
+            "统计按需读文件，重载即生效"
+        );
+    }
+
+    #[test]
+    fn reload_of_hand_edited_freq_text_takes_effect() {
+        let s = Store::open(tmp("wind_uw_reload_freq.redb")).unwrap();
+        s.record_freq("pinyin", "a", "啊").unwrap();
+        s.flush_user_data().unwrap();
+        let f = s.user_text_dir().join("pinyin/freq.table.yaml");
+        let t = std::fs::read_to_string(&f)
+            .unwrap()
+            .replace("a\t啊\t1\t", "a\t啊\t9\t");
+        std::fs::write(&f, t).unwrap();
+        let changed = s
+            .reload_user_text_paths(&[f.to_string_lossy().into_owned()])
+            .unwrap();
+        assert_eq!(changed, vec!["pinyin".to_string()]);
+        assert_eq!(
+            s.get_freq("pinyin", "a", "啊").unwrap().map(|r| r.count),
+            Some(9)
+        );
     }
 
     /// 真实 Windows：dict.reload 收到小写 + 正斜杠写法的路径也能重载。

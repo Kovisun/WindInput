@@ -27,7 +27,7 @@
 | `wind-ui-types` | 表现层协议（纯数据）：`UiCommand`/`UiEvent` 及载荷，协调器 ↔ 任意前端（桌面/macOS/Android）共用 | [AGENTS.md](wind_input/crates/wind-ui-types/AGENTS.md) |
 | `wind-cmdbar` | 命令直通车：短语解析 → AST 求值 → 动作执行（纯逻辑） | [AGENTS.md](wind_input/crates/wind-cmdbar/AGENTS.md) |
 | `wind-dict` | 多层复合词典引擎：DictLayer/CompositeDict 查询 + wdat mmap 二进制词库 | [AGENTS.md](wind_input/crates/wind-dict/AGENTS.md) |
-| `wind-store` | 用户数据门面：临时词 / 草稿 / 词频 / 联想历史（P1b）与用户词（P2b，真源 `user/<schema>/user.dict.yaml`）委托 `wind-userdata`；短语 / Shadow（P3）是 `user/` 下的文本小表；覆盖表在用户目录、补全与统计在本机状态目录（P4a）；redb 只供迁移读；三个 Store 层也在这里 | [AGENTS.md](wind_input/crates/wind-store/AGENTS.md) |
+| `wind-store` | 用户数据门面：用户词与学到的数据（临时词 / 草稿 / 词频 / 联想历史）委托 `wind-userdata`，真源都是 `<userdata>/data/<schema>/` 下的文本；短语 / Shadow / 覆盖表 / 补全 / 统计也在 `data/`（P5：复制用户目录即带走全部数据）；redb 只供迁移读；三个 Store 层也在这里 | [AGENTS.md](wind_input/crates/wind-store/AGENTS.md) |
 | `wind-userdata` | 用户数据引擎（快照 + 按设备日志 + 增量表）+ 运行时领域 API `Runtime`；经 `wind-store` 门面接入（P1b）；设计见 docs/design/user-data-storage-redesign.md |
 | `wind-wdict` | wdict（`.wdict.yaml`）交换格式读写与词条文本转义；原 `wind-store::wdict`，`wind-store` 原路径 re-export | [AGENTS.md](wind_input/crates/wind-wdict/AGENTS.md) | [AGENTS.md](wind_input/crates/wind-userdata/AGENTS.md) |
 | `wind-rpc` | core ↔ 设置端 JSON-RPC IPC 双通道（ctrl 请求-响应 + events 广播） | [AGENTS.md](wind_input/crates/wind-rpc/AGENTS.md) |

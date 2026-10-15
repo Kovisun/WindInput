@@ -2677,6 +2677,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "thiserror",
+ "toml 0.8.23",
  "tracing",
  "uuid",
  "wind-candidate",

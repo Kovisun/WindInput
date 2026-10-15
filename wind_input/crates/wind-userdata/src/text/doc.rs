@@ -73,12 +73,16 @@ impl TextDoc {
         }
     }
 
-    /// 读改写：`f(当前内容)` 返回新内容（`None` = 删文件）。写入带指纹复核：复核失败 ⇒ Err、
+    /// 读改写：`f(当前内容)` 返回新内容（`None` = 删文件）；`f` 报错（如当前内容解析不了）⇒ 原样
+    /// 返回 Err、什么都不写（文件、mtime、`.bak` 都不动，§2.5）。写入带指纹复核：复核失败 ⇒ Err、
     /// 内存不变。
-    pub fn modify(&self, f: &mut dyn FnMut(Option<&str>) -> Option<String>) -> anyhow::Result<()> {
+    pub fn modify(
+        &self,
+        f: &mut dyn FnMut(Option<&str>) -> anyhow::Result<Option<String>>,
+    ) -> anyhow::Result<()> {
         let mut st = self.lock();
         self.reload_locked(&mut st)?;
-        let next = f(st.content.as_deref().map(String::as_str));
+        let next = f(st.content.as_deref().map(String::as_str))?;
         match next {
             Some(s) => {
                 super::fold::commit_text(&self.path, s.as_bytes(), Some(&st.fp))?;
@@ -142,13 +146,13 @@ mod tests {
         assert!(doc.get().is_none());
         doc.modify(&mut |cur| {
             assert!(cur.is_none());
-            Some("x: 1\n".into())
+            Ok(Some("x: 1\n".into()))
         })
         .unwrap();
         std::fs::write(d.join("a.yaml"), "x: 2\n").unwrap(); // 手改
         doc.modify(&mut |cur| {
             assert_eq!(cur, Some("x: 2\n"));
-            Some(format!("{}y: 3\n", cur.unwrap()))
+            Ok(Some(format!("{}y: 3\n", cur.unwrap())))
         })
         .unwrap();
         assert_eq!(
@@ -166,7 +170,7 @@ mod tests {
         let d = tmpdir("race");
         let p = d.join("a.yaml");
         let doc = TextDoc::open(p.clone());
-        doc.modify(&mut |_| Some("v: 1\n".into())).unwrap();
+        doc.modify(&mut |_| Ok(Some("v: 1\n".into()))).unwrap();
         let p2 = p.clone();
         // 钩子是进程级的：只在本测试线程上动手，别的测试并发提交时不碰
         let me = std::thread::current().id();
@@ -175,7 +179,7 @@ mod tests {
                 std::fs::write(&p2, "v: hand\n").unwrap();
             }
         }));
-        let r = doc.modify(&mut |_| Some("v: prog\n".into()));
+        let r = doc.modify(&mut |_| Ok(Some("v: prog\n".into())));
         drop(hook);
         assert!(r.is_err());
         assert_eq!(
@@ -185,16 +189,37 @@ mod tests {
         );
     }
 
+    /// M-1：闭包报错（文件解析不了）⇒ 不提交：文件、mtime、`.bak` 都不动。
+    #[test]
+    fn modify_error_leaves_file_and_bak_untouched() {
+        let d = tmpdir("moderr");
+        let p = d.join("x.toml");
+        std::fs::write(&p, "a = 1\n").unwrap();
+        let doc = TextDoc::open(p.clone());
+        doc.modify(&mut |_| Ok(Some("a = 2\n".into()))).unwrap(); // .bak = "a = 1"
+        std::fs::write(&p, "a = [\n").unwrap();
+        let mtime = std::fs::metadata(&p).unwrap().modified().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        assert!(doc.modify(&mut |_| Err(anyhow::anyhow!("坏"))).is_err());
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "a = [\n");
+        assert_eq!(std::fs::metadata(&p).unwrap().modified().unwrap(), mtime);
+        assert_eq!(
+            std::fs::read_to_string(d.join("x.toml.bak")).unwrap(),
+            "a = 1\n",
+            "好的 .bak 不被坏内容覆盖"
+        );
+    }
+
     #[test]
     fn none_deletes_and_sync_sees_external_changes() {
         let d = tmpdir("sync");
         let p = d.join("a.yaml");
         let doc = TextDoc::open(p.clone());
-        doc.modify(&mut |_| Some("a\n".into())).unwrap();
+        doc.modify(&mut |_| Ok(Some("a\n".into()))).unwrap();
         std::fs::write(&p, "b\n").unwrap();
         assert!(doc.sync());
         assert!(!doc.sync());
-        doc.modify(&mut |_| None).unwrap();
+        doc.modify(&mut |_| Ok(None)).unwrap();
         assert!(!p.exists() && doc.get().is_none());
         doc.replace(Some("c\n")).unwrap();
         assert_eq!(std::fs::read_to_string(&p).unwrap(), "c\n");

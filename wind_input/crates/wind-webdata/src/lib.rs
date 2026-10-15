@@ -471,11 +471,13 @@ fn web_data_dispatch<H: WebDataRpc + ?Sized>(
         // 内存诊断（只读，设置端「高级 → 性能 → 内存占用」与「复制诊断信息」）。
         "system.memoryStats" => Ok(memory_stats_json(h)),
         // 存储状态（设置页提示「只读模式」）：用户数据设计 §7.1 降级保护。
+        // `issues`：用户数据目录下的文件问题（设计 §2.5），路径相对数据目录。
         "system.storageStatus" => Ok(json!({
             "readonly": h.storage_readonly_reason().is_some(),
             "reason": h.storage_readonly_reason(),
             "format_version": wind_config::user_meta::KNOWN_FORMAT_VERSION,
             "known_format_version": wind_config::user_meta::KNOWN_FORMAT_VERSION,
+            "issues": h.user_store().map(|s| storage_issues_json(s)).unwrap_or_default(),
         })),
         // 桌面提示（CLI `wind_input ui toast`、外部脚本）：toast 只能由 core 进程
         // 自己的 UI 线程渲染，别的进程除了转交没有第二条路。
@@ -678,6 +680,36 @@ fn web_data_dispatch<H: WebDataRpc + ?Sized>(
 
         other => anyhow::bail!("unknown method: {}", other),
     }
+}
+
+/// 数据文件问题 → 设置页用的 JSON（路径相对数据目录、`/` 分隔）。
+fn storage_issues_json(store: &wind_store::Store) -> Vec<Value> {
+    use wind_store::issues::IssueKind;
+    let root = store.user_text_dir();
+    store
+        .data_issues()
+        .into_iter()
+        .map(|i| {
+            let rel = i.path.strip_prefix(root).unwrap_or(&i.path);
+            let path: Vec<String> = rel
+                .components()
+                .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                .collect();
+            let mut v = json!({ "path": path.join("/") });
+            match i.kind {
+                IssueKind::BadLines(n) => {
+                    v["kind"] = json!("bad_lines");
+                    v["lines"] = json!(n);
+                }
+                IssueKind::Isolated => v["kind"] = json!("isolated"),
+                IssueKind::Rebuilt { kept_as } => {
+                    v["kind"] = json!("rebuilt");
+                    v["kept_as"] = json!(kept_as);
+                }
+            }
+            v
+        })
+        .collect()
 }
 
 pub trait WebDataRpc: WebDataHost {
@@ -10608,6 +10640,33 @@ mod memory_stats_tests {
         cfg.schema.active = "zm1".into();
         cfg.schema.available = vec!["zm1".into()];
         Coordinator::new_headless_with_store(cfg, Some(&base), store)
+    }
+
+    /// §2.5：数据文件的问题（坏行 / 隔离 / 已重建 / 未迁移）经 storageStatus 交给设置页。
+    #[test]
+    fn storage_status_lists_data_file_issues() {
+        let c = coord("storage_status_issues");
+        let root = c.user_store().unwrap().user_text_dir().to_path_buf();
+        let f = root.join("pinyin").join("freq.table.yaml");
+        let g = root.join("stats").join("2026-10.toml");
+        wind_store::issues::report(&f, wind_store::issues::IssueKind::BadLines(3));
+        wind_store::issues::report(
+            &g,
+            wind_store::issues::IssueKind::Rebuilt {
+                kept_as: "2026-10.toml.corrupt-x".into(),
+            },
+        );
+        let v = c.web_data_rpc("system.storageStatus", &json!({})).unwrap();
+        let issues = v["issues"].as_array().unwrap();
+        assert_eq!(issues.len(), 2, "{v}");
+        assert_eq!(issues[0]["path"], "pinyin/freq.table.yaml");
+        assert_eq!(issues[0]["kind"], "bad_lines");
+        assert_eq!(issues[0]["lines"], 3);
+        assert_eq!(issues[1]["path"], "stats/2026-10.toml");
+        assert_eq!(issues[1]["kind"], "rebuilt");
+        assert_eq!(issues[1]["kept_as"], "2026-10.toml.corrupt-x");
+        wind_store::issues::clear(&f);
+        wind_store::issues::clear(&g);
     }
 
     /// 用户数据设计 §7.1：`system.storageStatus` 报只读标志、原因与格式版本。正常构造的

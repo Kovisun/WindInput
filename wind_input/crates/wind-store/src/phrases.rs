@@ -1513,7 +1513,7 @@ mod tests {
         let loc = |st: &str| crate::store::StateLoc {
             state_dir: base.join(st),
             dir_id: "d".into(),
-            text_dir: base.join("user"),
+            text_dir: base.join(crate::DATA_DIR_NAME),
             legacy_done: false,
         };
         {

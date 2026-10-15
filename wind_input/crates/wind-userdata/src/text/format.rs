@@ -30,6 +30,8 @@ pub struct TextDict {
     pub entries: Vec<TextEntry>,
     pub bom: bool,
     pub crlf: bool,
+    /// 解析不了而跳过的数据行（列不够、码 / 词空、权重不是数字；§2.5）。空行与注释不算。
+    pub bad_lines: usize,
 }
 
 #[derive(Debug)]
@@ -67,7 +69,7 @@ pub fn normalize_key(code: &str, text: &str, lowercase: bool) -> (String, u64, S
 }
 
 /// 文本恰为一个 CJK 统一表意文字（含扩展区与兼容区）。
-fn is_single_han(text: &str) -> bool {
+pub(crate) fn is_single_han(text: &str) -> bool {
     let mut it = text.chars();
     match (it.next(), it.next()) {
         (Some(c), None) => matches!(
@@ -103,6 +105,7 @@ pub fn parse(bytes: &[u8], path: &Path, lowercase: bool) -> Result<TextDict, Par
         escape: wind.escape.unwrap_or(false),
     };
     let mut entries = Vec::new();
+    let mut bad_lines = 0usize;
     let mut offset = 0usize;
     for (idx, raw_line) in s.split('\n').enumerate() {
         let start = offset;
@@ -121,16 +124,27 @@ pub fn parse(bytes: &[u8], path: &Path, lowercase: bool) -> Result<TextDict, Par
         let parts: Vec<&str> = line.split('\t').collect();
         let (Some(text), Some(code)) = (parts.get(layout.text_col), parts.get(layout.code_col))
         else {
+            bad_lines += 1;
             continue;
         };
         if text.is_empty() || code.trim().is_empty() {
+            bad_lines += 1;
             continue;
         }
-        let weight = layout
+        let weight = match layout
             .weight_col
             .and_then(|i| parts.get(i))
-            .and_then(|w| w.trim().parse::<i32>().ok())
-            .unwrap_or(0);
+            .map(|w| w.trim())
+        {
+            None | Some("") => 0,
+            Some(w) => match w.parse::<i32>() {
+                Ok(w) => w,
+                Err(_) => {
+                    bad_lines += 1;
+                    continue;
+                }
+            },
+        };
         let text = if header.escape {
             wind_wdict::unescape_text_field(text)
         } else {
@@ -158,6 +172,7 @@ pub fn parse(bytes: &[u8], path: &Path, lowercase: bool) -> Result<TextDict, Par
         entries,
         bom,
         crlf,
+        bad_lines,
     })
 }
 
@@ -195,6 +210,17 @@ mod tests {
             "单个汉字 = 单音节；空权重 = 0"
         );
         assert_eq!(d.entries[0].line, 8, "行号含头部行");
+    }
+
+    #[test]
+    fn bad_lines_are_skipped_and_counted() {
+        let d = p(
+            &format!("{HEAD}你好\tni hao\t100\n坏\n缺码\t\t3\n权重坏\tquan\tabc\n好\thao\t1\n"),
+            false,
+        );
+        let texts: Vec<&str> = d.entries.iter().map(|e| e.text.as_str()).collect();
+        assert_eq!(texts, vec!["你好", "好"]);
+        assert_eq!(d.bad_lines, 3, "列不够、码空、权重不是数字各算一行");
     }
 
     /// 单字词的单音节边界：空格载体表达不了 0b1，但一个汉字只对应一个音节——拼音文件里码无空格、

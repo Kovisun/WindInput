@@ -138,7 +138,7 @@ fn better(a: &(String, CompletionRecord), b: &(String, CompletionRecord)) -> std
         .then(a.0.cmp(&b.0))
 }
 
-/// 内存里的补全历史（P4a 起真源是本机状态目录的 `completion.json`）。
+/// 内存里的补全历史（P5 起真源是用户数据目录的 `completion.table.yaml`）。
 #[derive(Default)]
 pub(crate) struct CompletionState {
     loaded: bool,
@@ -146,28 +146,68 @@ pub(crate) struct CompletionState {
     dirty: bool,
     /// 每次改动 +1：落盘在锁外做，写完时代次没变才算「干净」。
     generation: u64,
-    /// 文件读不了 / 解析不了：不往里写，免得盖掉用户能修复的原文件。
-    isolated: bool,
+    /// 文件读不了（IO 错误，如被占用）：本次运行不写回，免得盖掉读不到的原文件。解析失败不走
+    /// 这里——机写文件坏了从 `.bak` 自愈或另存后重建（§2.5）。
+    unreadable: bool,
+    /// 最近一次读到 / 写出的文件指纹：重载时据此分辨文件是不是被手改过。
+    fp: Option<String>,
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
-struct CompletionFile {
-    version: u32,
-    items: Vec<CompletionItem>,
+fn file_fp(p: &std::path::Path) -> Option<String> {
+    wind_userdata::text::fold::read_text(p)
+        .ok()
+        .map(|c| wind_userdata::text::fold::fingerprint(c.as_ref().map(|(b, _)| b.as_slice())))
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
-struct CompletionItem {
-    kind: String,
-    text: String,
-    count: u32,
-    last_used: i64,
+pub(crate) const COMPLETION_COLUMNS: [&str; 4] = ["kind", "text", "count", "last_used"];
+
+type CompletionMap = std::collections::BTreeMap<(&'static str, String), CompletionRecord>;
+
+/// 解析补全表：坏行（未知类别、空文本、数字坏）跳过并计数。
+fn parse_completion_table(
+    bytes: &[u8],
+    path: &std::path::Path,
+) -> anyhow::Result<(CompletionMap, usize)> {
+    let doc = wind_userdata::text::table::parse_table(bytes, path)
+        .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+    let mut map = CompletionMap::new();
+    let mut bad = 0;
+    for r in &doc.rows {
+        let kind = CompletionKind::from_key(doc.get(r, "kind"));
+        let text = doc.get(r, "text");
+        let count = doc.get(r, "count").trim().parse::<u32>();
+        let last = doc.get(r, "last_used").trim().parse::<i64>();
+        match (kind, count, last) {
+            (Some(k), Ok(count), Ok(last_used)) if !text.is_empty() => {
+                map.entry((k.as_str(), text.to_string()))
+                    .or_insert(CompletionRecord { count, last_used });
+            }
+            _ => bad += 1,
+        }
+    }
+    Ok((map, bad))
+}
+
+/// 补全表的整文件渲染。
+pub(crate) fn render_completion_table(map: &CompletionMap) -> String {
+    let rows: Vec<Vec<String>> = map
+        .iter()
+        .map(|((k, t), r)| {
+            vec![
+                k.to_string(),
+                t.clone(),
+                r.count.to_string(),
+                r.last_used.to_string(),
+            ]
+        })
+        .collect();
+    wind_userdata::text::table::render_table(&COMPLETION_COLUMNS, "completion", &rows)
 }
 
 impl Store {
-    /// 补全历史的落盘文件：`<state_dir>/completion.json`（本机机器数据，不漫游）。
+    /// 补全历史：`<data>/completion.table.yaml`（P5 起随用户目录走）。
     pub fn completion_path(&self) -> std::path::PathBuf {
-        self.state_dir().join("completion.json")
+        self.user_text_dir().join("completion.table.yaml")
     }
 
     /// 取内存表（首次访问时从文件载入）。
@@ -175,34 +215,41 @@ impl Store {
         let mut g = self.completions.lock().unwrap_or_else(|e| e.into_inner());
         if !g.loaded {
             g.loaded = true;
-            match wind_userdata::text::fold::read_text(&self.completion_path()) {
+            let path = self.completion_path();
+            let parse = |b: &[u8]| parse_completion_table(b, &path);
+            match crate::machine_file::load_machine_file(&path, &parse) {
                 Ok(None) => {}
-                Ok(Some((b, _))) => match serde_json::from_slice::<CompletionFile>(&b) {
-                    Ok(f) if f.version == 1 => {
-                        for it in f.items {
-                            if let Some(kind) = CompletionKind::from_key(&it.kind) {
-                                g.map.insert(
-                                    (kind.as_str(), it.text),
-                                    CompletionRecord {
-                                        count: it.count,
-                                        last_used: it.last_used,
-                                    },
-                                );
-                            }
-                        }
-                    }
-                    _ => {
-                        tracing::warn!("补全历史文件无法解析，本次运行不写回（原文件保留）");
-                        g.isolated = true;
-                    }
-                },
+                Ok(Some((map, bad))) => {
+                    wind_userdata::issues::report_parse(&path, bad);
+                    g.map = map;
+                }
                 Err(e) => {
                     tracing::warn!("读不了补全历史文件：{e:#}（本次运行不写回）");
-                    g.isolated = true;
+                    g.unreadable = true;
                 }
             }
+            g.fp = file_fp(&path);
         }
         g
+    }
+
+    /// 文件被手改 / 换掉（`dict.reload` 指名）：丢掉内存表，下次访问重读。
+    ///
+    /// 文件被手改过（指纹与最近一次读写的不同）⇒ 以文件为准，内存里未落盘的改动丢弃，不先落盘
+    /// 盖掉手改。
+    pub fn reload_completions(&self) -> bool {
+        let edited = {
+            let g = self.completions.lock().unwrap_or_else(|e| e.into_inner());
+            g.loaded && g.fp != file_fp(&self.completion_path())
+        };
+        if edited {
+            tracing::info!("补全历史文件被改过，以文件为准重新载入");
+        } else if let Err(e) = self.flush_completions() {
+            tracing::warn!("补全历史落盘失败：{e:#}");
+        }
+        let mut g = self.completions.lock().unwrap_or_else(|e| e.into_inner());
+        *g = CompletionState::default();
+        true
     }
 
     /// 内存表有改动就整文件原子写一次（去抖落盘线程、`Store` 释放、`dict.flush` 调）。
@@ -213,13 +260,14 @@ impl Store {
         let _io = self.completion_io.lock().unwrap_or_else(|e| e.into_inner());
         let (bytes, generation) = {
             let g = self.completions.lock().unwrap_or_else(|e| e.into_inner());
-            if !g.dirty || g.isolated {
+            if !g.dirty || g.unreadable {
                 return Ok(());
             }
             (Self::completion_bytes(&g)?, g.generation)
         };
         wind_userdata::text::fold::commit_text(&self.completion_path(), &bytes, None)?;
         let mut g = self.completions.lock().unwrap_or_else(|e| e.into_inner());
+        g.fp = Some(wind_userdata::text::fold::fingerprint(Some(&bytes)));
         if g.generation == generation {
             g.dirty = false;
         }
@@ -227,20 +275,7 @@ impl Store {
     }
 
     fn completion_bytes(g: &CompletionState) -> anyhow::Result<Vec<u8>> {
-        let f = CompletionFile {
-            version: 1,
-            items: g
-                .map
-                .iter()
-                .map(|((k, t), r)| CompletionItem {
-                    kind: k.to_string(),
-                    text: t.clone(),
-                    count: r.count,
-                    last_used: r.last_used,
-                })
-                .collect(),
-        };
-        Ok(serde_json::to_vec(&f)?)
+        Ok(render_completion_table(&g.map).into_bytes())
     }
 
     /// 记录一次使用：count++、last_used=now（只改内存，去抖落盘）。
@@ -540,6 +575,125 @@ mod tests {
         ));
         let _ = std::fs::remove_file(&p);
         Store::open(&p).unwrap()
+    }
+
+    fn reopen(tag: &str, s: Store) -> Store {
+        drop(s);
+        let p = std::env::temp_dir().join(format!(
+            "wind_completion_test_{}_{}_{:?}.redb",
+            std::process::id(),
+            tag,
+            std::thread::current().id()
+        ));
+        Store::open(&p).unwrap()
+    }
+
+    fn has(s: &Store, kind: CompletionKind, text: &str) -> bool {
+        s.get_completion(kind, text).unwrap().is_some()
+    }
+
+    /// dict.reload 指名补全文件：手改的内容生效，不被内存里未落盘的旧版本盖掉。
+    #[test]
+    fn reload_keeps_hand_edit_even_with_unflushed_changes() {
+        let s = store("reload_edit");
+        s.record_completion(CompletionKind::EmailSuffix, "qq.com")
+            .unwrap();
+        s.flush_completions().unwrap();
+        s.record_completion(CompletionKind::EmailSuffix, "163.com")
+            .unwrap(); // 未落盘
+        let p = s.completion_path();
+        let edited = std::fs::read_to_string(&p)
+            .unwrap()
+            .replace("qq.com", "hand.example");
+        std::fs::write(&p, &edited).unwrap();
+        assert!(s.reload_completions());
+        assert!(has(&s, CompletionKind::EmailSuffix, "hand.example"));
+        assert!(!has(&s, CompletionKind::EmailSuffix, "qq.com"));
+        assert_eq!(
+            std::fs::read_to_string(&p).unwrap(),
+            edited,
+            "手改的文件没被盖掉"
+        );
+    }
+
+    /// M-2 / §2.5 机写文件：坏了从 `.bak` 自愈，之后照常学习、照常落盘。
+    #[test]
+    fn corrupt_completion_self_heals_from_bak() {
+        let s = store("heal");
+        s.record_completion(CompletionKind::EmailSuffix, "qq.com")
+            .unwrap();
+        s.flush_completions().unwrap();
+        s.record_completion(CompletionKind::EmailSuffix, "163.com")
+            .unwrap();
+        s.flush_completions().unwrap(); // .bak = 只有 qq.com 的那一版
+        let p = s.completion_path();
+        let s = reopen("heal", s);
+        std::fs::write(&p, b"\xff garbage").unwrap();
+        let s = reopen("heal", s);
+        assert!(has(&s, CompletionKind::EmailSuffix, "qq.com"));
+        s.record_completion(CompletionKind::EmailSuffix, "gmail.com")
+            .unwrap();
+        s.flush_completions().unwrap();
+        let txt = std::fs::read_to_string(&p).unwrap();
+        assert!(txt.contains("gmail.com") && txt.contains("qq.com"), "{txt}");
+    }
+
+    #[test]
+    fn completion_without_good_bak_is_kept_aside_and_rebuilt() {
+        let s = store("rebuild");
+        let p = s.completion_path();
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, b"\xff garbage").unwrap();
+        s.record_completion(CompletionKind::UrlHistory, "example.com")
+            .unwrap();
+        s.flush_completions().unwrap();
+        let kept = std::fs::read_dir(p.parent().unwrap())
+            .unwrap()
+            .flatten()
+            .any(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with("completion.table.yaml.corrupt-")
+            });
+        assert!(kept);
+        assert!(std::fs::read_to_string(&p).unwrap().contains("example.com"));
+    }
+
+    #[test]
+    fn completion_file_is_table_text_in_data_dir() {
+        let s = store("table");
+        s.record_completion(CompletionKind::QuickHistory, "a\tb")
+            .unwrap();
+        s.flush_completions().unwrap();
+        let p = s.completion_path();
+        assert!(p.ends_with("completion.table.yaml"));
+        assert!(p.starts_with(s.user_text_dir()));
+        let txt = std::fs::read_to_string(&p).unwrap();
+        assert!(txt.contains("kind: completion"), "{txt}");
+        assert!(txt.contains("quick_history\ta\\tb\t1\t"), "{txt}");
+        let s = reopen("table", s);
+        assert!(has(&s, CompletionKind::QuickHistory, "a\tb"));
+    }
+
+    #[test]
+    fn completion_bad_rows_are_skipped_and_counted() {
+        let s = store("badrow");
+        let p = s.completion_path();
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(
+            &p,
+            "---\ncolumns: [kind, text, count, last_used]\nwind: {kind: completion, escape: true}\n...\n# no comment\nemail_suffix\tqq.com\t2\t1\nnope\tx\t1\t1\nemail_suffix\ty.com\tz\t1\n",
+        )
+        .unwrap();
+        assert!(has(&s, CompletionKind::EmailSuffix, "qq.com"));
+        assert_eq!(
+            wind_userdata::issues::list_under(&p),
+            vec![wind_userdata::issues::FileIssue {
+                path: p.clone(),
+                kind: wind_userdata::issues::IssueKind::BadLines(2)
+            }]
+        );
+        wind_userdata::issues::clear(&p);
     }
 
     #[test]

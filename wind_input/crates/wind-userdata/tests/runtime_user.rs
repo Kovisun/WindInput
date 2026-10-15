@@ -35,6 +35,7 @@ impl Env {
                     name: format!("{s}.user"),
                     lowercase: false,
                     syllable_codes: *s == "py",
+                    format: wind_userdata::engine::TextFormat::Words,
                 },
             )
             .unwrap();

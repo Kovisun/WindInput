@@ -15,6 +15,8 @@ pub struct Journal {
     file: std::fs::File,
     path: std::path::PathBuf,
     next_seq: u64,
+    /// 上次 fsync 之后有新写入（后台节拍据此每拍刷一次，§3.2）。
+    dirty: bool,
 }
 
 fn header(device_id: [u8; 16], dir_id: [u8; 16]) -> [u8; 40] {
@@ -86,6 +88,7 @@ impl Journal {
             file,
             path: path.to_path_buf(),
             next_seq,
+            dirty: false,
         })
     }
 
@@ -98,7 +101,38 @@ impl Journal {
         let frame = rec.encode();
         self.file.write_all(&frame).context("写日志")?;
         self.next_seq += 1;
+        self.dirty = true;
         Ok(())
+    }
+
+    pub fn is_dirty(&self) -> bool {
+        self.dirty
+    }
+
+    /// 有新写入 ⇒ 克隆一个句柄交给调用方在锁外 fdatasync，并清 dirty（刷失败用 [`Self::mark_dirty`]
+    /// 放回）。没有新写入 ⇒ `None`。fsync 不在日志锁里做：机械盘上它要几十毫秒，按键路径的追加
+    /// 不该陪等（审查 I-5）。
+    pub fn take_sync_handle(&mut self) -> anyhow::Result<Option<std::fs::File>> {
+        if !self.dirty {
+            return Ok(None);
+        }
+        let h = self.file.try_clone().context("克隆日志句柄")?;
+        self.dirty = false;
+        Ok(Some(h))
+    }
+
+    pub fn mark_dirty(&mut self) {
+        self.dirty = true;
+    }
+
+    /// 有新写入就 fdatasync 一次（§3.2：断电最多丢最近一个节拍）。返回是否真的刷了。
+    pub fn sync_if_dirty(&mut self) -> anyhow::Result<bool> {
+        if !self.dirty {
+            return Ok(false);
+        }
+        self.file.sync_data().context("刷日志")?;
+        self.dirty = false;
+        Ok(true)
     }
 
     pub fn next_seq(&self) -> u64 {
@@ -150,6 +184,8 @@ impl Journal {
             .open(path)?;
         file.seek(SeekFrom::End(0))?;
         self.file = file;
+        // 新文件已整份 fsync
+        self.dirty = false;
         Ok(())
     }
 }
@@ -178,6 +214,33 @@ mod tests {
             payload: Payload::Weight(1),
             boundary: 0,
         }
+    }
+
+    /// 审查 I-5：取刷盘句柄即清 dirty（锁外刷）；刷失败可放回。
+    #[test]
+    fn sync_handle_is_taken_once_and_can_be_returned() {
+        let p = tmp("handle.wjl");
+        let mut j = Journal::open(&p, [1; 16], [2; 16]).unwrap();
+        assert!(j.take_sync_handle().unwrap().is_none());
+        j.append(&rec(j.next_seq(), "c")).unwrap();
+        let h = j.take_sync_handle().unwrap().expect("有新写入");
+        assert!(!j.is_dirty());
+        h.sync_data().unwrap();
+        j.mark_dirty();
+        assert!(j.is_dirty());
+    }
+
+    #[test]
+    fn sync_if_dirty_only_after_append() {
+        let p = tmp("dirty.wjl");
+        let mut j = Journal::open(&p, [1; 16], [2; 16]).unwrap();
+        assert!(!j.is_dirty());
+        assert!(!j.sync_if_dirty().unwrap(), "没有新写入不 fsync");
+        j.append(&rec(j.next_seq(), "c")).unwrap();
+        assert!(j.is_dirty());
+        assert!(j.sync_if_dirty().unwrap());
+        assert!(!j.is_dirty());
+        assert!(!j.sync_if_dirty().unwrap());
     }
 
     #[test]

@@ -81,11 +81,11 @@ fn escape_field(escape: bool, s: &str) -> String {
     }
 }
 
-pub fn parse_table(bytes: &[u8], path: &Path) -> Result<TableDoc, ParseError> {
+pub fn parse_table(bytes: &[u8], _path: &Path) -> Result<TableDoc, ParseError> {
     let s = std::str::from_utf8(bytes).map_err(|_| ParseError::NotUtf8)?;
     let s = s.strip_prefix('\u{feff}').unwrap_or(s);
-    let layout = wind_dict::rime_layout(s, path).ok_or(ParseError::NoBody)?;
-    let yaml = s[..layout.body_offset]
+    let (body_offset, comment_cutoff) = wind_dict::rime_body_layout(s).ok_or(ParseError::NoBody)?;
+    let yaml = s[..body_offset]
         .trim_start_matches("---")
         .trim_end()
         .trim_end_matches("...");
@@ -104,7 +104,7 @@ pub fn parse_table(bytes: &[u8], path: &Path) -> Result<TableDoc, ParseError> {
     for (idx, raw_line) in s.split('\n').enumerate() {
         let start = offset;
         offset += raw_line.len() + 1;
-        if start < layout.body_offset {
+        if start < body_offset {
             continue;
         }
         let line = raw_line.strip_suffix('\r').unwrap_or(raw_line);
@@ -113,7 +113,7 @@ pub fn parse_table(bytes: &[u8], path: &Path) -> Result<TableDoc, ParseError> {
         }
         // `#` 开头：`# no comment` 之前一律是注释；之后只有含 tab 的才是数据行（这类表至少两列，
         // 数据行必有 tab）——用户手写的 `# 说明` 不该被读成一行数据。
-        let in_comment_zone = layout.comment_cutoff.is_none_or(|c| start <= c);
+        let in_comment_zone = comment_cutoff.is_none_or(|c| start <= c);
         if line.starts_with('#') && (in_comment_zone || !line.contains('\t')) {
             continue;
         }
@@ -174,7 +174,7 @@ pub fn patch_groups(
         Some(rest) => ("\u{feff}", rest),
         None => ("", s),
     };
-    let layout = wind_dict::rime_layout(body, path).ok_or(ParseError::NoBody)?;
+    let (_, comment_cutoff) = wind_dict::rime_body_layout(body).ok_or(ParseError::NoBody)?;
     let crlf = body
         .find('\n')
         .is_some_and(|i| i > 0 && body.as_bytes()[i - 1] == b'\r');
@@ -242,7 +242,7 @@ pub fn patch_groups(
     if !appended.is_empty() && !out.is_empty() && !out.ends_with('\n') {
         out.push_str(nl);
     }
-    if layout.comment_cutoff.is_none() && appended.iter().any(|r| r.starts_with('#')) {
+    if comment_cutoff.is_none() && appended.iter().any(|r| r.starts_with('#')) {
         out.push_str("# no comment");
         out.push_str(nl);
     }

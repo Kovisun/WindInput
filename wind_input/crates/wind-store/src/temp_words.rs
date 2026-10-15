@@ -331,8 +331,8 @@ mod tests {
         assert_eq!(b("xian", "先"), 0b1, "单音节边界必须存活");
         assert_eq!(
             b("gong", "工"),
-            0,
-            "不给显式边界 ⇒ 空格载体推不出单音节，退化为 0（旧路径不变）"
+            0b1,
+            "不给显式边界：拼音文本里单个汉字按单音节读（与用户词文本同一规则，P5）"
         );
         assert_eq!(b("nihao", "你好"), 0b101);
         let _ = std::fs::remove_file(&path);

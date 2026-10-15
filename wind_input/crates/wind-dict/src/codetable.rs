@@ -1077,6 +1077,15 @@ pub struct RimeLayout {
     pub weight_col: Option<usize>,
 }
 
+/// 只要正文起点与 `# no comment` 位置、不判列的布局：自带 `columns:` 表头、列名不限于
+/// text / code 的表格文本（`wind-userdata::text::table`）用。返回 `(body_offset, comment_cutoff)`，
+/// 两者都是相对整个 `content` 的字节偏移。
+pub fn rime_body_layout(content: &str) -> Option<(usize, Option<usize>)> {
+    let body_offset = rime_body_offset(content)?;
+    let cutoff = find_no_comment_directive(&content[body_offset..]);
+    Some((body_offset, cutoff.map(|c| c + body_offset)))
+}
+
 pub fn rime_layout(content: &str, path: &Path) -> Option<RimeLayout> {
     let body_offset = rime_body_offset(content)?;
     let body = &content[body_offset..];

@@ -191,11 +191,7 @@ impl Runtime {
     }
 
     pub fn clear_temp(&self, schema: &str) -> anyhow::Result<usize> {
-        let mut n = 0;
-        self.ud.fold_with(T, schema, &mut |v| {
-            n = v.len();
-            Vec::new()
-        })?;
+        let n = self.ud.clear(T, schema)?;
         self.bump_words(schema);
         Ok(n)
     }

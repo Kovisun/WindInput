@@ -15,6 +15,11 @@ pub const MIGRATED_P3_PHRASES: &str = "migrated-p3-phrases";
 /// 全部迁移完成时 [`Store::format_version_reached`] 的值。
 pub const FULLY_MIGRATED_VERSION: u32 = 5;
 
+/// 旧库链各阶段的完成标记（只在旧库链进行中作断点续做用；`format_version` 写到 6 后删除）。
+pub fn all_migration_markers() -> [&'static str; 5] {
+    ALL_MIGRATION_MARKERS
+}
+
 /// 全部迁移的完成标记。都在 ⇒ 旧 redb 不再需要打开。
 pub(crate) const ALL_MIGRATION_MARKERS: [&str; 5] = [
     crate::migrate_p1::MIGRATED_P1,
@@ -31,7 +36,8 @@ impl Store {
         sys: &[crate::phrases::SystemPhrase],
     ) -> anyhow::Result<()> {
         let marker = self.state_dir().join(MIGRATED_P3_PHRASES);
-        if marker.is_file() || self.runtime().data().readonly() {
+        // 旧库链已完成（meta.toml 记过；写到 5 后标记被删）⇒ 不再读旧库
+        if marker.is_file() || self.legacy_chain_done() || self.runtime().data().readonly() {
             return Ok(());
         }
         let n = self.merge_legacy_phrases(sys)?;
@@ -44,6 +50,9 @@ impl Store {
     /// 按迁移进度应达到的 `format_version`：P1 → 2，+P2 → 3，+P3 → 4，+P4a → 5；P1 都没迁完
     /// ⇒ None（不升）。协调器打开库时、设定系统短语（触发短语迁移）之后各升一次。
     pub fn format_version_reached(&self) -> Option<u32> {
+        if self.legacy_chain_done() {
+            return Some(FULLY_MIGRATED_VERSION);
+        }
         match (
             self.migrated_p1(),
             self.migrated_p2(),

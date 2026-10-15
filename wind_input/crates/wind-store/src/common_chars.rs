@@ -121,34 +121,26 @@ impl Store {
             .get_or_init(|| wind_userdata::text::doc::TextDoc::open(self.common_chars_path()))
     }
 
+    /// 当前有效的覆盖：文件手改坏了按最后一次好数据（§2.5）。
     fn common_map(&self) -> BTreeMap<String, bool> {
-        match self.common_doc().get() {
-            None => BTreeMap::new(),
-            Some(s) => parse_common(&s).unwrap_or_else(|e| {
-                tracing::warn!("{e:#}（按空表提供）");
-                BTreeMap::new()
-            }),
-        }
+        self.common_good.get(self.common_doc(), &parse_common)
     }
 
-    /// 读改写全部覆盖，一次提交；全空则删文件。文件解析不了 ⇒ Err、不覆盖。
+    /// 读改写全部覆盖，一次提交；全空则删文件。文件解析不了 ⇒ Err、什么都不写（M-1）。
     fn modify_common(&self, f: &mut dyn FnMut(&mut BTreeMap<String, bool>)) -> anyhow::Result<()> {
-        let mut err = None;
-        self.common_doc().modify(&mut |cur| {
-            let mut m = match cur.map(parse_common).transpose() {
-                Ok(v) => v.unwrap_or_default(),
-                Err(e) => {
-                    err = Some(e);
-                    return cur.map(String::from);
-                }
-            };
+        let doc = self.common_doc();
+        doc.modify(&mut |cur| {
+            let mut m = cur
+                .map(parse_common)
+                .transpose()
+                .map_err(|e| crate::last_good::broken_file_error(doc, e))?
+                .unwrap_or_default();
             f(&mut m);
-            (!m.is_empty()).then(|| render_common(&m))
+            Ok((!m.is_empty()).then(|| render_common(&m)))
         })?;
-        match err {
-            Some(e) => Err(e),
-            None => Ok(()),
-        }
+        // 刚写成功的内容就是最新的好数据：之后文件被改坏也能按它服务
+        self.common_map();
+        Ok(())
     }
 
     /// 写一条覆盖（同字重复写即改写方向）。
@@ -210,6 +202,7 @@ impl Store {
     /// 清空全部覆盖（词库管理界面的「全部恢复出厂」）。返回清掉的条数。
     pub fn clear_common_char_overrides(&self) -> anyhow::Result<usize> {
         let n = self.common_map().len();
+        crate::last_good::preserve_if_unparsable(self.common_doc(), &parse_common)?;
         self.common_doc().replace(None)?;
         Ok(n)
     }
@@ -250,6 +243,47 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 审查 M-2：还原前的「清空」遇到改坏的文件 ⇒ 另存留存，不直接删掉。
+    #[test]
+    fn clearing_broken_file_keeps_it_aside() {
+        let s = store("clear_broken");
+        s.set_common_char_override("龘", true).unwrap();
+        let f = s.common_chars_path();
+        std::fs::write(&f, "common: [\n").unwrap();
+        s.common_doc().sync();
+        s.clear_common_char_overrides().unwrap();
+        let kept: Vec<_> = std::fs::read_dir(f.parent().unwrap())
+            .unwrap()
+            .flatten()
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with("common_chars.yaml.corrupt-")
+            })
+            .collect();
+        assert_eq!(kept.len(), 1);
+        assert_eq!(
+            std::fs::read_to_string(kept[0].path()).unwrap(),
+            "common: [\n"
+        );
+        s.set_common_char_override("靐", false).unwrap();
+        wind_userdata::issues::clear(&f);
+    }
+
+    /// M-1：手改坏了按最后一次好数据服务、拒写、不重写文件。
+    #[test]
+    fn common_chars_broken_edit_keeps_serving_and_is_not_rewritten() {
+        let s = store("broken");
+        s.set_common_char_override("龘", true).unwrap();
+        let f = s.common_chars_path();
+        std::fs::write(&f, "common: [\n").unwrap();
+        s.common_doc().sync();
+        assert_eq!(s.get_common_char_override("龘").unwrap(), Some(true));
+        assert!(s.set_common_char_override("靐", false).is_err());
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), "common: [\n");
+        wind_userdata::issues::clear(&f);
+    }
 
     /// 每个测试独立文件：redb 是单写者，共用文件会让并发测试互相阻塞。
     /// `tag` 区分同一测试里需要的第二个库（导入导出对拷）。

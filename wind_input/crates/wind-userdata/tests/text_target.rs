@@ -27,6 +27,7 @@ fn bind(ud: &UserData, file: &Path) {
             name: "pinyin.user".into(),
             lowercase: false,
             syllable_codes: true,
+            format: wind_userdata::engine::TextFormat::Words,
         },
     )
     .unwrap();
@@ -301,6 +302,7 @@ fn isolated_text_does_not_block_other_targets() {
             name: "wb.user".into(),
             lowercase: false,
             syllable_codes: false,
+            format: wind_userdata::engine::TextFormat::Words,
         },
     )
     .unwrap();
@@ -385,8 +387,49 @@ fn binding_an_unused_schema_creates_nothing() {
             name: "never.user".into(),
             lowercase: false,
             syllable_codes: false,
+            format: wind_userdata::engine::TextFormat::Words,
         },
     )
     .unwrap();
     assert!(!d.join("state").join("never").exists());
+}
+
+/// §2.5 行级：坏行跳过并登记到问题表；修好后清掉。
+#[test]
+fn text_bad_lines_are_reported_to_issues() {
+    let (d, ud, file) = setup("issues");
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(
+        &file,
+        "---\ncolumns: [text, code, weight]\n...\n好\thao\t1\n坏\n",
+    )
+    .unwrap();
+    bind(&ud, &file);
+    assert_eq!(
+        wind_userdata::issues::list_under(&d),
+        vec![wind_userdata::issues::FileIssue {
+            path: file.clone(),
+            kind: wind_userdata::issues::IssueKind::BadLines(1)
+        }]
+    );
+    std::fs::write(
+        &file,
+        "---\ncolumns: [text, code, weight]\n...\n好\thao\t1\n",
+    )
+    .unwrap();
+    ud.sync_text(Target::User, "py").unwrap();
+    assert!(wind_userdata::issues::list_under(&d).is_empty(), "修好就清");
+    std::fs::write(&file, b"\xff\xfe").unwrap();
+    assert!(ud.sync_text(Target::User, "py").is_err());
+    assert_eq!(
+        wind_userdata::issues::list_under(&d)[0].kind,
+        wind_userdata::issues::IssueKind::Isolated
+    );
+    std::fs::remove_file(&file).unwrap();
+    ud.sync_text(Target::User, "py").unwrap();
+    assert!(
+        wind_userdata::issues::list_under(&d).is_empty(),
+        "删掉文件也清"
+    );
+    let _ = std::fs::remove_dir_all(&d);
 }

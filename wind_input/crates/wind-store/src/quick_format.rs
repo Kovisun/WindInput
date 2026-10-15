@@ -164,24 +164,39 @@ impl QuickFormatRecord {
 
 /// 文件形态：`kinds: {<kind>: QuickFormatRecord}`。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-struct QuickFile {
+pub(crate) struct QuickFile {
     #[serde(default)]
     kinds: std::collections::BTreeMap<String, QuickFormatRecord>,
 }
 
-const QUICK_HEADER: &str = "# 快捷格式调整（WindInput 维护，可手改）\n";
+const QUICK_HEADER: &str = "# 快捷格式调整（WindInput 维护，可手改）\n\
+# [kinds.<类别>] 下：disabled = 停用的格式 id；[[kinds.<类别>.moved]] id / position = 固定到组内第几位；\n\
+# [[kinds.<类别>.added]] id / text = 自己加的格式。出厂格式表见 system.quick.toml。\n";
 
+/// 用户目录里的 `quick_format.toml`（P5 起）。
 fn parse_quick(s: &str) -> anyhow::Result<QuickFile> {
     if s.trim().is_empty() {
         return Ok(QuickFile::default());
     }
-    serde_yaml::from_str(s).map_err(|e| anyhow::anyhow!("快捷格式文件解析失败：{e}"))
+    toml::from_str(s).map_err(|e| anyhow::anyhow!("快捷格式文件解析失败：{e}"))
+}
+
+/// YAML 形态：备份包条目 `userdata/quick_format.yaml`（备份包格式不变）。
+pub(crate) fn parse_quick_yaml(s: &str) -> anyhow::Result<QuickFile> {
+    if s.trim().is_empty() {
+        return Ok(QuickFile::default());
+    }
+    serde_yaml::from_str(s).map_err(|e| anyhow::anyhow!("快捷格式（YAML）解析失败：{e}"))
+}
+
+pub(crate) fn render_quick(qf: &QuickFile) -> anyhow::Result<String> {
+    Ok(format!("{QUICK_HEADER}{}", toml::to_string(qf)?))
 }
 
 impl Store {
-    /// 快捷格式调整的真源：`<text_dir>/quick_format.yaml`（P4a 起）。
+    /// 快捷格式调整的真源：`<data>/quick_format.toml`（P5 起；P4a 是同目录的 `.yaml`）。
     pub fn quick_format_path(&self) -> std::path::PathBuf {
-        self.user_text_dir().join("quick_format.yaml")
+        self.user_text_dir().join("quick_format.toml")
     }
 
     pub(crate) fn quick_doc(&self) -> &wind_userdata::text::doc::TextDoc {
@@ -189,41 +204,30 @@ impl Store {
             .get_or_init(|| wind_userdata::text::doc::TextDoc::open(self.quick_format_path()))
     }
 
+    /// 当前有效的调整：文件手改坏了按最后一次好数据（§2.5）。
     fn quick_file(&self) -> QuickFile {
-        match self.quick_doc().get() {
-            None => QuickFile::default(),
-            Some(s) => parse_quick(&s).unwrap_or_else(|e| {
-                tracing::warn!("{e:#}（按空表提供）");
-                QuickFile::default()
-            }),
-        }
+        self.quick_good.get(self.quick_doc(), &parse_quick)
     }
 
-    /// 读改写整份快捷格式调整；全表为空则删文件。文件解析不了 ⇒ Err、不覆盖。
+    /// 读改写整份快捷格式调整；全表为空则删文件。文件解析不了 ⇒ Err、什么都不写（M-1）。
     fn modify_quick_file(&self, f: &mut dyn FnMut(&mut QuickFile)) -> anyhow::Result<()> {
-        let mut err = None;
-        self.quick_doc().modify(&mut |cur| {
-            let mut qf = match cur.map(parse_quick).transpose() {
-                Ok(v) => v.unwrap_or_default(),
-                Err(e) => {
-                    err = Some(e);
-                    return cur.map(String::from);
-                }
-            };
+        let doc = self.quick_doc();
+        doc.modify(&mut |cur| {
+            let mut qf = cur
+                .map(parse_quick)
+                .transpose()
+                .map_err(|e| crate::last_good::broken_file_error(doc, e))?
+                .unwrap_or_default();
             f(&mut qf);
             qf.kinds.retain(|_, r| !r.is_empty());
             if qf.kinds.is_empty() {
-                return None;
+                return Ok(None);
             }
-            Some(format!(
-                "{QUICK_HEADER}{}",
-                serde_yaml::to_string(&qf).unwrap_or_default()
-            ))
+            render_quick(&qf).map(Some)
         })?;
-        match err {
-            Some(e) => Err(e),
-            None => Ok(()),
-        }
+        // 刚写成功的内容就是最新的好数据：之后文件被改坏也能按它服务
+        self.quick_file();
+        Ok(())
     }
 
     /// 读改写一类格式的调整；改完为空则删除该类。
@@ -308,16 +312,16 @@ impl Store {
 
     /// 导出整份快捷格式调整（备份用；没有调整 ⇒ 空串）。
     pub fn export_quick_format_yaml(&self) -> anyhow::Result<String> {
-        Ok(self
-            .quick_doc()
-            .get()
-            .map(|s| s.to_string())
-            .unwrap_or_default())
+        let qf = self.quick_file();
+        if qf.kinds.is_empty() {
+            return Ok(String::new());
+        }
+        Ok(serde_yaml::to_string(&qf)?)
     }
 
     /// 从备份导入：`replace` ⇒ 整份替换；否则只补本地没有的类（本地已调整的类以本地为准）。
     pub fn import_quick_format_yaml(&self, text: &str, replace: bool) -> anyhow::Result<usize> {
-        let qf = parse_quick(text)?;
+        let qf = parse_quick_yaml(text)?;
         let rows: Vec<_> = qf.kinds.into_iter().collect();
         let n = rows.len();
         self.import_quick_format_rows(rows, replace)?;
@@ -330,6 +334,10 @@ impl Store {
         rows: Vec<(String, QuickFormatRecord)>,
         replace: bool,
     ) -> anyhow::Result<()> {
+        if replace {
+            // 整份还原是用户显式的整体动作：坏文件先留存，再写
+            crate::last_good::preserve_if_unparsable(self.quick_doc(), &parse_quick)?;
+        }
         let mut rows = Some(rows);
         self.modify_quick_file(&mut |qf| {
             if replace {
@@ -365,6 +373,82 @@ mod tests {
         ));
         let _ = std::fs::remove_file(&p);
         (Store::open(&p).unwrap(), p)
+    }
+
+    /// P5：用户层是 TOML（对齐出厂 system.quick.toml）；手改坏了按最后一次好数据服务、拒写、
+    /// 不重写文件（M-1）；修好后恢复。
+    #[test]
+    fn quick_format_is_toml_and_survives_broken_edit() {
+        let (s, p) = store();
+        s.set_quick_format_enabled("date", "date.lunar", false)
+            .unwrap();
+        let f = s.quick_format_path();
+        assert!(f.ends_with("quick_format.toml"));
+        let txt = std::fs::read_to_string(&f).unwrap();
+        assert!(toml::from_str::<toml::Value>(&txt).is_ok(), "{txt}");
+        std::fs::write(&f, "kinds = [[[").unwrap();
+        s.quick_doc().sync();
+        assert_eq!(
+            s.get_quick_format("date").unwrap().unwrap().disabled,
+            vec!["date.lunar".to_string()],
+            "按最后一次好数据服务"
+        );
+        assert!(matches!(
+            wind_userdata::issues::list_under(&f)[0].kind,
+            wind_userdata::issues::IssueKind::Isolated
+        ));
+        assert!(s.set_quick_format_enabled("date", "x", false).is_err());
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), "kinds = [[[");
+        std::fs::write(&f, txt).unwrap();
+        s.quick_doc().sync();
+        s.set_quick_format_enabled("date", "x", false).unwrap();
+        assert!(wind_userdata::issues::list_under(&f).is_empty(), "修好就清");
+        let _ = std::fs::remove_file(&p);
+    }
+
+    /// 审查 M-2：整份还原遇到改坏的文件 ⇒ 坏文件另存留存，还原照常完成。
+    #[test]
+    fn replace_import_over_broken_file_keeps_it_aside() {
+        let (s, p) = store();
+        s.move_quick_format("date", "date.lunar", 0).unwrap();
+        let y = s.export_quick_format_yaml().unwrap();
+        let f = s.quick_format_path();
+        std::fs::write(&f, "kinds = [[[").unwrap();
+        s.quick_doc().sync();
+        s.import_quick_format_yaml(&y, true).unwrap();
+        assert_eq!(
+            s.get_quick_format("date").unwrap().unwrap().moved[0].id,
+            "date.lunar"
+        );
+        let kept = std::fs::read_dir(f.parent().unwrap())
+            .unwrap()
+            .flatten()
+            .any(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with("quick_format.toml.corrupt-")
+            });
+        assert!(kept);
+        wind_userdata::issues::clear(&f);
+        let _ = std::fs::remove_file(&p);
+    }
+
+    /// 备份包里的快捷格式仍是 YAML（老备份照样能还原，新备份老版本也能读）。
+    #[test]
+    fn backup_export_stays_yaml_and_round_trips() {
+        let (s, p) = store();
+        s.move_quick_format("date", "date.lunar", 0).unwrap();
+        let y = s.export_quick_format_yaml().unwrap();
+        assert!(serde_yaml::from_str::<serde_yaml::Value>(&y).is_ok(), "{y}");
+        assert!(y.contains("date.lunar"));
+        s.import_quick_format_yaml("", true).unwrap();
+        assert!(s.get_quick_format("date").unwrap().is_none());
+        s.import_quick_format_yaml(&y, true).unwrap();
+        assert_eq!(
+            s.get_quick_format("date").unwrap().unwrap().moved[0].id,
+            "date.lunar"
+        );
+        let _ = std::fs::remove_file(&p);
     }
 
     #[test]

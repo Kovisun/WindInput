@@ -37,12 +37,7 @@ impl Runtime {
     }
 
     fn clear_target(&self, target: Target, schema: &str) -> anyhow::Result<usize> {
-        let mut n = 0;
-        self.ud.fold_with(target, schema, &mut |v| {
-            n = v.len();
-            Vec::new()
-        })?;
-        Ok(n)
+        self.ud.clear(target, schema)
     }
 
     /// 同键取 max（count 与 last_used 各自取）；新键 created_at = last_used。

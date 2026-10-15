@@ -5,6 +5,7 @@
 pub mod delta;
 pub mod device;
 pub mod engine;
+pub mod issues;
 pub mod journal;
 pub mod layer;
 pub mod record;

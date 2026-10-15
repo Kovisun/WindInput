@@ -92,6 +92,20 @@ struct Inner {
     last_commit: Option<DateTime<Local>>,
     /// 挂起（备份还原期间）：任何 flush（含后台定时那次）都不落盘，`resume` 清掉。
     suspended: bool,
+    /// 元数据没读到（IO 错误）：`meta` 不可信，不写回（否则零值会盖掉累计值，M-3），下次 flush
+    /// 重读。
+    meta_unknown: bool,
+}
+
+/// 起步用的元数据：读不了 ⇒ 零值 + 标记不可信。
+fn load_meta(store: &Store, speed_factor: f32) -> (StatsMeta, bool) {
+    match store.stats_meta_or_recalc(speed_factor) {
+        Ok(m) => (m, false),
+        Err(e) => {
+            warn!("统计元数据读不了，暂不写回：{e:#}");
+            (StatsMeta::default(), true)
+        }
+    }
 }
 
 /// 采集器与后台线程共享的状态。
@@ -129,13 +143,15 @@ impl StatCollector {
         let today = today_string();
         let mut today_stat = store.get_daily_stat(&today).unwrap_or_default();
         migrate_to_speed_v2(&mut today_stat);
+        let (meta, meta_unknown) = load_meta(&store, speed_factor);
         let mut inner = Inner {
             today: today_stat,
             today_date: today.clone(),
-            meta: store.get_stats_meta().unwrap_or_default(),
+            meta,
             dirty: false,
             last_commit: None,
             suspended: false,
+            meta_unknown,
         };
         if inner.meta.first_day.is_empty() {
             inner.meta.first_day = today;
@@ -245,7 +261,9 @@ impl StatCollector {
         inner.today = self.shared.store.get_daily_stat(&today).unwrap_or_default();
         migrate_to_speed_v2(&mut inner.today);
         inner.today_date = today.clone();
-        inner.meta = self.shared.store.get_stats_meta().unwrap_or_default();
+        let (meta, unknown) = load_meta(&self.shared.store, self.shared.speed_factor());
+        inner.meta = meta;
+        inner.meta_unknown = unknown;
         if inner.meta.first_day.is_empty() {
             inner.meta.first_day = today;
         }
@@ -383,6 +401,17 @@ impl Shared {
                 inner.meta.max_speed = sp;
             }
         }
+        if inner.meta_unknown {
+            let (meta, unknown) = load_meta(&self.store, self.speed_factor());
+            if unknown {
+                // 当日数据已落盘；元数据等能读到再写
+                inner.dirty = false;
+                return;
+            }
+            inner.meta = meta;
+            inner.meta_unknown = false;
+            update_streak(&mut inner.meta, &inner.today_date);
+        }
         if let Err(e) = self.store.put_stats_meta(&inner.meta) {
             warn!("flush StatsMeta failed: {}", e);
             return;
@@ -452,6 +481,24 @@ mod tests {
             std::env::temp_dir().join(format!("wind_collector_{}_{}.redb", std::process::id(), n));
         let _ = std::fs::remove_file(&p);
         Arc::new(Store::open(&p).unwrap())
+    }
+
+    /// M-3：元数据文件坏了（无可用备份）时，收集器起步不得拿零值累加写回。
+    #[test]
+    fn collector_starts_from_recalculated_meta_when_meta_file_is_corrupt() {
+        let store = mem_store();
+        let d = crate::stats::DailyStats {
+            chinese: 300,
+            ..Default::default()
+        };
+        store.put_daily_stat("2020-01-01", &d).unwrap();
+        store.recalculate_stats_meta(1.0).unwrap();
+        let mp = store.stats_dir().join("meta.toml");
+        std::fs::write(&mp, "total_chars = [").unwrap();
+        let _ = std::fs::remove_file(store.stats_dir().join("meta.toml.bak"));
+        let sc = StatCollector::new(store.clone(), 1.0);
+        assert_eq!(sc.get_meta().total_chars, 300);
+        wind_userdata::issues::clear(&mp);
     }
 
     #[test]

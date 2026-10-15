@@ -1,5 +1,5 @@
-//! P4a 迁移（设计 §7.2）：redb 剩下的运行期数据迁成文件——快捷格式 / 常用字 / 字符集用户层进用户
-//! 目录，补全历史 / 每日统计 / 统计元数据 / `phrase_sys_hash` 进本机状态目录。每一类目标文件已经
+//! P4a 迁移（设计 §7.2）：redb 剩下的运行期数据迁成用户数据目录 `data/` 下的文件——快捷格式 /
+//! 常用字 / 字符集用户层 / 补全历史 / 每日统计 / 统计元数据 / `phrase_sys_hash`（P5 起全在 `data/`）。每一类目标文件已经
 //! 存在且非空 ⇒ 这一类跳过（文件是真源，别拿旧表盖掉它）。全部做完写 `migrated-p4`；没有标记就
 //! 整体重做（跳过规则让重做幂等）。旧表只读保留到 P4b。
 
@@ -113,7 +113,7 @@ impl Store {
             self.import_stats_jsonl(&jsonl, false)?;
         }
         if let Some(m) = meta
-            && !nonempty_file(&self.stats_dir().join("meta.json"))
+            && !nonempty_file(&self.stats_meta_path())
         {
             self.put_stats_meta(&m)?;
         }
@@ -235,14 +235,14 @@ mod tests {
         let tx = crate::store::derived_text_dir(&p);
         for f in [
             st.join(super::MIGRATED_P4),
-            st.join("completion.json"),
-            st.join("phrase_sys_hash"),
-            tx.join("quick_format.yaml"),
+            tx.join("completion.table.yaml"),
+            tx.join("phrases.sys_hash"),
+            tx.join("quick_format.toml"),
             tx.join("common_chars.yaml"),
         ] {
             let _ = std::fs::remove_file(f);
         }
-        let _ = std::fs::remove_dir_all(st.join("stats"));
+        let _ = std::fs::remove_dir_all(tx.join("stats"));
         let _ = std::fs::remove_dir_all(tx.join("charsets"));
         p
     }
@@ -310,12 +310,13 @@ mod tests {
         }
         let st = crate::store::derived_state_dir(&p);
         let _ = std::fs::remove_file(st.join(super::MIGRATED_P4));
-        let _ = std::fs::remove_dir_all(st.join("stats"));
+        let stats = crate::store::derived_text_dir(&p).join("stats");
+        let _ = std::fs::remove_dir_all(&stats);
         // 上一轮只写成了 10 月（且本地这天已有新数据）
-        std::fs::create_dir_all(st.join("stats")).unwrap();
+        std::fs::create_dir_all(&stats).unwrap();
         std::fs::write(
-            st.join("stats").join("2026-10.json"),
-            "{\"version\":1,\"days\":{\"2026-10-14\":{\"chinese\":99}}}",
+            stats.join("2026-10.toml"),
+            "version = 1\n[days.2026-10-14]\nchinese = 99\n",
         )
         .unwrap();
         let s = Store::open(&p).unwrap();
@@ -329,5 +330,26 @@ mod tests {
             99,
             "已有的日以文件为准"
         );
+    }
+
+    /// 审查 I-3：重试时已有的统计元数据（运行期间累加过）不被旧表倒回。
+    #[test]
+    fn retry_does_not_roll_back_existing_stats_meta() {
+        let p = legacy("meta_retry");
+        {
+            let s = Store::open(&p).unwrap();
+            s.legacy_put_stats_meta(&crate::stats::StatsMeta {
+                total_chars: 7,
+                ..Default::default()
+            })
+            .unwrap();
+        }
+        let st = crate::store::derived_state_dir(&p);
+        let _ = std::fs::remove_file(st.join(super::MIGRATED_P4));
+        let stats = crate::store::derived_text_dir(&p).join("stats");
+        std::fs::create_dir_all(&stats).unwrap();
+        std::fs::write(stats.join("meta.toml"), "total_chars = 500\n").unwrap();
+        let s = Store::open(&p).unwrap();
+        assert_eq!(s.get_stats_meta().unwrap().total_chars, 500);
     }
 }

@@ -9417,7 +9417,7 @@ impl Config {
         crate::variant::app_dir_name()
     }
 
-    /// 用户配置目录（config.toml / userdata.redb / 词频 / shadow 置顶删词 / 用户词库）。
+    /// 用户配置目录（config.toml / meta.toml / `data/` 下的全部用户数据 / 旧库 userdata.redb(.legacy)）。
     /// - 便携模式：`<exe目录>/userdata/`
     /// - 自定义数据目录（安装向导选定，落 `datadir.conf`）：该目录本身
     /// - 正常模式：漫游 `%APPDATA%\WindInput[Dev]`（随用户在多设备间同步）

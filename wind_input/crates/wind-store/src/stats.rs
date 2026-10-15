@@ -270,28 +270,32 @@ fn month_of(date: &str) -> Option<&str> {
 }
 
 impl Store {
-    /// 每日统计目录：`<state_dir>/stats/`（本机机器数据，P4a 起；按月一个 `YYYY-MM.json`）。
+    /// 每日统计目录：`<data>/stats/`（P5 起随用户目录走；按月一个 `YYYY-MM.toml`）。
     pub fn stats_dir(&self) -> std::path::PathBuf {
-        self.state_dir().join("stats")
+        self.user_text_dir().join("stats")
     }
 
     fn stats_lock(&self) -> std::sync::MutexGuard<'_, ()> {
         self.stats_io.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    fn month_path(&self, ym: &str) -> std::path::PathBuf {
+        self.stats_dir().join(format!("{ym}.toml"))
+    }
+
+    /// 读一个月：机写文件，坏了从 `.bak` 自愈或另存后从空开始（§2.5）；读不了（IO）⇒ Err。
     fn read_month(
         &self,
         ym: &str,
     ) -> anyhow::Result<std::collections::BTreeMap<String, DailyStats>> {
-        let p = self.stats_dir().join(format!("{ym}.json"));
-        Ok(match wind_userdata::text::fold::read_text(&p)? {
-            None => Default::default(),
-            Some((b, _)) => {
-                serde_json::from_slice::<MonthFile>(&b)
-                    .map_err(|e| anyhow::anyhow!("统计文件 {ym}.json 解析失败：{e}"))?
-                    .days
-            }
-        })
+        let parse = |b: &[u8]| -> anyhow::Result<MonthFile> {
+            Ok(toml::from_str(std::str::from_utf8(b)?)?)
+        };
+        Ok(
+            crate::machine_file::load_machine_file(&self.month_path(ym), &parse)?
+                .map(|f| f.days)
+                .unwrap_or_default(),
+        )
     }
 
     fn write_month(
@@ -299,7 +303,7 @@ impl Store {
         ym: &str,
         days: std::collections::BTreeMap<String, DailyStats>,
     ) -> anyhow::Result<()> {
-        let p = self.stats_dir().join(format!("{ym}.json"));
+        let p = self.month_path(ym);
         if days.is_empty() {
             match std::fs::remove_file(&p) {
                 Ok(()) => {}
@@ -308,8 +312,8 @@ impl Store {
             }
             return Ok(());
         }
-        let bytes = serde_json::to_vec(&MonthFile { version: 1, days })?;
-        wind_userdata::text::fold::commit_text(&p, &bytes, None)
+        let text = toml::to_string(&MonthFile { version: 1, days })?;
+        wind_userdata::text::fold::commit_text(&p, text.as_bytes(), None)
     }
 
     /// 现存的月份（`YYYY-MM`，升序）。
@@ -320,7 +324,7 @@ impl Store {
             .flatten()
             .filter_map(|e| {
                 let n = e.file_name().to_string_lossy().into_owned();
-                let ym = n.strip_suffix(".json")?;
+                let ym = n.strip_suffix(".toml")?;
                 (ym.len() == 7 && ym.as_bytes()[4] == b'-').then(|| ym.to_string())
             })
             .collect();
@@ -375,7 +379,15 @@ impl Store {
             if ym.as_str() < fm || ym.as_str() > tm {
                 continue;
             }
-            for (d, st) in self.read_month(&ym)? {
+            // 一个月读不了（IO）不拖垮整个区间：跳过它，其余照常
+            let days = match self.read_month(&ym) {
+                Ok(d) => d,
+                Err(e) => {
+                    tracing::warn!("统计 {ym} 读不了，跳过：{e:#}");
+                    continue;
+                }
+            };
+            for (d, st) in days {
                 if d.as_str() >= from && d.as_str() <= to {
                     out.push((d, st));
                 }
@@ -456,24 +468,40 @@ impl Store {
         Ok((imported, skipped))
     }
 
-    fn stats_meta_path(&self) -> std::path::PathBuf {
-        self.stats_dir().join("meta.json")
+    pub(crate) fn stats_meta_path(&self) -> std::path::PathBuf {
+        self.stats_dir().join("meta.toml")
+    }
+
+    /// 元数据：没有 ⇒ None；坏了从 `.bak` 自愈，`.bak` 也不行 ⇒ 另存后 None（§2.5）。
+    fn load_stats_meta(&self) -> anyhow::Result<Option<StatsMeta>> {
+        let parse = |b: &[u8]| -> anyhow::Result<StatsMeta> {
+            Ok(toml::from_str(std::str::from_utf8(b)?)?)
+        };
+        crate::machine_file::load_machine_file(&self.stats_meta_path(), &parse)
     }
 
     /// 读取统计全局元数据（无则零值）。
     pub fn get_stats_meta(&self) -> anyhow::Result<StatsMeta> {
-        Ok(
-            match wind_userdata::text::fold::read_text(&self.stats_meta_path())? {
-                None => StatsMeta::default(),
-                Some((b, _)) => serde_json::from_slice(&b).unwrap_or_default(),
-            },
-        )
+        Ok(self.load_stats_meta()?.unwrap_or_default())
+    }
+
+    /// 读取统计全局元数据；文件没有（被删、坏了且备份不可用）而月数据还在 ⇒ 由月数据重算并写回。
+    /// 收集器用它起步：把零值当真再累加写回会永久抹掉累计值（M-3）。
+    pub fn stats_meta_or_recalc(&self, speed_factor: f32) -> anyhow::Result<StatsMeta> {
+        match self.load_stats_meta()? {
+            Some(m) => Ok(m),
+            None if !self.stat_months().is_empty() => {
+                tracing::warn!("统计元数据缺失，由每日数据重算");
+                self.recalculate_stats_meta(speed_factor)
+            }
+            None => Ok(StatsMeta::default()),
+        }
     }
 
     /// 写入统计全局元数据。
     pub fn put_stats_meta(&self, meta: &StatsMeta) -> anyhow::Result<()> {
-        let bytes = serde_json::to_vec(meta)?;
-        wind_userdata::text::fold::commit_text(&self.stats_meta_path(), &bytes, None)
+        let text = toml::to_string(meta)?;
+        wind_userdata::text::fold::commit_text(&self.stats_meta_path(), text.as_bytes(), None)
     }
 
     /// 从现存每日数据重建全局元数据（prune 后/meta 缺失时调用，对齐 Go `RecalculateStatsMeta`）。
@@ -1060,9 +1088,9 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
-    /// 每日统计按月落本机状态文件；prune 整月删文件；meta 单独一个文件。
+    /// 每日统计按月落用户数据目录的 TOML；prune 整月删文件；meta 单独一个文件。
     #[test]
-    fn daily_stats_live_in_monthly_state_files() {
+    fn daily_stats_live_in_monthly_data_files() {
         let s = Store::open(tmp("wind_stats_files.redb")).unwrap();
         let d = DailyStats {
             chinese: 12,
@@ -1070,12 +1098,12 @@ mod tests {
         };
         s.put_daily_stat("2026-10-14", &d).unwrap();
         s.put_daily_stat("2026-09-30", &d).unwrap();
-        assert!(s.stats_dir().join("2026-10.json").is_file());
-        assert!(s.stats_dir().join("2026-09.json").is_file());
+        assert!(s.stats_dir().join("2026-10.toml").is_file());
+        assert!(s.stats_dir().join("2026-09.toml").is_file());
         assert_eq!(s.daily_stats("2026-09-01", "2026-10-31").unwrap().len(), 2);
         assert_eq!(s.get_daily_stat("2026-10-14").unwrap().chinese, 12);
         assert_eq!(s.prune_stats_before("2026-10-01").unwrap(), 1);
-        assert!(!s.stats_dir().join("2026-09.json").exists());
+        assert!(!s.stats_dir().join("2026-09.toml").exists());
         s.put_stats_meta(&StatsMeta {
             total_chars: 99,
             ..Default::default()
@@ -1091,6 +1119,107 @@ mod tests {
         s.resume().unwrap();
         assert_eq!(s.clear_stats().unwrap(), 1);
         assert_eq!(s.get_stats_meta().unwrap().total_chars, 0);
+    }
+
+    fn sample_day() -> DailyStats {
+        let mut d = DailyStats {
+            chinese: 100,
+            commit_count: 30,
+            active_millis: 60_000,
+            speed_v2: true,
+            by_source: vec![1, 2],
+            ..Default::default()
+        };
+        d.hours[9] = 100;
+        d.code_len_dist[1] = 4;
+        d.by_schema.insert(
+            "pinyin".into(),
+            SchemaStats {
+                total_chars: 100,
+                ..Default::default()
+            },
+        );
+        d
+    }
+
+    fn corrupt_names(dir: &std::path::Path, prefix: &str) -> usize {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().starts_with(prefix))
+            .count()
+    }
+
+    #[test]
+    fn month_file_is_toml_in_data_dir_and_round_trips() {
+        let s = Store::open(tmp("wind_stats_toml.redb")).unwrap();
+        s.put_daily_stat("2026-10-15", &sample_day()).unwrap();
+        assert!(s.stats_dir().starts_with(s.user_text_dir()));
+        let p = s.stats_dir().join("2026-10.toml");
+        let v: toml::Value = toml::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+        assert!(v.get("days").is_some());
+        let got = s.get_daily_stat("2026-10-15").unwrap();
+        assert_eq!(got.hours[9], 100);
+        assert_eq!(got.by_schema["pinyin"].total_chars, 100);
+        assert_eq!(got.by_source, vec![1, 2]);
+        s.put_stats_meta(&StatsMeta {
+            total_chars: 5,
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(s.stats_dir().join("meta.toml").is_file());
+    }
+
+    #[test]
+    fn corrupt_month_is_rebuilt_and_writes_keep_working() {
+        let s = Store::open(tmp("wind_stats_corrupt_month.redb")).unwrap();
+        let p = s.stats_dir().join("2026-10.toml");
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, "days = [[[").unwrap();
+        s.put_daily_stat("2026-10-15", &sample_day()).unwrap();
+        assert_eq!(s.get_daily_stat("2026-10-15").unwrap().chinese, 100);
+        assert_eq!(
+            corrupt_names(p.parent().unwrap(), "2026-10.toml.corrupt-"),
+            1
+        );
+        wind_userdata::issues::clear(&p);
+    }
+
+    /// M-3：元数据坏了且没有可用备份 ⇒ 由各月数据重算，不当成全 0 写回。
+    #[test]
+    fn corrupt_stats_meta_is_recalculated_not_zeroed() {
+        let s = Store::open(tmp("wind_stats_meta_recalc.redb")).unwrap();
+        s.put_daily_stat("2026-10-14", &sample_day()).unwrap();
+        let before = s.recalculate_stats_meta(1.0).unwrap();
+        assert!(before.total_chars > 0);
+        let mp = s.stats_dir().join("meta.toml");
+        std::fs::write(&mp, "total_chars = \"x").unwrap();
+        let _ = std::fs::remove_file(s.stats_dir().join("meta.toml.bak"));
+        let after = s.stats_meta_or_recalc(1.0).unwrap();
+        assert_eq!(after.total_chars, before.total_chars);
+        assert_eq!(corrupt_names(&s.stats_dir(), "meta.toml.corrupt-"), 1);
+        wind_userdata::issues::clear(&mp);
+    }
+
+    #[test]
+    fn missing_meta_with_month_data_is_recalculated() {
+        let s = Store::open(tmp("wind_stats_meta_missing.redb")).unwrap();
+        s.put_daily_stat("2026-10-14", &sample_day()).unwrap();
+        let _ = std::fs::remove_file(s.stats_dir().join("meta.toml"));
+        assert_eq!(s.stats_meta_or_recalc(1.0).unwrap().total_chars, 100);
+    }
+
+    #[test]
+    fn range_query_skips_unreadable_month() {
+        let s = Store::open(tmp("wind_stats_range_skip.redb")).unwrap();
+        s.put_daily_stat("2026-09-01", &sample_day()).unwrap();
+        s.put_daily_stat("2026-10-01", &sample_day()).unwrap();
+        let p = s.stats_dir().join("2026-09.toml");
+        std::fs::write(&p, "days = [[[").unwrap();
+        let _ = std::fs::remove_file(s.stats_dir().join("2026-09.toml.bak"));
+        let v = s.daily_stats("2026-09-01", "2026-10-31").unwrap();
+        assert!(v.iter().any(|(d, _)| d == "2026-10-01"));
+        wind_userdata::issues::clear(&p);
     }
 
     /// 审查 I-1：非 ASCII / 畸形日期不得 panic（release 下 panic = abort 会带走整个服务）。

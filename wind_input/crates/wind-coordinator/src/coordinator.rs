@@ -1527,8 +1527,8 @@ pub struct Coordinator {
     pub(crate) softkeyboard_opened_at: std::sync::Mutex<Option<std::time::Instant>>,
     /// 快捷输入格式表的**用户调整**（右键调序 / 停用）运行时镜像，键为格式类别。
     ///
-    /// 真相在 `userdata.redb` 的 `quick_format` 表，这里是读缓存：候选生成在热路径上
-    /// （每次按键都跑），每次去查库不划算。
+    /// 真相在用户数据目录的 `quick_format.toml`，这里是读缓存：候选生成在热路径上
+    /// （每次按键都跑），每次去读文件不划算。
     ///
     /// ⚠️ 右键操作必须**写库 + 更新本镜像**两件都做。只写库不回灌，症状就是
     /// 「调了没反应、重启才生效」——本仓这个坑踩过不止一次。
@@ -2420,6 +2420,16 @@ impl Coordinator {
             .store(!supported, std::sync::atomic::Ordering::Relaxed);
     }
 
+    /// 主动退出（重启服务）前把待处理的用户数据折回文本、小文件落盘：`process::exit` 不跑析构。
+    /// 失败只 WARN——日志还在，下次启动照样回放。
+    pub fn flush_user_data_before_exit(&self) {
+        if let Some(s) = self.store.as_ref()
+            && let Err(e) = s.flush_user_data()
+        {
+            warn!("退出前用户数据落盘失败（日志仍在，下次启动回放）：{e:#}");
+        }
+    }
+
     /// 只读模式的原因（用户数据设计 §7.1 降级保护）；`None` = 正常读写。
     pub fn storage_readonly_reason(&self) -> Option<&str> {
         self.storage_readonly.as_deref()
@@ -2524,12 +2534,10 @@ impl Coordinator {
                         warn!("系统短语设定 / 短语迁移失败: {e}");
                     }
                     // 短语迁移刚完成就升版本：等到下次启动才升，中间回退的旧版本会继续往旧表写
-                    if let (Some(v), Some(dir)) =
-                        (store.format_version_reached(), store.path().parent())
+                    if let Some(dir) = store.path().parent()
                         && dir.join("meta.toml").is_file()
-                        && let Err(e) = wind_config::user_meta::raise_format_version(dir, v)
                     {
-                        warn!("format_version 升级失败: {e}");
+                        crate::construct::finish_format_upgrade(store, dir);
                     }
                     // TOML 改了（哈希不一致）才同步：修改行回到新 TOML 值、已删条目的修改行清掉。
                     if system_phrase_path.is_some()

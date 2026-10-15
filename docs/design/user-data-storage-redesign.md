@@ -1,6 +1,6 @@
 # 用户数据存储重设计：文本真源、快照日志引擎与 redb 退役
 
-状态：设计定稿（经两轮独立审查修订）。日期：2026-10-14。
+状态：设计定稿（经两轮独立审查修订）。日期：2026-10-14。2026-10-15 P5 修订：用户目录装下全部数据（§2.1、§2.4、§2.5、§7.4）。
 
 本文件是实施规划的依据。实现时若与本文冲突，先改本文再改代码。
 
@@ -33,6 +33,8 @@
 | 变更感知 | 不加文件监视；`dict.reload` IPC；启动 / 切方案 / 配置重载时快速扫描 |
 | 低频小表 | 原子整文件改写，不进引擎 |
 | redb | 分阶段退役，最终移除依赖 |
+| 数据位置（P5 修订） | 用户目录装下全部数据：学到的数据也以 `data/<schema>/` 下的表格文本为真源，引擎快照降为可重建的加速结构；补全、统计进 `data/`（§2.1、§7.4） |
+| 文件格式（P5） | TOML / 表格文本 / 出厂层同格式的 YAML，不用 JSON，不发明二进制源格式；格式异常统一策略（§2.4、§2.5） |
 
 ### 0.4 审查修订摘要
 
@@ -57,53 +59,54 @@
 
 ## 2 目录布局与格式
 
-### 2.1 目录策略：三类数据、三个位置
+### 2.1 目录策略：用户目录装下全部数据
 
-目录按数据的**类别**而不是按功能划分。每类恰好一个位置，三类正好对应 XDG 的三个基目录，Linux / macOS 上零翻译：
+**前提（P5 定，2026-10-15）：只复制用户目录就带走全部数据。** 本机目录里只能有两类东西：与设备绑定的定位数据 / 临时状态，以及能由用户目录重建的加速结构。初稿把学习数据、补全历史、统计放在 `state/`，复制用户目录会丢掉它们，P5 收回。
 
 | 类别 | 判据 | 位置 | XDG 对应 |
 |---|---|---|---|
-| 真源 | 人读、可手改、备份对象、可漫游 | 用户目录 `user_config_dir()`（漫游 `%APPDATA%` / 便携 `userdata/` / `datadir.conf` 自定义） | `XDG_CONFIG_HOME` |
-| 状态 | 机器写、不可再生、不漫游 | 本机目录 `local_dir()/state/` | `XDG_STATE_HOME` |
+| 数据 | 用户的一切数据（策划的、学到的、统计的），可手改、备份对象、可漫游 | 用户目录 `user_config_dir()`（漫游 `%APPDATA%` / 便携 `userdata/` / `datadir.conf` 自定义） | `XDG_CONFIG_HOME` |
+| 状态 | 只属于本机：设备标识、锁、窗口位置；未折回的日志；可由用户目录重建的快照段 | 本机目录 `local_dir()/state/` | `XDG_STATE_HOME` |
 | 缓存 | 纯派生、可随时整目录删除 | 本机目录 `local_dir()/cache/` | `XDG_CACHE_HOME` |
 
-三条由此成立的操作规则：**备份 = 用户目录 + `state/` 的导出**；**排障清缓存只删 `cache/`**，学习数据不受影响；**重装保留 `state/`**。本机根下只有 `cache/`、`state/`、`logs/` 三个目录；现有的 `state.toml` 挪进 `state/`，`state_dir()` 不再是 `local_dir()` 的别名。
+操作规则：**备份 / 迁移 = 复制用户目录**（服务运行时先 `dict.flush`；否则差的是尚未折回的学习记录：停手 30 秒即折回，连续输入时最老的一笔待处理写入超过 5 分钟也折回，重启服务前折回一次）；**排障清缓存只删 `cache/`**；**删掉整个 `state/` 不丢数据**（快照段由用户目录重建，丢的只有未折回的日志尾巴）。
 
 ```
-<userdata>/                              真源
-  config.toml  schemas/  themes/  …      （现有）
-  meta.toml                              dir_id、format_version
-  user/
+<userdata>/                              数据
+  config.toml  schemas/  themes/  …      （现有设置）
+  meta.toml                              dir_id、format_version（迁移的唯一判据，§7.4；最终布局 = 5）
+  userdata.redb.legacy                   旧库，迁完改名留作兜底（§7.3）
+  data/
     phrases.dict.yaml                    全局短语
-    quick_format.yaml                    快捷格式调整
-    common_chars.yaml                    常用字增删
-    charsets/*.yaml                      字符集用户层（已有交换格式）
+    phrases.sys_hash                     系统短语指纹（短语叠加模型用）
+    quick_format.toml                    快捷格式调整（对齐出厂 system.quick.toml）
+    common_chars.yaml                    常用字增删（出厂层是 YAML）
+    charsets/<key>.yaml                  字符集用户层（出厂层是 YAML）
+    completion.table.yaml                邮箱后缀 / 网址 / 快捷输入历史
+    stats/<YYYY-MM>.toml  stats/meta.toml  每日统计 / 累计元数据
     <schema>/
-      user.dict.yaml                     主动造词 / 导入词（折回目标）
+      user.dict.yaml                     主动造词 / 导入词
       shadow.dict.yaml                   pin / delete 规则
+      temp.dict.yaml                     临时词（学到的）
+      draft.dict.yaml                    草稿
+      freq.table.yaml                    选词计数
+      assoc.table.yaml                   联想历史
 
 <localdata>/
-  cache/<schema>/…                       现有系统词库缓存
-  cache/<schema>/user/<name>.wdat + .fp  文本层段（可删，重建自文本）
+  cache/<schema>/…                       系统词库缓存
   state/
-    state.toml                           现有本机状态（工具栏位置等）
-    device.toml                          device_id、machine_fp
-    lock                                 单写者锁文件
-    journal/<device_id>.wjl              本设备日志
-    journal/state                        各目标的折回水位
-    completion.bin                       邮箱后缀 / 网址历史
-    stats/<YYYY-MM>.json                 每日统计
-    <schema>/
-      temp.wdat + temp.meta              临时词快照 + sidecar
-      draft.bin                          草稿快照（定长记录，精确查询）
-      freq.bin                           计数快照
-      assoc.bin                          联想历史快照
+    state.toml                           本机状态（工具栏位置等）
+    device.toml  lock                    设备标识、单写者锁
+    runtime/<dir_id>/
+      journal/<device_id>.wjl            本设备日志（未折回的操作）
+      state                              各目标折回水位与文本指纹
+      <schema>/<target>-<gen>.wdat+.meta 各目标的快照段（加速结构，由 data/ 重建）
   logs/
 ```
 
-`<schema>` 指**数据方案 id**（拼音族折叠为 `pinyin`，临时英文与英文方案共用），与现有 `data_schema_id` 一致，全拼与双拼继续共享用户词。`user/`、`cache/`、`state/` 三处按同一套方案 id 分子目录。
+`<schema>` 指**数据方案 id**（拼音族折叠为 `pinyin`，临时英文与英文方案共用），与现有 `data_schema_id` 一致，全拼与双拼继续共享。用户目录里的 `data/` 与安装根下的出厂 `data/` 只是同名，互不相干。
 
-日志与运行时快照是本设备的机器状态，放 `state/`：被同步盘或漫游配置复制到别的机器只会制造冲突。它们不可再生（日志会裁剪、快照就是真值），所以不放 `cache/`。
+日志按设备、二进制、不给人看，放 `state/`：被同步盘或漫游配置复制到别的机器只会制造冲突。快照段是加速结构：`state/` 整个删掉后，下次启动由 `data/` 的文本重建。
 
 ### 2.2 词库文本格式
 
@@ -153,12 +156,43 @@ wind: {kind: shadow}
 - 读入剥 BOM；写回保持原 BOM 与换行风格（CRLF / LF 按文件首行判定）。非 UTF-8 或头部解析失败的文件标记为「隔离」：仍尝试按已有段提供查询，不往里折回，记 WARN 并在设置页提示。
 - 重复行：同规范化键多行时，Delete 全删，SetWeight 只改第一行，其余照旧。用户改了某行的 code 列，旧码上的 Delete 成为空操作，这是预期行为。
 
-### 2.4 覆盖表与小文件
+### 2.4 格式规则
 
-- `quick_format.yaml`、`common_chars.yaml`、`charsets/*.yaml`：都是用户策划的小表，内容几 KB。用现有交换格式（`charsets` 已有 yaml 文件格式，另两张按同样风格定义），改一次整文件 tmp + fsync + rename。它们不走引擎、不进日志。现有「库是真相源、文件是交换格式」的方向反转为「文件是真相源」。
-- `completion.bin`、`stats/*.json`：机器数据，非按键路径。内存持有，去抖 2 秒后整文件原子写；退出时写一次。格式用 postcard 或 JSON，带版本号。
-- `<userdata>/meta.toml`：`dir_id`（随数据目录生成的随机 id）、`format_version`（用户目录内数据格式的版本，见 §7.1 降级保护）。它随目录漫游 / 复制。
-- `<localdata>/state/device.toml`：`device_id`、`machine_fp`（机器指纹）、`dir_id`（记录上次配对的用户目录）。它只属于本机。
+| 数据形状 | 格式 | 文件 |
+|---|---|---|
+| 设置与小型结构化数据 | TOML | `meta.toml`、`quick_format.toml`、`stats/*.toml` |
+| 词条清单（码 → 词） | 表格文本 `.dict.yaml` | `user` / `shadow` / `temp` / `draft` / 短语 |
+| 其他列表（计数、历史） | 表格文本 `.table.yaml` | `freq` / `assoc` / `completion` |
+| 出厂层本是 YAML 的覆盖层 | YAML | `common_chars.yaml`、`charsets/*.yaml` |
+
+- 表格文本 = Rime 风格 YAML 头 + `...` 后的 TSV 正文，头里 `columns:` 声明列序，`wind: {kind: …, escape: true}` 区分种类。`.dict.yaml` 与 `.table.yaml` 同一套解析与按行补丁，只是扩展名告诉人「这是词条」还是「这是别的清单」。
+- 不用 JSON（与现有配置风格不统一）；不发明二进制源格式（实测 19 万行表格文本解析 ~100 ms、指纹 0.5 ms、整写 + fsync 5 ms，二进制省下的这点时间不抵手改、排障、合并的损失；加速交给 `state/` 里的快照段）。
+- 时间戳写 Unix 秒的整数。
+
+学到的数据各列（`code` 按方案规范化，有音节边界就写空格（任何方案，读时还原边界），拼音族单个汉字的无空格码按单音节读；`assoc` 的 `context` 是上文原样不规范化）：
+
+| 文件 | `kind` | 列 |
+|---|---|---|
+| `temp.dict.yaml` | `temp` | `text, code, weight, count, created_at` |
+| `draft.dict.yaml` | `draft` | `text, code, last_used` |
+| `freq.table.yaml` | `freq` | `code, text, count, last_used` |
+| `assoc.table.yaml` | `assoc` | `context, text, count, last_used` |
+| `completion.table.yaml` | `completion` | `kind, text, count, last_used` |
+
+- 覆盖表（`quick_format.toml`、`common_chars.yaml`、`charsets/*.yaml`）、短语、Shadow：用户策划的小表，内存持有，改一次整文件提交（带指纹复核），不走日志。
+- 补全历史、统计：机器写的小文件，内存持有、去抖整文件原子写，退出时写一次。
+- 学到的数据（temp / draft / freq / assoc）：文本目标，走引擎（日志 + delta + 空闲 30 秒折回按行补丁写回），与 `user.dict.yaml` 同一条路径。
+- `<userdata>/meta.toml`：`dir_id`、`format_version`。随目录漫游 / 复制。
+- `<localdata>/state/device.toml`：`device_id`、`machine_fp`、`dir_id`。只属于本机。
+
+### 2.5 格式异常统一策略
+
+所有文件按「谁写的」分两类，规则统一：
+
+1. **行级**：某一行解析不了（列缺、数字列不是数字）⇒ 跳过这一行、原样留在文件里（按行补丁不碰它）、计数，记 WARN（只记文件与行数，**不记内容**），在设置页提示。
+2. **手改类文件整份坏**（非 UTF-8、头部坏；`user` / `shadow` / `temp` / `draft` / `freq` / `assoc` / 短语 / 覆盖表）⇒ 隔离：**绝不覆盖**，按最后一次成功的数据继续服务；引擎目标的新写入留在日志与 delta 里，修好后下一次同步 / 折回自动合入；覆盖表与短语这类小表在隔离期间拒绝写入并报「文件格式有误，请先修复」。用户显式的整体替换（清空、导入、还原）先把坏文件改名 `<文件>.corrupt-<时间>` 留存，再写新文件。
+3. **机写文件坏**（`completion.table.yaml`、`stats/*.toml`）⇒ 先从 `.bak` 自愈；`.bak` 也坏就把坏文件改名 `<文件>.corrupt-<时间>` 后从空重建（统计元数据由各月文件重算，不归零），提示一次。
+4. 任何解析失败的文件都不被程序覆盖。设置页从 `system.storageStatus` 的 `issues` 拿到「哪个文件、坏几行 / 已隔离 / 已重建」。
 
 ## 3 快照 + 日志 + 增量表引擎
 
@@ -185,7 +219,7 @@ Record : len u32 | crc32 u32 | seq u64 | ts_ms i64 | kind u8 | target u8 | schem
 
 - kind：`Upsert{weight, kind}`、`Delete`、`SetWeight`、`Incr{count}`、`Touch{last_used}`、`Promote`、`Expire`、`PhraseUpsert`、`PhraseDelete`、`ShadowPin`、`ShadowDelete`、`ShadowRemove`、`BatchMarker{op}`。
 - target：目标（`user` / `temp` / `draft` / `freq` / `assoc` / `phrases` / `shadow`）。Delete 与 SetWeight 必须带目标，不做「所有文件都删」。
-- **一条记录一次 `write(2)`，无用户态缓冲**。进程崩溃（含 `panic = "abort"`、OOM abort、Android SIGKILL）不丢已返回的记录；断电最多丢文件系统未刷的尾部，通常 ≤ 数秒。
+- **一条记录一次 `write(2)`，无用户态缓冲**。进程崩溃（含 `panic = "abort"`、OOM abort、Android SIGKILL）不丢已返回的记录。断电：后台节拍每 5 秒检查，有新写入就 `fdatasync` 一次（P5），断电最多丢最近 5 秒。
 - 计数记增量不记终值：多设备合并时求和，无需冲突规则。
 - 日志永不 mmap；裁剪走重写 + rename，不原地截断（Linux 上原地截断被映射的文件会 SIGBUS）。
 - 保留策略：折回后保留至大小上限（默认 8 MB）或时间上限（默认 7 天）取其长；裁剪只裁已折回的头部。某目标长期折不回时不强裁，而是触发折回。
@@ -278,7 +312,7 @@ state (postcard, 版本化)
 
 ## 5 快速扫描与 IPC
 
-- `dict.reload(paths?: [string])`：路径限定在 `<userdata>/user/` 内，越界拒绝。带路径只校验并重建这几个文件；空参数全量扫描。供设置页与日后同步组件使用。
+- `dict.reload(paths?: [string])`：路径限定在 `<userdata>/data/` 内，越界拒绝。带路径只校验并重建这几个文件；空参数全量扫描。供设置页与日后同步组件使用。
 - 快速扫描：先比 `len + mtime`，**不同则必算指纹；相同只作「大概率未变」提示，仍对声明过 `wind: {verify: content}` 或上次指纹时间超过 24 小时的文件算一次内容指纹**（`rsync -t`、同步工具会保留 mtime，`cache_fp` 当初拒绝 mtime 的原因同样适用）。触发：启动、切方案、配置热重载、`dict.reload`。
 - `dict.flush`：显式折回全部目标，供备份 / 导出 / 调试。
 
@@ -318,11 +352,21 @@ P4 结束后 `wind-store` 删除 `store.rs` 与 redb 依赖，保留编解码与
 
 ### 7.3 redb 退役版本与跳跃升级
 
-- 正常逐版升级的用户在到达退役版本前已经完成全部迁移，退役版本只检查 `format_version` 与 `migrated-*` 标记。
+- 正常逐版升级的用户在到达退役版本前已经完成全部迁移，退役版本只检查 `format_version`（§7.4）。
 - 跳跃升级（从未经过迁移版本的旧版直接升到退役版本）由**独立迁移器** `wind_migrate` 覆盖：工作区里单独的 bin crate，是唯一允许依赖 redb 的 crate，feature 隔离，随安装包分发。主程序启动时发现 `userdata.redb` 存在且缺少标记，调用它完成 §7.2 的全部阶段，再继续启动。它的输出就是正常迁移的输出，走同一套暂存目录与标记。
 - `wind_migrate` 保留两个大版本周期后从安装包移除，文档改为「先升到 X 再升」。核心 crate 从退役版本起零 redb 依赖，`cargo tree -p wind_input_service` 无 redb 作为退出判据。
 - **源文件永不删除**：迁移成功只把 `userdata.redb` 改名为 `userdata.redb.legacy`。用户任何时候都能用旧便携版的 `dict export` 导出 wdict 再导入新版本，这是最后的兜底。`.legacy` 文件计入备份但不计入还原。
 - Android / macOS / Linux 同样随包携带 `wind_migrate`，各自按平台目标编译。
+
+### 7.4 P5：用户目录装下全部数据（`format_version` 仍为 5）
+
+P2–P4a 的中间布局（`user/` 目录名、补全 / 统计在 `state/`、`quick_format.yaml`）只在开发分支与维护者的测试机上出现过，从未发布，所以 P5 **不做中间布局的迁移，也不升版本号**：`format_version` 5 就是最终布局。发布版本只有 1（纯 redb），走 P1–P4a 的旧库链直接迁成最终布局。
+
+- **唯一判据**：`<userdata>/meta.toml` 的 `format_version`。≥ 5 表示旧库各表已迁完、不再打开 redb。`state/` 里的 `migrated-*` 标记只在旧库链进行中作断点续做用，`format_version` 写到 5 时全部删除；此后它们丢失、残留都不影响任何判断。
+- 写到 5 的同时，`userdata.redb` 改名 `userdata.redb.legacy`（已有 `.legacy` 则加序号，从不覆盖；改名失败只 WARN，下次启动再试；此时 redb 已不再打开）。
+- 学到的数据：引擎里有该目标（快照或 delta）而 `data/<schema>/` 下没有对应文本、state 也没记过文本指纹 ⇒ 绑定时由当前视图渲染出文本（不由「文件不存在」推出「数据为空」）；文件已在 ⇒ 文件为准。旧库链的 P1 迁移在绑定规则设好之后进行，直接写成文本。
+- `meta.toml` 缺失时：旁边有 `userdata.redb` 记 1，否则（全新目录，或旧库已改名 `.legacy`）记最新。
+- redb 依赖与 P1–P4 迁移代码保留到维护者决定的退役版本（§7.3、P4b）。
 
 ## 8 环境降级
 
@@ -356,7 +400,8 @@ P4 结束后 `wind-store` 删除 `store.rs` 与 redb 依赖，保留编解码与
 | P3 | 短语与 Shadow 文本化；设置页列表 / 编辑改走新层；系统短语覆盖语义 | **已实现**（计划 `user-data-storage-plan-p3.md`）。与设计的差异：两张表按 §2.4 小表处理（内存持有、按组补丁、整文件提交，不走日志 + delta），按键路径查 Shadow 零 IO；短语为叠加模型——系统短语只在内存（每次启动由协调器交给 store），文件只记用户行与 `overrides_system: 1` 的修改行；系统短语改键时原键写停用的修改行、新键归用户；`phrase_sys_hash` 留在 redb `META` 等 P4；短语迁移要 TOML 才分得清系统行被改过没有，所以在首次 `set_system_phrases` 时做，做完立即升 `format_version` 到 4 |
 | P4a | 覆盖表与小文件：快捷格式 / 常用字 / 字符集用户层进用户目录（文件是真源，写入带指纹复核），补全历史（内存持有、2 秒去抖落盘）/ 每日统计（按月）/ 统计元数据 / `phrase_sys_hash` 进本机状态目录；`format_version` → 5；备份补快捷格式，还原后重载镜像与统计收集器 | **已实现**（计划 `user-data-storage-plan-p4a.md`）。与设计的差异：备份包格式不变（老备份照样能还原），「按类别直接打包 `user/` + `state/`」随 P4b 做；补全历史原在按键路径上读 redb（邮箱 / 网址 / 快捷输入每键一次），现读内存；`schema_version`（META）随 redb 留到 P4b。此后运行期不再写 redb，它只供迁移读 |
 | P4b | 删除 redb 依赖；独立迁移器 `wind_migrate`（§7.3）；备份按类别打包目录；删掉暂停 / 恢复与页缓存回收机制 | **须等 P1–P4a 的迁移版本发出后再做**（§7：兼容护栏先于破坏性变更），发版时机由维护者定。退出判据：`cargo tree` 无 redb；备份还原全量回归 |
-| P5 | 同步协议（日志交换、Incr 求和、LWW） | 另立设计 |
+| P5 | 用户目录装下全部数据：`user/` → `data/`；学到的数据（temp / draft / freq / assoc）改为 `data/<schema>/` 下的文本目标、快照降为加速结构；补全与统计进 `data/`；格式统一（§2.4，去 JSON、快捷格式改 TOML）；格式异常统一策略（§2.5）；日志有写入时每 5 秒 fsync；`format_version` 为唯一迁移判据（仍为 5：中间布局未发布，不迁移不升版本），迁完 `userdata.redb` 改名 `.legacy`（§7.4） | 计划 `user-data-storage-plan-p5.md`。退出判据：删掉整个 `state/` 后重启，学到的数据、补全、统计全在；全量回归 |
+| P6 | 同步协议（日志交换、Incr 求和、LWW） | 另立设计 |
 
 P0 与 P1 先行的理由：运行时层负载最重、没有手改冲突，能先把引擎打磨好；文本层只是在它之上多一步补丁写回。
 

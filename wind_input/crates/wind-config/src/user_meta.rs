@@ -8,7 +8,8 @@ use std::path::Path;
 /// 本版本认识的格式版本。1 = 纯 redb；2 = P1：临时词 / 草稿 / 词频 / 联想历史在运行时引擎
 /// （`local_dir()/state/`）；3 = P2：用户词在 `user/<schema>/user.dict.yaml`；4 = P3：短语与 Shadow
 /// 在 `user/phrases.dict.yaml` / `user/<schema>/shadow.dict.yaml`；5 = P4a：快捷格式 / 常用字 /
-/// 字符集用户层在用户目录，补全历史 / 统计在本机状态目录。每个 P 阶段迁移完成 +1。
+/// 字符集用户层；5 起用户目录装下全部数据（`data/` 下含学到的数据、补全、统计，P5 定稿的布局），
+/// 旧库改名 `userdata.redb.legacy`。2–4 只在开发分支上出现过。每个 P 阶段迁移完成 +1。
 pub const KNOWN_FORMAT_VERSION: u32 = 5;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -43,7 +44,8 @@ pub fn load_or_init(user_dir: &Path) -> MetaCheck {
             Err(e) => MetaCheck::Unreadable(e.to_string()),
         },
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            // 旁边已有旧版 redb：记 1，等迁移完成由协调器升级；否则是全新目录，直接记最新
+            // 旁边已有旧版 redb：记 1，等迁移完成由协调器升级；否则（全新目录，或旧库已改名
+            // `.legacy`、meta.toml 被删）直接记最新——没有 redb 可迁。
             let fresh = !user_dir.join("userdata.redb").exists();
             let m = UserMeta {
                 format_version: if fresh { KNOWN_FORMAT_VERSION } else { 1 },
@@ -52,8 +54,7 @@ pub fn load_or_init(user_dir: &Path) -> MetaCheck {
             let _ = std::fs::create_dir_all(user_dir);
             match toml::to_string(&m) {
                 Ok(s) => {
-                    let tmp = user_dir.join("meta.toml.tmp");
-                    if std::fs::write(&tmp, s).is_ok() && std::fs::rename(&tmp, &path).is_ok() {
+                    if write_meta(user_dir, &s).is_ok() {
                         MetaCheck::Ok(m)
                     } else {
                         // 写不进用户目录：不阻断启动，但没有稳定的 dir_id，按只读对待更稳
@@ -77,9 +78,23 @@ pub fn raise_format_version(user_dir: &Path, to: u32) -> std::io::Result<()> {
     }
     m.format_version = to;
     let s = toml::to_string(&m).map_err(std::io::Error::other)?;
+    write_meta(user_dir, &s)
+}
+
+/// tmp → fsync → rename → fsync 目录：断电后 meta.toml 不会是空文件（读不出即只读模式），
+/// 随后删迁移标记、旧库改名的前提「版本已写成」才站得住。
+fn write_meta(user_dir: &Path, s: &str) -> std::io::Result<()> {
+    use std::io::Write;
     let tmp = user_dir.join("meta.toml.tmp");
-    std::fs::write(&tmp, s)?;
-    std::fs::rename(&tmp, &path)
+    {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(s.as_bytes())?;
+        f.sync_all()?;
+    }
+    std::fs::rename(&tmp, user_dir.join("meta.toml"))?;
+    #[cfg(unix)]
+    std::fs::File::open(user_dir)?.sync_all()?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -101,6 +116,17 @@ mod tests {
         std::fs::write(d.join("userdata.redb"), b"x").unwrap();
         match load_or_init(&d) {
             MetaCheck::Ok(m) => assert_eq!(m.format_version, 1),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// 旧库已改名 `.legacy` 后 meta.toml 被删：没有 redb 可迁，记最新（记 1 会新建空 redb）。
+    #[test]
+    fn retired_legacy_redb_alone_is_not_a_migration_source() {
+        let d = dir("legacy_retired");
+        std::fs::write(d.join("userdata.redb.legacy"), b"x").unwrap();
+        match load_or_init(&d) {
+            MetaCheck::Ok(m) => assert_eq!(m.format_version, KNOWN_FORMAT_VERSION),
             other => panic!("{other:?}"),
         }
     }
