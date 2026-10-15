@@ -433,60 +433,19 @@ impl Store {
     /// 与 `<text_dir>/<schema>/shadow.dict.yaml`（按路径分量比对，不碰文件系统；`..` 是 `ParentDir`
     /// 分量，必然比对失败）。任一路径不合规 ⇒ 整体 Err、一个都不同步。返回值同 [`Self::sync_user_texts`]。
     pub fn reload_user_text_paths(&self, paths: &[String]) -> anyhow::Result<Vec<String>> {
-        use std::path::{Component, Path};
-        enum Target {
-            Phrases,
-            Quick,
-            Common,
-            Charsets,
-            Words(String),
-            Shadow(String),
-        }
-        let base: Vec<Component> = self.user_text_dir().components().collect();
-        let mut targets = Vec::new();
-        for p in paths {
-            let comps: Vec<Component> = Path::new(p).components().collect();
-            let inside = comps.len() > base.len() && comps[..base.len()] == base[..];
-            let t = match comps.get(base.len()..) {
-                Some([Component::Normal(f)]) if inside && *f == "phrases.dict.yaml" => {
-                    Target::Phrases
-                }
-                Some([Component::Normal(f)]) if inside && *f == "quick_format.yaml" => {
-                    Target::Quick
-                }
-                Some([Component::Normal(f)]) if inside && *f == "common_chars.yaml" => {
-                    Target::Common
-                }
-                Some([Component::Normal(d), Component::Normal(f)])
-                    if inside
-                        && *d == "charsets"
-                        && Path::new(f).extension().and_then(|x| x.to_str()) == Some("yaml") =>
-                {
-                    Target::Charsets
-                }
-                Some([Component::Normal(s), Component::Normal(f)]) if inside => {
-                    let s = s.to_string_lossy().into_owned();
-                    if *f == "user.dict.yaml" {
-                        Target::Words(s)
-                    } else if *f == "shadow.dict.yaml" {
-                        Target::Shadow(s)
-                    } else {
-                        anyhow::bail!("不是用户词 / Shadow / 短语文件：{p}")
-                    }
-                }
-                _ => anyhow::bail!("路径不在用户文本目录内：{p}"),
-            };
-            targets.push(t);
-        }
+        let targets = paths
+            .iter()
+            .map(|p| classify_text_path(self.user_text_dir(), p, cfg!(windows)))
+            .collect::<anyhow::Result<Vec<_>>>()?;
         let mut changed = Vec::new();
         for t in targets {
             let name = match t {
-                Target::Phrases => self.sync_phrases().then(|| "phrases".to_string()),
-                Target::Quick => self.quick_doc().sync().then(|| "quick_format".to_string()),
-                Target::Common => self.common_doc().sync().then(|| "common_chars".to_string()),
-                Target::Charsets => self.sync_charsets().then(|| "charsets".to_string()),
-                Target::Words(s) => self.sync_user_text(&s).then_some(s),
-                Target::Shadow(s) => self.shadow_table_synced(&s).then_some(s),
+                TextPath::Phrases => self.sync_phrases().then(|| "phrases".to_string()),
+                TextPath::Quick => self.quick_doc().sync().then(|| "quick_format".to_string()),
+                TextPath::Common => self.common_doc().sync().then(|| "common_chars".to_string()),
+                TextPath::Charsets => self.sync_charsets().then(|| "charsets".to_string()),
+                TextPath::Words(s) => self.sync_user_text(&s).then_some(s),
+                TextPath::Shadow(s) => self.shadow_table_synced(&s).then_some(s),
             };
             if let Some(n) = name
                 && !changed.contains(&n)
@@ -558,6 +517,81 @@ impl Store {
         let shadow = self.export_shadow_actions(schema)?;
         Ok(wdict::export_dict_wdict(&words, &shadow, exported_at))
     }
+}
+
+/// `dict.reload` 收到的路径指向哪类用户文本。
+enum TextPath {
+    Phrases,
+    Quick,
+    Common,
+    Charsets,
+    Words(String),
+    Shadow(String),
+}
+
+/// 只认 `<base>/` 下的那几种文件。`fold_case`：按不分大小写的文件系统比较（Windows）；
+/// 此时方案名取磁盘上实际的目录名，调用方传来的大小写不一定与之相同。
+fn classify_text_path(
+    base: &std::path::Path,
+    p: &str,
+    fold_case: bool,
+) -> anyhow::Result<TextPath> {
+    use std::path::Component;
+    let fold = |s: &str| {
+        if fold_case {
+            s.to_lowercase()
+        } else {
+            s.to_string()
+        }
+    };
+    let names = |path: &std::path::Path| -> Option<Vec<String>> {
+        path.components()
+            .map(|c| match c {
+                Component::ParentDir | Component::CurDir => None,
+                c => Some(fold(&c.as_os_str().to_string_lossy())),
+            })
+            .collect()
+    };
+    let outside = || anyhow::anyhow!("路径不在用户文本目录内：{p}");
+    let base_names = names(base).ok_or_else(outside)?;
+    let all = names(std::path::Path::new(p)).ok_or_else(outside)?;
+    let rest = match all.strip_prefix(base_names.as_slice()) {
+        Some(rest) => rest,
+        None => return Err(outside()),
+    };
+    let is = |got: &String, want: &str| *got == fold(want);
+    match rest {
+        [f] if is(f, "phrases.dict.yaml") => Ok(TextPath::Phrases),
+        [f] if is(f, "quick_format.yaml") => Ok(TextPath::Quick),
+        [f] if is(f, "common_chars.yaml") => Ok(TextPath::Common),
+        [d, f] if is(d, "charsets") && f.ends_with(&fold(".yaml")) => Ok(TextPath::Charsets),
+        [d, f] => {
+            let schema = schema_dir_name(base, d, fold_case);
+            if is(f, "user.dict.yaml") {
+                Ok(TextPath::Words(schema))
+            } else if is(f, "shadow.dict.yaml") {
+                Ok(TextPath::Shadow(schema))
+            } else {
+                anyhow::bail!("不是用户词 / Shadow / 短语文件：{p}")
+            }
+        }
+        _ => Err(outside()),
+    }
+}
+
+/// 方案目录名。不分大小写时 `given` 已折成小写，取 `base` 下实际的那个目录名；
+/// 目录不在（文件还没建过）就用折过的名字。
+fn schema_dir_name(base: &std::path::Path, given: &str, fold_case: bool) -> String {
+    if !fold_case {
+        return given.to_string();
+    }
+    std::fs::read_dir(base)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| e.file_name().to_str().map(String::from))
+        .find(|n| n.to_lowercase() == given)
+        .unwrap_or_else(|| given.to_string())
 }
 
 #[cfg(test)]
@@ -1428,6 +1462,46 @@ mod tests {
                 "{bad}"
             );
         }
+    }
+
+    /// Windows 路径不分大小写：盘符、目录、文件名换了大小写 / 斜杠方向，仍认得是哪个文件；
+    /// 方案名取磁盘上的实际目录名。区分大小写的平台上照旧拒绝。
+    #[test]
+    fn text_path_matching_folds_case_when_asked() {
+        let d = std::env::temp_dir().join(format!("wind_uw_ci-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let base = d.join("User");
+        std::fs::create_dir_all(base.join("WubiEx")).unwrap();
+        let upper = base.to_string_lossy().to_uppercase();
+        let p = format!("{upper}/WUBIEX/User.Dict.YAML");
+        match classify_text_path(&base, &p, true).unwrap() {
+            TextPath::Words(s) => assert_eq!(s, "WubiEx"),
+            _ => panic!("应认作用户词文件"),
+        }
+        assert!(matches!(
+            classify_text_path(&base, &format!("{upper}/Phrases.Dict.Yaml"), true).unwrap(),
+            TextPath::Phrases
+        ));
+        assert!(classify_text_path(&base, &p, false).is_err());
+        assert!(classify_text_path(&base, &format!("{upper}/../X/user.dict.yaml"), true).is_err());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// 真实 Windows：dict.reload 收到小写 + 正斜杠写法的路径也能重载。
+    #[cfg(windows)]
+    #[test]
+    fn reload_accepts_case_and_slash_variants_on_windows() {
+        let s = Store::open(tmp("wind_uw_reload_ci.redb")).unwrap();
+        s.add_user_word("wb", "a", "工", 1, 0).unwrap();
+        s.flush_user_data().unwrap();
+        let f = s.user_text_path("wb");
+        std::fs::write(&f, std::fs::read_to_string(&f).unwrap() + "式\tb\t1\n").unwrap();
+        let p = f.to_string_lossy().to_lowercase().replace('\\', "/");
+        assert_eq!(
+            s.reload_user_text_paths(&[p]).unwrap(),
+            vec!["wb".to_string()]
+        );
+        assert_eq!(s.get_user_words("wb", "b").unwrap()[0].text, "式");
     }
 
     /// dict.flush：全部待处理操作折回，文本里有。

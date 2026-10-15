@@ -149,7 +149,7 @@ pub fn build(
     }
     let wdat = wdat_path(dir, name, generation);
     sw.build().emit(&wdat)?;
-    std::fs::File::open(&wdat)?.sync_all()?;
+    crate::state::fsync_file(&wdat)?;
     #[cfg(test)]
     if FAIL_BEFORE_META.with(|f| f.replace(false)) {
         bail!("故障注入：wdat 已写、sidecar 未写");
@@ -501,6 +501,23 @@ mod tests {
         assert!(build(&d, "t", 4, vec![se("d", "丁", 1, 0, 1)].into_iter()).is_err());
         let s = open(&d, "t").unwrap().expect("旧段应仍可打开");
         assert_eq!((s.max_seq, s.entry_count), (3, 3));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// 旧段还映射着（查询读者仍持有）时重建同名段：Windows 上不能因 sidecar 被映射而写不进。
+    #[test]
+    fn rebuild_while_previous_snapshot_is_still_mapped() {
+        let d = std::env::temp_dir().join(format!("wind_snap_live-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let old = build(&d, "t", 1, vec![se("a", "甲", 1, 0, 1)].into_iter()).unwrap();
+        let new = build(&d, "t", 2, vec![se("b", "乙", 1, 0, 1)].into_iter()).unwrap();
+        let empty = build(&d, "t", 3, std::iter::empty()).unwrap();
+        assert_eq!(old.exact("a").len(), 1, "旧段仍可读");
+        assert_eq!(new.exact("b").len(), 1);
+        assert_eq!((empty.max_seq, empty.entry_count), (3, 0));
+        let s = open(&d, "t").unwrap().expect("最新段可打开");
+        assert_eq!((s.max_seq, s.entry_count), (3, 0));
+        drop((old, new, empty, s));
         let _ = std::fs::remove_dir_all(&d);
     }
 

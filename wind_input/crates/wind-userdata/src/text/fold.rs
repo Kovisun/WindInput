@@ -84,7 +84,7 @@ pub fn commit_text(path: &Path, bytes: &[u8], expect_fp: Option<&str>) -> anyhow
     }
     #[cfg(not(unix))]
     {
-        let _ = std::fs::File::open(path).and_then(|f| f.sync_all());
+        let _ = crate::state::fsync_file(path);
     }
     Ok(())
 }

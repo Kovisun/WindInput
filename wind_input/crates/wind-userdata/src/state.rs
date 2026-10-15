@@ -59,9 +59,18 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
     }
     #[cfg(not(unix))]
     {
-        let _ = std::fs::File::open(path).and_then(|f| f.sync_all());
+        let _ = fsync_file(path);
     }
     Ok(())
+}
+
+/// fsync 一个文件。要用可写句柄：Windows 的 `FlushFileBuffers` 对只读句柄报拒绝访问
+/// （Linux 的 fsync 不挑句柄）。
+pub fn fsync_file(path: &Path) -> std::io::Result<()> {
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(path)?
+        .sync_all()
 }
 
 impl State {
