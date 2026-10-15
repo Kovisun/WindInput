@@ -12,7 +12,7 @@
   <img src="https://img.shields.io/badge/platform-Windows%2010%2F11-brightgreen" alt="Platform">
   <img src="https://img.shields.io/badge/macOS-12%2B-blue" alt="macOS">
   <img src="https://img.shields.io/badge/Linux-Fcitx5%20%28preview%29-orange" alt="Linux">
-  <img src="https://img.shields.io/badge/license-MIT-green" alt="License">
+  <img src="https://img.shields.io/badge/license-GPL--3.0-blue" alt="License">
 </p>
 
 <p align="center">
@@ -129,14 +129,19 @@ wind-ui-rust；只有 wind-setting 是 path 依赖（`windui = { path = "../wind
 
 ## 许可证
 
-本项目源代码采用 [MIT 许可证](LICENSE)。词库数据来源于
+本项目源代码自 v0.127.0 起采用 [GNU 通用公共许可证第 3 版或更高版本](LICENSE)（GPL-3.0-or-later）。
+v0.127.0 之前发布的版本仍适用其发布时的 MIT 许可证。
+
+基于本项目修改并分发的作品须同样以 GPL-3.0 发布并提供完整源代码。
+
+词库数据来源于
 [白霜拼音](https://github.com/gaboolic/rime-frost)、[极点五笔](https://github.com/KyleBing/rime-wubi86-jidian)、
 [pinyin-data](https://github.com/mozillazg/pinyin-data)、[OpenCC](https://github.com/BYVoid/OpenCC)
 等第三方项目，适用各自的许可证条款，完整声明详见 [NOTICE.md](NOTICE.md)。
 
 ## 关于项目名称
 
-MIT 许可证授予您对源代码的完整权利，本项目不对此附加任何限制。
+GPL 许可证授予您使用、修改与分发源代码的权利，但不包括使用项目名称与标识的权利。
 
 若您将本项目分支后公开发布，请更换项目名称与 logo，并注明为非官方分支，
 以便用户区分软件的实际维护者。
