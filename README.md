@@ -74,7 +74,7 @@ Gatekeeper 拦下时到「系统设置 → 隐私与安全性」放行。
 | [wind-installer](https://github.com/huanfeng/wind-installer) | Rust | Windows 安装器与卸载器（清单驱动的通用打包器） | 已开源 |
 | [wind-portable](https://github.com/huanfeng/wind-portable) | Rust | Windows 便携版（绿色版）启动器，免安装就地运行 | 已开源 |
 | [wind-ui-rust](https://github.com/huanfeng/wind-ui-rust) | Rust | 跨平台轻量 GUI 库，安装器 / 便携版 / 设置程序的界面基础 | 已开源 |
-| wind-setting | Rust | 图形设置程序 | 暂未开源 |
+| [wind-setting](https://github.com/huanfeng/wind-setting) | Rust | 图形设置程序 | 已开源 |
 
 其中 wind-installer 与 wind-portable 只用于 Windows；macOS 的 `.pkg` 安装包由本仓库的
 `scripts/mac/dev.sh pkg` 直接打包，Linux 的 `.deb` 由 `scripts/linux/package-deb.sh` 打包，均无需额外仓库。
