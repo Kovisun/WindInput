@@ -942,7 +942,7 @@ mod tests {
         let rx = std::sync::Mutex::new(rx);
         let flusher = std::sync::Arc::new(std::sync::Mutex::new(None));
         let f2 = flusher.clone();
-        wind_userdata::text::fold::set_before_rename_hook(Some(Box::new(move || {
+        let hook = wind_userdata::text::fold::add_before_rename_hook(Box::new(move || {
             if Some(std::thread::current().id()) == *f2.lock().unwrap() {
                 // 模拟一次很慢的 fsync：等主线程读完再放行（最多 2 秒）
                 let _ = rx
@@ -950,7 +950,7 @@ mod tests {
                     .unwrap()
                     .recv_timeout(std::time::Duration::from_secs(2));
             }
-        })));
+        }));
         let s2 = s.clone();
         let fl = flusher.clone();
         let h = std::thread::spawn(move || {
@@ -966,7 +966,7 @@ mod tests {
         let waited = t.elapsed();
         let _ = tx.send(());
         h.join().unwrap();
-        wind_userdata::text::fold::set_before_rename_hook(None);
+        drop(hook);
         assert_eq!(n, 1);
         assert!(
             waited < std::time::Duration::from_millis(500),

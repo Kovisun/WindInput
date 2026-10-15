@@ -99,15 +99,19 @@ fn editor_save_during_fold_discards_the_round() {
     up(&ud, "nihao", "你好", 9, 0b101);
     ud.fold(Target::User, "py").unwrap();
     up(&ud, "hao", "好", 2, 0b1);
-    wind_userdata::text::fold::set_before_rename_hook(Some(Box::new({
+    let me = std::thread::current().id();
+    let hook = wind_userdata::text::fold::add_before_rename_hook(Box::new({
         let file = file.clone();
         move || {
+            if std::thread::current().id() != me {
+                return;
+            }
             let s = std::fs::read_to_string(&file).unwrap();
             std::fs::write(&file, format!("{s}手改\tshou gai\t1\n")).unwrap();
         }
-    })));
+    }));
     assert!(ud.fold(Target::User, "py").is_err());
-    wind_userdata::text::fold::set_before_rename_hook(None);
+    drop(hook);
     assert_eq!(ud.pending(Target::User, "py"), 1, "delta 保留");
     assert!(
         std::fs::read_to_string(&file).unwrap().contains("手改"),

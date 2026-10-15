@@ -356,13 +356,13 @@ mod tests {
         let f = s.common_chars_path();
         let f2 = f.clone();
         let me = std::thread::current().id();
-        wind_userdata::text::fold::set_before_rename_hook(Some(Box::new(move || {
+        let hook = wind_userdata::text::fold::add_before_rename_hook(Box::new(move || {
             if std::thread::current().id() == me {
                 std::fs::write(&f2, "common: [甲]\nuncommon: []\n").unwrap();
             }
-        })));
+        }));
         let r = s.set_common_char_override("乙", true);
-        wind_userdata::text::fold::set_before_rename_hook(None);
+        drop(hook);
         assert!(r.is_err());
         assert!(std::fs::read_to_string(&f).unwrap().contains("甲"));
         s.sync_user_texts();

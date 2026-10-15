@@ -6,12 +6,31 @@ use std::sync::Mutex;
 
 type Hook = Box<dyn Fn() + Send + Sync>;
 
-static BEFORE_RECHECK: Mutex<Option<Hook>> = Mutex::new(None);
+static BEFORE_RECHECK: Mutex<Vec<(u64, std::sync::Arc<Hook>)>> = Mutex::new(Vec::new());
+static NEXT_HOOK_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// 测试钩子：提交时「tmp 已写好、复核原文件指纹之前」调用——借此模拟编辑器恰在折回期间保存。
+/// 进程级、可并存（并发的测试各装各的，钩子里自己按线程过滤）；守卫 drop 时只卸下这一个。
 #[doc(hidden)]
-pub fn set_before_rename_hook(h: Option<Hook>) {
-    *BEFORE_RECHECK.lock().unwrap_or_else(|e| e.into_inner()) = h;
+pub fn add_before_rename_hook(h: Hook) -> HookGuard {
+    let id = NEXT_HOOK_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    BEFORE_RECHECK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push((id, std::sync::Arc::new(h)));
+    HookGuard(id)
+}
+
+#[doc(hidden)]
+pub struct HookGuard(u64);
+
+impl Drop for HookGuard {
+    fn drop(&mut self) {
+        BEFORE_RECHECK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|(id, _)| *id != self.0);
+    }
 }
 
 /// 内容指纹：`"{len:x}-{crc32:08x}"`；文件不存在为 `"absent"`。
@@ -57,11 +76,14 @@ pub fn commit_text(path: &Path, bytes: &[u8], expect_fp: Option<&str>) -> anyhow
         std::io::Write::write_all(&mut f, bytes)?;
         f.sync_all()?;
     }
-    if let Some(h) = BEFORE_RECHECK
+    // 拷出来再调：钩子可能阻塞（模拟慢 fsync），别让它占着锁卡住别的测试的提交
+    let hooks: Vec<_> = BEFORE_RECHECK
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .as_ref()
-    {
+        .iter()
+        .map(|(_, h)| h.clone())
+        .collect();
+    for h in hooks {
         h();
     }
     if let Some(fp) = expect_fp {
@@ -87,4 +109,38 @@ pub fn commit_text(path: &Path, bytes: &[u8], expect_fp: Option<&str>) -> anyhow
         let _ = crate::state::fsync_file(path);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// 钩子是进程级的，并发的测试各装各的：一个测试卸下自己的钩子，不能顺手卸掉别人的。
+    #[test]
+    fn removing_one_hook_keeps_the_others() {
+        let d = std::env::temp_dir().join(format!("wind_fold_hooks-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let me = std::thread::current().id();
+        let (a, b) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+        let (a2, b2) = (a.clone(), b.clone());
+        let ga = add_before_rename_hook(Box::new(move || {
+            if std::thread::current().id() == me {
+                a2.fetch_add(1, Ordering::SeqCst);
+            }
+        }));
+        let gb = add_before_rename_hook(Box::new(move || {
+            if std::thread::current().id() == me {
+                b2.fetch_add(1, Ordering::SeqCst);
+            }
+        }));
+        drop(gb);
+        commit_text(&d.join("a.yaml"), b"x\n", None).unwrap();
+        drop(ga);
+        commit_text(&d.join("a.yaml"), b"y\n", None).unwrap();
+        assert_eq!((a.load(Ordering::SeqCst), b.load(Ordering::SeqCst)), (1, 0));
+        let _ = std::fs::remove_dir_all(&d);
+    }
 }

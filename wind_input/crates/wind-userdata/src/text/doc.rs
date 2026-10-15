@@ -170,13 +170,13 @@ mod tests {
         let p2 = p.clone();
         // 钩子是进程级的：只在本测试线程上动手，别的测试并发提交时不碰
         let me = std::thread::current().id();
-        crate::text::fold::set_before_rename_hook(Some(Box::new(move || {
+        let hook = crate::text::fold::add_before_rename_hook(Box::new(move || {
             if std::thread::current().id() == me {
                 std::fs::write(&p2, "v: hand\n").unwrap();
             }
-        })));
+        }));
         let r = doc.modify(&mut |_| Some("v: prog\n".into()));
-        crate::text::fold::set_before_rename_hook(None);
+        drop(hook);
         assert!(r.is_err());
         assert_eq!(
             std::fs::read_to_string(&p).unwrap(),
