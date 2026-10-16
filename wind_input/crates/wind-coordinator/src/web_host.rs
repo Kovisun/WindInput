@@ -98,6 +98,14 @@ pub trait WebDataHost {
         edit: &crate::handle_charset::CharsetEdit,
     ) -> anyhow::Result<()>;
 
+    /// 新建一个空的自建分类（文件名、显示名、可选默认判定与优先级）。
+    fn charset_create(
+        &self,
+        key: &str,
+        name: &str,
+        edit: &crate::handle_charset::CharsetEdit,
+    ) -> anyhow::Result<()>;
+
     /// 撤掉用户层对某个类的全部调整。
     fn charset_reset(&self, key: &str) -> anyhow::Result<()>;
 
@@ -334,6 +342,14 @@ impl WebDataHost for Coordinator {
         edit: &crate::handle_charset::CharsetEdit,
     ) -> anyhow::Result<()> {
         Coordinator::charset_edit(self, key, edit)
+    }
+    fn charset_create(
+        &self,
+        key: &str,
+        name: &str,
+        edit: &crate::handle_charset::CharsetEdit,
+    ) -> anyhow::Result<()> {
+        Coordinator::charset_create(self, key, name, edit)
     }
     fn charset_reset(&self, key: &str) -> anyhow::Result<()> {
         Coordinator::charset_reset(self, key)

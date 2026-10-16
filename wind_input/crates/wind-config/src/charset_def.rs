@@ -814,6 +814,17 @@ pub fn is_valid_key(key: &str) -> bool {
     if key.is_empty() || key.len() > 64 || key.trim() != key {
         return false;
     }
+    // Windows 保留的设备名当不了文件名（`con.yaml` 在部分系统上写不进去）。
+    const RESERVED: [&str; 4] = ["con", "prn", "aux", "nul"];
+    let lower = key.to_ascii_lowercase();
+    let b = lower.as_bytes();
+    if RESERVED.contains(&lower.as_str())
+        || ((lower.starts_with("com") || lower.starts_with("lpt"))
+            && b.len() == 4
+            && (b'1'..=b'9').contains(&b[3]))
+    {
+        return false;
+    }
     !key.chars().any(|c| {
         matches!(
             c,

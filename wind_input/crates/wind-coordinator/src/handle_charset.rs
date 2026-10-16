@@ -204,6 +204,53 @@ impl crate::Coordinator {
         Ok(())
     }
 
+    /// 新建一个**空的**自建分类：只有文件名（key）、显示名与可选的默认判定 / 优先级。
+    /// 成员与码位范围之后在设置页用「编辑文件」补。
+    pub(crate) fn charset_create(
+        &self,
+        key: &str,
+        name: &str,
+        edit: &CharsetEdit,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            charset_def::is_valid_key(key),
+            "文件名不合法：不能为空、首尾不能有空格，不能含 / \\ . : * ? \" < > |，最多 64 字节"
+        );
+        // 只差大小写也算重名：一类一个文件，Windows 的文件名不分大小写。用户层按**文件**
+        // 判（不按解析结果）：手改写坏的那份解析不出来、列表里看不见，新建同名会把它整份覆盖。
+        let lower = key.to_lowercase();
+        let files: Vec<String> = self
+            .charset_store()?
+            .list_charset_docs()?
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect();
+        let taken = self
+            .engine_mgr
+            .charset_factory()
+            .keys()
+            .chain(files.iter())
+            .any(|k| k.to_lowercase() == lower);
+        anyhow::ensure!(!taken, "已有名为「{key}」的字符分类");
+        let name = name.trim();
+        let mut doc = CharsetDoc {
+            def: charset_def::CharsetDef {
+                key: key.to_string(),
+                name: Some(if name.is_empty() { key } else { name }.to_string()),
+                ..Default::default()
+            },
+            added: Vec::new(),
+            removed: Vec::new(),
+        };
+        apply_edit(&mut doc, edit)?;
+        // 不给优先级就用模板那个值，排在出厂的常用汉字表（10）之前——留空走默认 100 的话，
+        // 对汉字的表态会被它整个盖住，见 TEMPLATE_ORDER。
+        doc.def.order.get_or_insert(TEMPLATE_ORDER);
+        self.save_user_doc(&doc)?;
+        self.reload_charsets();
+        Ok(())
+    }
+
     /// 撤掉用户层对某个类的全部调整。
     ///
     /// 对自建类这等于删除（它整个都是用户层）——设置页对自建类该显示「删除」而不是
@@ -1061,6 +1108,73 @@ mod tests {
         assert!(is_common(&c, "★"), "删了之后判定回到出厂");
         assert!(!c.charset_rows().iter().any(|r| r.key == "我的生僻符号"));
 
+        drop(c);
+        let _ = std::fs::remove_dir_all(&user);
+    }
+
+    /// 新建：一个空的自建分类直接进列表（成员之后用「编辑文件」加）；重名、出厂名、
+    /// 只差大小写的名字、不合法的文件名都拒绝。
+    #[test]
+    fn creating_an_empty_class() {
+        let (c, user) = coord("create");
+        let edit = CharsetEdit {
+            default_common: Some("rare".into()),
+            order: Some(7),
+            ..Default::default()
+        };
+        c.charset_create("my_symbols", "我的符号", &edit).unwrap();
+        let rows = c.charset_rows();
+        let row = rows
+            .iter()
+            .find(|r| r.key == "my_symbols")
+            .expect("新分类进列表");
+        assert_eq!(row.name, "我的符号");
+        assert!(!row.builtin);
+        assert_eq!(row.member_count, 0);
+        assert_eq!(row.order, 7);
+
+        let dup = c
+            .charset_create("my_symbols", "x", &CharsetEdit::default())
+            .unwrap_err();
+        assert!(dup.to_string().contains("已有"), "{dup}");
+        let case = c
+            .charset_create("MY_SYMBOLS", "x", &CharsetEdit::default())
+            .unwrap_err();
+        assert!(
+            case.to_string().contains("已有"),
+            "Windows 文件名不分大小写：{case}"
+        );
+        let factory = c
+            .charset_create("emoji", "x", &CharsetEdit::default())
+            .unwrap_err();
+        assert!(factory.to_string().contains("已有"), "{factory}");
+        let bad = c
+            .charset_create("a/b", "x", &CharsetEdit::default())
+            .unwrap_err();
+        assert!(bad.to_string().contains("文件名"), "{bad}");
+
+        // 不给优先级：排在常用汉字表之前，否则对汉字不起作用。
+        c.charset_create("plain", "", &CharsetEdit::default())
+            .unwrap();
+        let rows = c.charset_rows();
+        let plain = rows.iter().find(|r| r.key == "plain").unwrap();
+        assert_eq!(plain.order, TEMPLATE_ORDER);
+        assert_eq!(plain.name, "plain", "显示名留空同文件名");
+
+        // 写坏的同名文件：列表里看不见，但新建同名不许覆盖它。
+        let path = c.charset_store().unwrap().charset_path("broken").unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "key: [不合法\n").unwrap();
+        let e = c
+            .charset_create("broken", "x", &CharsetEdit::default())
+            .unwrap_err();
+        assert!(e.to_string().contains("已有"), "{e}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "key: [不合法\n");
+
+        let dev = c
+            .charset_create("con", "x", &CharsetEdit::default())
+            .unwrap_err();
+        assert!(dev.to_string().contains("文件名"), "Windows 设备名：{dev}");
         drop(c);
         let _ = std::fs::remove_dir_all(&user);
     }

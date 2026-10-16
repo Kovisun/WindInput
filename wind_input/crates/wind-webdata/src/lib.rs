@@ -662,6 +662,7 @@ fn web_data_dispatch<H: WebDataRpc + ?Sized>(
         "charset.reset" => h.web_charset_reset(params),
         "charset.clearRedundant" => h.web_charset_clear_redundant(params),
         "charset.delete" => h.web_charset_delete(params),
+        "charset.create" => h.web_charset_create(params),
         "charset.editFile" => h.web_charset_edit_file(params),
         "charset.exportEdit" => h.web_charset_export_edit(params),
         "charset.importFile" => h.web_charset_import_file(params),
@@ -3799,6 +3800,26 @@ pub trait WebDataRpc: WebDataHost {
             .ok_or_else(|| anyhow::anyhow!("缺少参数 key"))?;
         let o = self.charset_clear_redundant(key)?;
         Ok(json!({ "scanned": o.scanned, "removed": o.removed }))
+    }
+
+    /// `charset.create {key, name, default?, order?}` —— 新建一个空的自建分类。`default` 同
+    /// `charset.set`（`common` / `rare` / `inherit`）；不给 `order` 排在出厂常用汉字表之前。
+    fn web_charset_create(&self, params: &Value) -> anyhow::Result<Value> {
+        let key = str_param(params, "key")?;
+        let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        let edit = wind_coordinator::handle_charset::CharsetEdit {
+            default_common: params
+                .get("default")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+            order: params
+                .get("order")
+                .and_then(|v| v.as_i64())
+                .map(|v| v as i32),
+            ..Default::default()
+        };
+        self.charset_create(key, name, &edit)?;
+        Ok(json!({ "ok": true, "key": key }))
     }
 
     /// `charset.delete` —— 删一个自建类。出厂类会被拒绝。
