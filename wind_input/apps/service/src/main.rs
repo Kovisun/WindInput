@@ -406,6 +406,7 @@ fn main() {
     let coord_for_web = coordinator.clone();
     let coord_for_restart_toast = coordinator.clone();
     let coord_for_exit = coordinator.clone();
+    coordinator.install_exit_flush();
     deferred.set_ready(coordinator);
 
     // 三步顺序不能动（见 `PushServer::mark_ready`）：

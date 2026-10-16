@@ -2420,13 +2420,39 @@ impl Coordinator {
             .store(!supported, std::sync::atomic::Ordering::Relaxed);
     }
 
-    /// 主动退出（重启服务）前把待处理的用户数据折回文本、小文件落盘：`process::exit` 不跑析构。
+    /// 退出（重启服务、注销 / 关机、SIGTERM）前把统计与待处理的用户数据落盘：`process::exit`
+    /// 与系统结束进程都不跑析构。
     /// 失败只 WARN——日志还在，下次启动照样回放。
     pub fn flush_user_data_before_exit(&self) {
+        // 统计收集器的内存增量先落到统计文件
+        if let Some(sc) = self.stat_collector.as_ref() {
+            sc.flush();
+        }
         if let Some(s) = self.store.as_ref()
             && let Err(e) = s.flush_user_data()
         {
             warn!("退出前用户数据落盘失败（日志仍在，下次启动回放）：{e:#}");
+        }
+    }
+
+    /// 注销 / 关机（Windows `WM_ENDSESSION`）与 SIGTERM（Linux / macOS）时先落盘：服务 main
+    /// 在协调器就绪后调一次。
+    pub fn install_exit_flush(self: &Arc<Self>) {
+        #[cfg(all(windows, feature = "desktop-ui"))]
+        {
+            let c = self.clone();
+            wind_ui::window::set_session_end_hook(Box::new(move || {
+                tracing::info!("会话结束：用户数据落盘");
+                c.flush_user_data_before_exit();
+            }));
+        }
+        #[cfg(unix)]
+        {
+            let c = self.clone();
+            crate::exit_signal::install_sigterm(Box::new(move || {
+                c.flush_user_data_before_exit();
+                std::process::exit(0);
+            }));
         }
     }
 
@@ -18701,5 +18727,29 @@ mod emoji_tables_tests {
         assert_eq!(t.lookup("无此词"), None);
         drop(t);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod exit_flush_tests {
+    use super::*;
+
+    /// 退出前落盘连统计一起：`process::exit` 不跑析构，收集器的内存增量否则就丢了。
+    #[test]
+    fn flush_before_exit_writes_todays_stats() {
+        let user = std::env::temp_dir().join(format!("wind_exit_flush-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&user);
+        let (c, _rx) = Coordinator::new_headless_with_ui_at(Config::default(), None, Some(&user));
+        let sc = c.stat_collector.as_ref().expect("有用户目录就有统计收集器");
+        sc.record(StatEvent {
+            chinese: 7,
+            ..Default::default()
+        });
+        c.flush_user_data_before_exit();
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        let store = c.store.as_ref().unwrap();
+        assert_eq!(store.get_daily_stat(&today).unwrap().chinese, 7);
+        drop(c);
+        let _ = std::fs::remove_dir_all(&user);
     }
 }
