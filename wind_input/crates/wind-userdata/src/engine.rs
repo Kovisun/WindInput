@@ -148,6 +148,8 @@ pub struct UserData {
     text_max_pending: Mutex<std::time::Duration>,
     /// 各文本目标本轮第一笔待处理写入的时刻（折回成功即清）。
     first_pending: Mutex<BTreeMap<TargetKey, std::time::Instant>>,
+    /// 最近一次写日志失败的原因（磁盘满、目录只读…；不含词条内容）。成功写入即清（§8）。
+    write_error: Mutex<Option<String>>,
     /// 上次压实裁到的位置（`keep_from`）：裁不动时不再反复重写日志（审查 I-2）。
     pruned_upto: std::sync::atomic::AtomicU64,
     /// 自动绑定规则（P5）：维护 / 压实 / `fold_with` 前把规则管的未绑定目标绑上。
@@ -523,6 +525,7 @@ impl UserData {
             text_max_pending: Mutex::new(TEXT_MAX_PENDING),
             first_pending: Mutex::new(BTreeMap::new()),
             pruned_upto: std::sync::atomic::AtomicU64::new(0),
+            write_error: Mutex::new(None),
             text_rule: Mutex::new(None),
             view: RwLock::new(Arc::new(View {
                 snapshots,
@@ -607,8 +610,20 @@ impl UserData {
         }
         let mut seqs = Vec::with_capacity(recs.len());
         for rec in &recs {
-            j.append(rec)?;
+            if let Err(e) = j.append(rec) {
+                // 只记 IO 层的原因，不带记录内容
+                let msg = format!("{:#}", e.root_cause());
+                tracing::warn!("写用户数据日志失败（本次修改未保存）：{msg}");
+                *self.write_error.lock().unwrap_or_else(|e| e.into_inner()) = Some(msg);
+                return Err(e);
+            }
             seqs.push(rec.seq);
+        }
+        {
+            let mut we = self.write_error.lock().unwrap_or_else(|e| e.into_inner());
+            if we.is_some() {
+                *we = None;
+            }
         }
         let cur = self.view();
         let delta = cur.delta.with_all(entries);
@@ -1685,6 +1700,14 @@ impl UserData {
             .ok()
     }
 
+    /// 最近一次写日志失败的原因（§8：设置页提示「本次修改未保存」）；之后写成功即清。
+    pub fn write_error(&self) -> Option<String> {
+        self.write_error
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
     /// 日志有新写入就落盘一次（后台节拍每拍调）。只读实例没有日志写端 ⇒ `Ok(false)`。
     pub fn sync_journal(&self) -> anyhow::Result<bool> {
         // 锁内只取句柄，fsync 在锁外：追加（按键路径）不陪等
@@ -1810,6 +1833,33 @@ mod tests {
             0,
         )
         .unwrap();
+    }
+
+    /// §8：日志写失败（磁盘满、目录只读）记下原因供设置页提示；恢复后清掉。
+    #[test]
+    fn journal_write_failure_is_recorded_and_cleared() {
+        let (d, dirs) = dirs_for("wfail");
+        let ud = UserData::open(dirs).unwrap();
+        assert!(ud.write_error().is_none());
+        crate::journal::FAIL_NEXT_APPEND.with(|f| f.set(true));
+        assert!(
+            ud.apply(
+                Target::Temp,
+                "py",
+                OpKind::Upsert,
+                "a",
+                "甲",
+                Payload::Weight(1),
+                0
+            )
+            .is_err()
+        );
+        let e = ud.write_error().expect("写失败要记下");
+        assert!(!e.contains("甲"), "不记内容：{e}");
+        up(&ud, "b", "乙");
+        assert!(ud.write_error().is_none(), "恢复后清掉");
+        drop(ud);
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

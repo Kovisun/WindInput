@@ -67,6 +67,11 @@ pub fn load_or_init(user_dir: &Path) -> MetaCheck {
         Err(e) => MetaCheck::Unreadable(e.to_string()),
     }
 }
+/// 只读取 `meta.toml`（不存在 / 读不出 ⇒ None），不新建。
+pub fn read(user_dir: &Path) -> Option<UserMeta> {
+    toml::from_str(&std::fs::read_to_string(user_dir.join("meta.toml")).ok()?).ok()
+}
+
 /// 迁移成功后把 `format_version` 升到 `to`（现值 ≥ `to` 不动，`dir_id` 保留）。旧版本读到更高
 /// 的版本即进只读（§7.1），不会在新格式旁边继续写 redb。
 pub fn raise_format_version(user_dir: &Path, to: u32) -> std::io::Result<()> {

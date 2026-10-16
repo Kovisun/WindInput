@@ -19,6 +19,12 @@ pub struct Journal {
     dirty: bool,
 }
 
+#[cfg(test)]
+thread_local! {
+    /// 故障注入：下一次 `append` 的写入失败（模拟磁盘满 / 目录只读）。
+    pub(crate) static FAIL_NEXT_APPEND: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 fn header(device_id: [u8; 16], dir_id: [u8; 16]) -> [u8; 40] {
     let mut h = [0u8; 40];
     h[..4].copy_from_slice(MAGIC);
@@ -99,6 +105,10 @@ impl Journal {
         }
         rec.check_lens()?;
         let frame = rec.encode();
+        #[cfg(test)]
+        if FAIL_NEXT_APPEND.with(|f| f.replace(false)) {
+            return Err(std::io::Error::other("注入的写失败")).context("写日志");
+        }
         self.file.write_all(&frame).context("写日志")?;
         self.next_seq += 1;
         self.dirty = true;

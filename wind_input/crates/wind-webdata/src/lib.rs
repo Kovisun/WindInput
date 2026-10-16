@@ -472,13 +472,31 @@ fn web_data_dispatch<H: WebDataRpc + ?Sized>(
         "system.memoryStats" => Ok(memory_stats_json(h)),
         // 存储状态（设置页提示「只读模式」）：用户数据设计 §7.1 降级保护。
         // `issues`：用户数据目录下的文件问题（设计 §2.5），路径相对数据目录。
-        "system.storageStatus" => Ok(json!({
-            "readonly": h.storage_readonly_reason().is_some(),
-            "reason": h.storage_readonly_reason(),
-            "format_version": wind_config::user_meta::KNOWN_FORMAT_VERSION,
-            "known_format_version": wind_config::user_meta::KNOWN_FORMAT_VERSION,
-            "issues": h.user_store().map(|s| storage_issues_json(s)).unwrap_or_default(),
-        })),
+        // `format_version` 是 meta.toml 里的实际值，`known_format_version` 是本版本认识的上限；
+        // `write_error`：最近一次写用户数据失败的原因（磁盘满、目录只读…），成功写入后清空。
+        // 用户数据锁不可用 / 被别的进程占用时引擎只读，同样报 readonly。
+        "system.storageStatus" => {
+            let store = h.user_store();
+            let engine_readonly = store.is_some_and(|s| s.runtime().data().readonly());
+            let reason = h.storage_readonly_reason().or_else(|| {
+                engine_readonly.then(|| {
+                    "用户数据被另一个进程占用，或文件锁不可用：本次运行不保存学习与修改。"
+                        .to_string()
+                })
+            });
+            let actual = store
+                .and_then(|s| s.path().parent().map(wind_config::user_meta::read))
+                .flatten()
+                .map(|m| m.format_version);
+            Ok(json!({
+                "readonly": reason.is_some(),
+                "reason": reason,
+                "format_version": actual.unwrap_or(wind_config::user_meta::KNOWN_FORMAT_VERSION),
+                "known_format_version": wind_config::user_meta::KNOWN_FORMAT_VERSION,
+                "write_error": store.and_then(|s| s.runtime().data().write_error()),
+                "issues": store.map(|s| storage_issues_json(s)).unwrap_or_default(),
+            }))
+        }
         // 桌面提示（CLI `wind_input ui toast`、外部脚本）：toast 只能由 core 进程
         // 自己的 UI 线程渲染，别的进程除了转交没有第二条路。
         //
@@ -10640,6 +10658,36 @@ mod memory_stats_tests {
         cfg.schema.active = "zm1".into();
         cfg.schema.available = vec!["zm1".into()];
         Coordinator::new_headless_with_store(cfg, Some(&base), store)
+    }
+
+    /// storageStatus 报 meta.toml 里的实际格式版本，并带上写失败原因（没有时为 null）。
+    #[test]
+    fn storage_status_reports_actual_format_version_and_write_error() {
+        let c = coord("storage_status_actual");
+        let v = c.web_data_rpc("system.storageStatus", &json!({})).unwrap();
+        assert_eq!(
+            v["format_version"],
+            wind_config::user_meta::KNOWN_FORMAT_VERSION
+        );
+        assert!(v["write_error"].is_null());
+        let dir = c
+            .user_store()
+            .unwrap()
+            .path()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        std::fs::write(
+            dir.join("meta.toml"),
+            "format_version = 3\ndir_id = \"x\"\n",
+        )
+        .unwrap();
+        let v = c.web_data_rpc("system.storageStatus", &json!({})).unwrap();
+        assert_eq!(v["format_version"], 3, "报文件里的实际值");
+        assert_eq!(
+            v["known_format_version"],
+            wind_config::user_meta::KNOWN_FORMAT_VERSION
+        );
     }
 
     /// §2.5：数据文件的问题（坏行 / 隔离 / 已重建 / 未迁移）经 storageStatus 交给设置页。
