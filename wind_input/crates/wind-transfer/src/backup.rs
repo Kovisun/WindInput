@@ -180,7 +180,7 @@ pub fn create_backup(
         serde_json::Value::Null,
     )?;
 
-    // 快捷格式调整（调序 / 停用 / 自定义条目）：全局段，原样带上用户目录里那份 yaml。
+    // 快捷格式调整（调序 / 停用 / 自定义条目）：全局段。包内是 yaml 序列化，与 data/ 下的 toml 真源不同。
     let quick = store.export_quick_format_yaml()?;
     if !quick.is_empty() {
         add(
