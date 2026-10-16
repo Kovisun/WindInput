@@ -2446,7 +2446,8 @@ impl Coordinator {
                 c.flush_user_data_before_exit();
             }));
         }
-        #[cfg(unix)]
+        // Android 的输入法跑在应用进程里，进程生命周期归系统管，不接 SIGTERM。
+        #[cfg(all(unix, not(target_os = "android")))]
         {
             let c = self.clone();
             crate::exit_signal::install_sigterm(Box::new(move || {
