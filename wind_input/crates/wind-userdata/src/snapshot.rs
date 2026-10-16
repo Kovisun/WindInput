@@ -18,7 +18,6 @@
 //! `USER_ABBREV` 兜底组在段里的等价物。同码异边界（xian 下的「先」与「西安」）各得各的键。
 
 use anyhow::bail;
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use wind_dict::datformat::{WdatReader, WdatStreamWriter};
@@ -55,8 +54,6 @@ pub struct Snapshot {
     meta: memmap2::Mmap,
     pub max_seq: u64,
     pub entry_count: u32,
-    /// code → 该码首条目的全局序号（叶内第 i 条 = 首序号 + i）。
-    first_idx: BTreeMap<String, u32>,
 }
 
 /// 从**按 (code, text) 排好序**的条目流建段：`<dir>/<name>.wdat` + `<dir>/<name>.meta`。
@@ -227,7 +224,6 @@ pub fn open(dir: &Path, name: &str) -> anyhow::Result<Option<Snapshot>> {
             meta,
             max_seq,
             entry_count: 0,
-            first_idx: BTreeMap::new(),
         }));
     }
     let generation = u64::from_le_bytes(meta[20..28].try_into()?);
@@ -236,10 +232,8 @@ pub fn open(dir: &Path, name: &str) -> anyhow::Result<Option<Snapshot>> {
         bail!("sidecar 指向的段不在: {}", wdat.display());
     }
     let reader = wind_dict::reader_pool::open_wdat(&wdat)?;
-    let mut first_idx = BTreeMap::new();
     let mut total = 0u32;
-    for (code, leaf) in reader.codes() {
-        first_idx.insert(code, total);
+    for (_, leaf) in reader.codes() {
         total += reader.leaf_entries(leaf).len() as u32;
     }
     if total != entry_count || meta.len() < META_HEADER + entry_count as usize * META_ROW {
@@ -250,7 +244,6 @@ pub fn open(dir: &Path, name: &str) -> anyhow::Result<Option<Snapshot>> {
         meta,
         max_seq,
         entry_count,
-        first_idx,
     }))
 }
 
@@ -277,8 +270,15 @@ impl Snapshot {
         )
     }
 
+    /// 全局序号 = 该码叶的首序号 + 叶内序。首序号直接从叶表算（不常驻「码 → 序号」表：
+    /// 19 万条用户词那张表要十几 MB 堆）。
     fn idx_of(&self, code: &str, order: i32) -> u32 {
-        self.first_idx.get(code).copied().unwrap_or(0) + order.max(0) as u32
+        let first = self
+            .reader
+            .as_deref()
+            .and_then(|r| Some(r.leaf_first_entry(r.leaf_of(code)?)))
+            .unwrap_or(0);
+        first + order.max(0) as u32
     }
 
     fn entry(
@@ -367,7 +367,7 @@ impl Snapshot {
                 }
                 continue;
             }
-            let first = self.first_idx.get(&code).copied().unwrap_or(0);
+            let first = r.leaf_first_entry(leaf);
             for (i, (text, weight, _order, boundary)) in
                 r.leaf_entries(leaf).into_iter().enumerate()
             {
@@ -465,6 +465,52 @@ mod tests {
             open(&d, "nope").unwrap().is_none(),
             "没有文件 = 零段，不是错误"
         );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// 每条的 sidecar 行按全局序号取：码多、叶长不一时，各查询入口取到的都得是自己那一行。
+    #[test]
+    fn meta_rows_line_up_across_codes_of_uneven_leaves() {
+        let d = std::env::temp_dir().join(format!("wind_snap_rows-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let mut es = Vec::new();
+        for c in 0..40u32 {
+            for t in 0..(c % 5 + 1) {
+                // count 编码 (码, 词)，权重与词序反向，叶内要重排
+                es.push(se(
+                    &format!("k{c:03}"),
+                    &format!("w{c}-{t}"),
+                    t as i32,
+                    0,
+                    c * 10 + t,
+                ));
+            }
+        }
+        es.sort_by(|a, b| {
+            (a.code.as_str(), a.text.as_str()).cmp(&(b.code.as_str(), b.text.as_str()))
+        });
+        build(&d, "user", 1, es.into_iter()).unwrap();
+        let s = open(&d, "user").unwrap().unwrap();
+        let want = |e: &SnapshotEntry| {
+            let c: u32 = e.code[1..].parse().unwrap();
+            let t: u32 = e.text.rsplit('-').next().unwrap().parse().unwrap();
+            c * 10 + t
+        };
+        for c in [0u32, 7, 23, 39] {
+            for e in s.exact(&format!("k{c:03}")) {
+                assert_eq!(e.count, want(&e), "exact {}/{}", e.code, e.text);
+            }
+        }
+        for e in s.prefix("k01", 100) {
+            assert_eq!(e.count, want(&e), "prefix {}/{}", e.code, e.text);
+        }
+        let mut n = 0;
+        s.for_each_prefix("k02", &mut |e| {
+            assert_eq!(e.count, want(&e), "for_each_prefix {}/{}", e.code, e.text);
+            n += 1;
+            true
+        });
+        assert!(n > 10);
         let _ = std::fs::remove_dir_all(&d);
     }
 

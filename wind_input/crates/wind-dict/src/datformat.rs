@@ -2117,6 +2117,21 @@ impl WdatReader {
         }
     }
 
+    /// 主表里 `code` 的叶号（[`Self::codes`] 给出的同一种）；码不在表里给 `None`。
+    pub fn leaf_of(&self, code: &str) -> Option<u32> {
+        let v = &self.main;
+        if v.dat_size == 0 {
+            return None;
+        }
+        self.terminal_leaf(v, self.walk(v, code)?)
+    }
+
+    /// 某叶首条在主表条目区里的序号。条目区按喂入顺序连续排列（[`WdatStreamWriter::push_code`]），
+    /// 所以这就是该叶首条的全局序号，调用方不必自己另建「码 → 序号」表。
+    pub fn leaf_first_entry(&self, leaf: u32) -> u32 {
+        self.read_leaf(&self.main, leaf).0 / ENTRY_SIZE as u32
+    }
+
     /// 某叶的全部候选 `(text, weight, order, boundary)`，text 直接借 mmap。
     pub fn leaf_entries(&self, leaf: u32) -> Vec<(&str, i32, u32, u64)> {
         let v = &self.main;
