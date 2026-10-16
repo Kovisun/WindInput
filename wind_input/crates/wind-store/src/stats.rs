@@ -312,7 +312,11 @@ impl Store {
             }
             return Ok(());
         }
-        let text = toml::to_string(&MonthFile { version: 1, days })?;
+        let text = format!(
+            "{}\n{}",
+            wind_userdata::text::banner::STATS,
+            toml::to_string(&MonthFile { version: 1, days })?
+        );
         wind_userdata::text::fold::commit_text(&p, text.as_bytes(), None)
     }
 
@@ -500,7 +504,11 @@ impl Store {
 
     /// 写入统计全局元数据。
     pub fn put_stats_meta(&self, meta: &StatsMeta) -> anyhow::Result<()> {
-        let text = toml::to_string(meta)?;
+        let text = format!(
+            "{}\n{}",
+            wind_userdata::text::banner::STATS,
+            toml::to_string(meta)?
+        );
         wind_userdata::text::fold::commit_text(&self.stats_meta_path(), text.as_bytes(), None)
     }
 

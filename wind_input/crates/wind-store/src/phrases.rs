@@ -411,14 +411,23 @@ impl Store {
     /// TOML 内容哈希标记（判断是否需要重新同步系统短语），见 [`Self::phrase_sys_hash_path`]。
     pub fn phrase_sys_hash(&self) -> anyhow::Result<Option<String>> {
         let p = self.phrase_sys_hash_path();
-        Ok(wind_userdata::text::fold::read_text(&p)?
-            .map(|(b, _)| String::from_utf8_lossy(&b).trim().to_string())
-            .filter(|s| !s.is_empty()))
+        // 跳过说明行（没有说明行的旧文件同样读得出）
+        Ok(
+            wind_userdata::text::fold::read_text(&p)?.and_then(|(b, _)| {
+                let text = String::from_utf8_lossy(&b);
+                wind_utils::text::normalize_input(&text)
+                    .lines()
+                    .map(str::trim)
+                    .find(|l| !l.is_empty() && !l.starts_with('#'))
+                    .map(str::to_string)
+            }),
+        )
     }
 
     pub fn set_phrase_sys_hash(&self, h: &str) -> anyhow::Result<()> {
         let p = self.phrase_sys_hash_path();
-        wind_userdata::text::fold::commit_text(&p, format!("{h}\n").as_bytes(), None)
+        let text = format!("{}\n{h}\n", wind_userdata::text::banner::PHRASE_SYS_HASH);
+        wind_userdata::text::fold::commit_text(&p, text.as_bytes(), None)
     }
 
     /// 旧 META 里的 `phrase_sys_hash`（P4a 迁移用）。
@@ -928,6 +937,17 @@ mod tests {
         let s = Store::open(&path).unwrap();
         assert_eq!(s.phrase_sys_hash().unwrap(), None);
         s.set_phrase_sys_hash("abc123").unwrap();
+        assert_eq!(s.phrase_sys_hash().unwrap().as_deref(), Some("abc123"));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// 没有说明行的旧标记文件照常读出。
+    #[test]
+    fn phrase_sys_hash_reads_file_without_banner() {
+        let path = tmp("wind_phrases_hash_old.redb");
+        let s = Store::open(&path).unwrap();
+        std::fs::create_dir_all(s.user_text_dir()).unwrap();
+        std::fs::write(s.phrase_sys_hash_path(), "abc123\n").unwrap();
         assert_eq!(s.phrase_sys_hash().unwrap().as_deref(), Some("abc123"));
         let _ = std::fs::remove_file(&path);
     }

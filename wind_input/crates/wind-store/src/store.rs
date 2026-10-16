@@ -1263,6 +1263,56 @@ mod tests {
         assert!(dir.join("assoc.table.yaml").is_file());
     }
 
+    /// `data/` 下程序写出的每个文本文件，第一行是各自的说明行。
+    #[test]
+    fn every_data_file_starts_with_its_banner() {
+        use wind_userdata::text::banner;
+        let p = tmp_db("banner");
+        let _ = std::fs::remove_file(&p);
+        let s = Store::open(&p).unwrap();
+        s.add_user_word("pinyin", "nihao", "你好", 1, 0b101)
+            .unwrap();
+        s.learn_temp_word("pinyin", "zaijian", "再见", 1, 0b1001)
+            .unwrap();
+        s.add_drafts("pinyin", &[("haode".into(), "好的".into())])
+            .unwrap();
+        s.record_freq("pinyin", "nihao", "你好").unwrap();
+        s.record_assoc_pick("pinyin", "我们", "我们的").unwrap();
+        s.pin_shadow("pinyin", "ni", "你", None, 0).unwrap();
+        s.add_phrase("dz", "地址", 0, 1).unwrap();
+        s.record_completion(crate::completion::CompletionKind::EmailSuffix, "qq.com")
+            .unwrap();
+        s.set_quick_format_enabled("date", "date.lunar", false)
+            .unwrap();
+        s.set_common_char_override("的", false).unwrap();
+        s.record_stat("2026-10-16", 3, 0).unwrap();
+        s.put_stats_meta(&crate::stats::StatsMeta::default())
+            .unwrap();
+        s.set_phrase_sys_hash("h1").unwrap();
+        s.flush_user_data().unwrap();
+        let d = s.user_text_dir();
+        for (f, want) in [
+            ("pinyin/user.dict.yaml", banner::USER_DICT),
+            ("pinyin/temp.dict.yaml", banner::TEMP),
+            ("pinyin/draft.dict.yaml", banner::DRAFT),
+            ("pinyin/freq.table.yaml", banner::FREQ),
+            ("pinyin/assoc.table.yaml", banner::ASSOC),
+            ("pinyin/shadow.dict.yaml", banner::SHADOW),
+            ("phrases.dict.yaml", banner::PHRASES),
+            ("completion.table.yaml", banner::COMPLETION),
+            ("quick_format.toml", banner::QUICK_FORMAT),
+            ("common_chars.yaml", banner::COMMON_CHARS),
+            ("stats/2026-10.toml", banner::STATS),
+            ("stats/meta.toml", banner::STATS),
+            ("phrases.sys_hash", banner::PHRASE_SYS_HASH),
+        ] {
+            let text = std::fs::read_to_string(d.join(f)).unwrap();
+            assert_eq!(text.lines().next(), Some(want), "{f}");
+        }
+        assert_eq!(s.phrase_sys_hash().unwrap().as_deref(), Some("h1"));
+        assert_eq!(s.get_daily_stat("2026-10-16").unwrap().total(), 3);
+    }
+
     /// 打开时，`data/` 下已有学到的数据文本（换机复制过来）⇒ 直接绑定、可查。
     #[test]
     fn learned_text_copied_from_another_machine_is_bound_at_open() {

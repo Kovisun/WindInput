@@ -169,8 +169,8 @@ pub(crate) struct QuickFile {
     kinds: std::collections::BTreeMap<String, QuickFormatRecord>,
 }
 
-const QUICK_HEADER: &str = "# 快捷格式调整（WindInput 维护，可手改）\n\
-# [kinds.<类别>] 下：disabled = 停用的格式 id；[[kinds.<类别>.moved]] id / position = 固定到组内第几位；\n\
+/// 说明行之后的语法提示。
+const QUICK_HELP: &str = "# [kinds.<类别>] 下：disabled = 停用的格式 id；[[kinds.<类别>.moved]] id / position = 固定到组内第几位；\n\
 # [[kinds.<类别>.added]] id / text = 自己加的格式。出厂格式表见 system.quick.toml。\n";
 
 /// 用户目录里的 `quick_format.toml`（P5 起）。
@@ -190,7 +190,11 @@ pub(crate) fn parse_quick_yaml(s: &str) -> anyhow::Result<QuickFile> {
 }
 
 pub(crate) fn render_quick(qf: &QuickFile) -> anyhow::Result<String> {
-    Ok(format!("{QUICK_HEADER}{}", toml::to_string(qf)?))
+    Ok(format!(
+        "{}\n{QUICK_HELP}{}",
+        wind_userdata::text::banner::QUICK_FORMAT,
+        toml::to_string(qf)?
+    ))
 }
 
 impl Store {

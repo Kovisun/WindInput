@@ -565,8 +565,11 @@ pub type CodeRange = (u32, u32);
 ///
 /// 备份包里用户会直接看到这份文本，所以要把「只含改过的字段」这件事说出来——否则他
 /// 会奇怪为什么 emoji 类的备份里一个 emoji 都没有。
+/// 说明行（设计 `user-dict-libraries-and-external-edit.md` §5；其余数据文件的文案在
+/// `wind_userdata::text::banner`）。
+const STORED_DOC_BANNER: &str = "# 清风输入法 · 字符类的个人调整。可手动编辑。";
+
 const STORED_DOC_HEADER: &str = "\
-# WindInput 字符类的用户层调整（设置页维护）。
 # 只含你改过的字段与增删的成员；没写的沿用下层（定制层 → 出厂层）。
 # 列表体在 `...` 之后：裸行 = 加进本类，`-` 开头 = 从本类移除。
 ";
@@ -584,6 +587,8 @@ pub fn render_doc(doc: &CharsetDoc) -> anyhow::Result<String> {
     );
     let head = serde_yaml::to_string(&doc.def)?;
     let mut text = String::with_capacity(head.len() + 256);
+    text.push_str(STORED_DOC_BANNER);
+    text.push('\n');
     text.push_str(STORED_DOC_HEADER);
     text.push_str("---\n");
     text.push_str(&head);
@@ -1210,6 +1215,15 @@ mod tests {
         let text = render_doc(&doc).unwrap();
         assert!(text.starts_with('#'), "开头得是注释");
         assert!(text.contains("只含你改过的字段"));
+        assert_eq!(
+            text.lines().next(),
+            Some(STORED_DOC_BANNER),
+            "第一行是说明行"
+        );
+        assert!(
+            STORED_DOC_BANNER.starts_with("# 清风输入法 · ")
+                && STORED_DOC_BANNER.ends_with("。可手动编辑。")
+        );
     }
 
     /// ⛔ 危险的 key 在**入口**就被拒，不做「安全化」。

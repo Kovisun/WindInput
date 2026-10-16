@@ -69,8 +69,8 @@ struct CommonFile {
     uncommon: Vec<String>,
 }
 
-const COMMON_HEADER: &str =
-    "# 常用字覆盖（WindInput 维护，可手改）：common = 强制常用，uncommon = 强制生僻\n";
+/// 说明行之后的字段提示。
+const COMMON_HELP: &str = "# common = 强制常用，uncommon = 强制生僻\n";
 
 fn parse_common(s: &str) -> anyhow::Result<BTreeMap<String, bool>> {
     if s.trim().is_empty() {
@@ -106,7 +106,8 @@ fn render_common(m: &BTreeMap<String, bool>) -> String {
             .collect(),
     };
     format!(
-        "{COMMON_HEADER}{}",
+        "{}\n{COMMON_HELP}{}",
+        wind_userdata::text::banner::COMMON_CHARS,
         serde_yaml::to_string(&f).unwrap_or_default()
     )
 }

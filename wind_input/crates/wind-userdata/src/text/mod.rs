@@ -1,4 +1,5 @@
 //! 文本真源层（设计 §2.2 / §2.3 / §3.5 文本目标）。
+pub mod banner;
 pub mod codec;
 pub mod doc;
 pub mod fold;
