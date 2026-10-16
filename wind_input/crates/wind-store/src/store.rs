@@ -1,10 +1,7 @@
-//! Store 核心：基于 redb 的持久化存储（骨架）
+//! Store 核心：打开用户数据引擎、把 `data/` 下的文本绑定上、跑旧库迁移。
 //!
-//! 与 Go 版本 `wind_input/internal/store/store.go`（bbolt）对齐，但用 redb。
-//! 见 docs/redesign/store.md：redb 无嵌套 bucket，用扁平 table + schema 前缀复合 key。
-//!
-//! 本提交为**骨架**：open / 表定义 / 事务封装 / pause-resume（Windows 热替换释放文件锁）/
-//! version + 迁移框架。用户词/临时词/词频/shadow 的具体 ops 在后续提交按 store.md §10.2 实现。
+//! 全部用户数据的真源在用户目录 `data/`（设计 `docs/design/user-data-storage-redesign.md`
+//! §2.1）。redb（`userdata.redb`）只在旧库链（P1–P4a）未迁完时打开、只读旧表；迁完后不再打开。
 
 use redb::{Database, TableDefinition};
 use std::path::{Path, PathBuf};

@@ -492,7 +492,7 @@ impl Coordinator {
         };
         match opened {
             Ok(s) => {
-                info!("Opened redb store: {}", p.display());
+                info!("Opened user store: {}", dir.display());
                 // 迁移完成才升 format_version：此后认识旧格式的版本只读（§7.1）。P3 的短语迁移要等
                 // 协调器交来系统短语（之后协调器会再升一次）。
                 finish_format_upgrade(&s, dir);

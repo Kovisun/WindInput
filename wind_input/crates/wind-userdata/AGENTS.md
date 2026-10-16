@@ -43,7 +43,10 @@ P1b 起 `wind-store::Store` 持有一个 `Runtime`，临时词 / 草稿 / 词频
 - **零条目快照只有 sidecar**：`snapshot::build` 遇零条目只写带水位的 sidecar（gen = 0）并清掉代号文件；`open` 对「sidecar 不存在」给 `None`（零段），对「头坏 / 指向的 wdat 不在 / 条目数对不上」给 `Err`（当零段并整份回放）。
 - **叠加语义只有一份**：`engine::apply_ops`（表见 `docs/design/user-data-storage-plan-p1a.md` Task 1）。读、折回、层都经 `overlay_entries` 调它——别在别处再写一份 Upsert/Delete 的 match。
 - **批量操作走 `fold_with`**：清空、导入、草稿过期 / 淘汰都是「旧快照 + delta → policy → 新快照」原子换段，水位随之推进；不要逐条写 Delete。按键路径的单条写走 `apply` / `apply_batch`。
-- **文本目标**（`bind_text` 绑定的 (目标, 方案)）：`fold` 自动走 `fold_text`（§3.5 次序：读 + 指纹 → 补丁 → tmp + fsync → 复核原文件指纹 → `.bak` + rename + fsync 目录 → 由文本重建段 → 换入 → state 记 `text_fp`）；`fold_with` 对它们直接报错（清空 / 导入用 `rewrite_text` / 逐条 Upsert）。手改文件后 `sync_text` 由文本重建段，水位不回退、已折回记录不回放、未折回的操作仍叠加。文本目标不按条数折回，空闲 `TEXT_IDLE`（30 s）后折回。计数 / 时间（Incr / Touch）不进文本，只有它们且文件未被手改时折回不重建段。
+- **文本目标**（`bind_text` 绑定的 (目标, 方案)）分两种格式（`TextBinding.format`）：`Words`（用户词 `user.dict.yaml`，计数 / 时间不进文本，只有 Incr / Touch 且文件未被手改时折回不重建段）与 `Table`（学到的数据，`text/codec.rs` 的列规格，计数 / 时间都进文本，按键补丁）。`fold` 自动走 `fold_text`（§3.5 次序：读 + 指纹 → 补丁 → tmp + fsync → 复核原文件指纹 → `.bak` + rename + fsync 目录 → 由文本重建段 → 换入 → state 记 `text_fp`）。`fold_with` 对 `Table` 目标改为由文件当前内容 + 待处理操作整文件写回（文件解析不了 ⇒ 报错不写），对 `Words` 目标报错（清空 / 导入用 `rewrite_text`）；显式清空用 `clear` / `replace_text_entries`（坏文件先另存 `.corrupt-<时间>`）。手改文件后 `sync_text` 由文本重建段，水位不回退。文本目标空闲 `TEXT_IDLE`（30 s）或最老待处理写入超过 `TEXT_MAX_PENDING`（5 min）折回；失败按目标退避，压实不重试退避中的目标。
+- **绑定规则与采纳**：`set_text_rule` 设规则后，维护 / 压实 / `fold_with` 前把规则管的目标自动绑定。绑定一个从没归文本管过、文件也不在、但引擎里有数据的目标时，先由当前视图渲染出文本（`adopt_view`）、成功后才登记绑定——绝不由「文件不存在」推出「数据为空」。
+- **日志**：一条一次 `write`；后台节拍每 5 秒有新写入就 fsync（锁外做）；写失败的原因记在 `write_error()`（不含内容），设置页经 `storageStatus` 提示。锁 API 报错时退化为只读。
+- **文件问题登记**：`issues.rs` 进程级登记坏行数 / 隔离 / 已重建，只记路径与计数。
 - **归文本管 = 已绑定，或 state 记过 `text_fp`**：重开后绑定前，这类目标 `fold` / `fold_with` 报错，`maintain` / `compact` 跳过——它们的操作只能绑定后经 `fold_text` 进文本。所以接线时 `bind_text` 要先于对它的显式折回。只读实例 `bind_text` 只登记、不同步。
 - **文本折回失败**（隔离 / 读不了 / 编辑器竞争）只拦该目标：WARN + 退避（30 s 起翻倍，封顶 30 min），别的目标与压实照常。
 - **小表 `text::table`**（短语 / Shadow 用）：按列名读写的 TSV；`TextTable` 内存持有最近一次成功解析的内容（读零 IO），`edit` 先按文件现状重新解析（手改优先）再按组补丁、整文件提交，文件隔离时拒写、读照旧；`replace_all` 整文件替换。`# no comment` 之后不含 tab 的 `#` 行仍算注释。

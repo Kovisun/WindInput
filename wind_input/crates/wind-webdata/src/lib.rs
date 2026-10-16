@@ -533,7 +533,7 @@ fn web_data_dispatch<H: WebDataRpc + ?Sized>(
         // 批量写：成功后立即回收页缓存，见 `BULK_WRITE_METHODS`。
         "backup.restore" => h.web_backup_restore(params),
 
-        // ── dict.*（用户词库，redb 持久化）────────────────────
+        // ── dict.*（用户词库）────────────────────
         "comment.sources" => h.web_comment_sources(),
         "emoji.modules" => h.web_emoji_modules(),
         "dict.listPaged" => h.web_dict_list_paged(params),
@@ -582,12 +582,12 @@ fn web_data_dispatch<H: WebDataRpc + ?Sized>(
         "temp.promoteAll" => h.web_temp_promote_all(params),
         "temp.clear" => h.web_temp_clear(params),
 
-        // ── freq.*（用户词频，redb 持久化）───────────────────
+        // ── freq.*（用户词频）───────────────────
         "freq.listPaged" => h.web_freq_list_paged(params),
         "freq.delete" => h.web_freq_delete(params),
         "freq.clear" => h.web_freq_clear(params),
 
-        // ── mailSuffix.* / urlHistory.*（补全学习数据，redb 持久化）──
+        // ── mailSuffix.* / urlHistory.*（补全学习数据）──
         // 两组共用一份实现，只差 `CompletionKind`：存储层本就是一张表两个分区，
         // RPC 再各写一遍等于把「同形态」这件事在第三处重新论证一遍。
         // 命名空间分开是给设置端用的——「清空网址历史」不该顺带抹掉邮箱学习。
@@ -604,7 +604,7 @@ fn web_data_dispatch<H: WebDataRpc + ?Sized>(
         "quickHistory.delete" => h.web_completion_delete(CompletionKind::QuickHistory, params),
         "quickHistory.clear" => h.web_completion_clear(CompletionKind::QuickHistory),
 
-        // ── shadow.*（影子规则，redb 持久化）─────────────────
+        // ── shadow.*（影子规则）─────────────────
         "shadow.list" => h.web_shadow_list(params),
         // 分页版（设置页列表走这条；`shadow.list` 保留给全量取用方）。
         "shadow.listPaged" => h.web_shadow_list_paged(params),
@@ -616,7 +616,7 @@ fn web_data_dispatch<H: WebDataRpc + ?Sized>(
         "shadow.removeRule" => h.web_shadow_remove_rule(params),
         "shadow.addRule" => h.web_shadow_add_rule(params),
 
-        // ── phrase.*（用户短语，全局，redb 持久化）──────────
+        // ── phrase.*（用户短语，全局）──────────
         "phrase.list" => h.web_phrase_list(),
         "phrase.add" => h.web_phrase_add(params),
         "phrase.update" => h.web_phrase_update(params),
@@ -631,7 +631,7 @@ fn web_data_dispatch<H: WebDataRpc + ?Sized>(
         "phrase.importText" => h.web_phrase_import_text(params),
         "phrase.resetSystem" => h.web_phrase_reset_system(),
 
-        // ── quick.*（快捷输入格式表的用户调整，全局，redb 持久化）──
+        // ── quick.*（快捷输入格式表的用户调整，全局）──
         // 基表（模板与出厂顺序）在 system.quick.toml，**RPC 一律不写它**：
         // 那会抢走高级用户手写文件的所有权，见 handle_quick_format 模块文档。
         "charset.list" => h.web_charset_list(),

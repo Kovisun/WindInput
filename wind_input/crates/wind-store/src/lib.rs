@@ -1,7 +1,5 @@
-//! wind-store: 基于 redb 的持久化存储
-//!
-//! 与 Go 版本 `wind_input/internal/store/` 对齐。
-//! 使用 redb 替代 bbolt，保持相同的 bucket 语义。
+//! wind-store：用户数据门面。真源是用户目录 `data/` 下的文本文件（引擎文本目标、小表、
+//! 机写小文件）；redb 只供旧库迁移读。
 
 pub mod abbrev_index;
 pub mod assoc_history;

@@ -106,6 +106,8 @@ cmdbar 撤销上屏），直接追加会让被替换掉的字留在流里，制�
 
 ## 4. 存储：专用表，不是内存
 
+> **P5 更新**：草稿的真源已是用户目录 `data/<schema>/draft.dict.yaml`（表格文本，引擎快照只是加速结构）。
+>
 > **P1b 更新（用户数据存储重设计）**：草稿已从 redb 的 `DRAFT_WORDS` 表迁到运行时引擎
 > `wind-userdata`（`Runtime` 的草稿 API，经 `wind-store::Store` 门面委托）。下文「单写者抢锁」「批量
 > 写事务」的约束随之消失：引擎写入一条一次 `write`、不抢 redb 锁；有效期基准改为 `last_used`（写入即

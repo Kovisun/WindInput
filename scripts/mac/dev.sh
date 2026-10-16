@@ -1361,7 +1361,7 @@ EOF
 #
 # 服务定位词库用 exeDir/data (wind-config Config::data_dir = current_exe()/data),
 # 所以二进制和 data/ 必须同目录 (本函数装到 INSTALL_ROOT 与 INSTALL_ROOT/data)。
-# 用户数据 (config.toml / userdata.redb / socket) 走运行时目录
+# 用户数据 (config.toml / data/ / socket) 走运行时目录
 # (~/Library/Application Support/WindInput{Dev}), 与 service/ 子目录互不干扰。
 #
 # 以普通用户运行 (LaunchAgent 是 per-user gui domain, 不要 sudo)。
@@ -1440,7 +1440,7 @@ service_install() {
             info "(service 未加载)"
         fi
         [[ -f "$PLIST" ]] && { rm -f "$PLIST"; info "removed $PLIST"; } || info "(no $PLIST)"
-        # 只删 service/ 子目录 (二进制+预制词库), 保留用户数据 (../config.toml, userdata.redb)。
+        # 只删 service/ 子目录 (二进制+预制词库), 保留用户数据 (../config.toml, ../data/)。
         [[ -d "$INSTALL_ROOT" ]] && { rm -rf "$INSTALL_ROOT"; info "removed $INSTALL_ROOT"; } || info "(no $INSTALL_ROOT)"
         bold "==> Done (用户数据保留在 $APP_SUPPORT/)"
         exit 0
