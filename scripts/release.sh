@@ -1042,7 +1042,7 @@ pause() { printf '\n'; read -e -r -p "按回车继续..." _; }
 # 重查一遍会把「看一眼状态」变成等待。只有 push 会改变这几个值, 所以只在它之后置脏;
 # 想手动重查按 r。
 MENU_DIRTY=1
-MENU_BASE=""; MENU_LATEST=""; MENU_FILEVER=""; MENU_AHEAD=""; MENU_BRANCH=""; MENU_PUSHED=""
+MENU_BASE=""; MENU_LATEST=""; MENU_FILEVER=""; MENU_AHEAD=""; MENU_BRANCH=""
 menu_refresh() {
     printf '%b正在查询远端 tag ...%b\r' "$C_GRAY" "$C_RESET"
     MENU_BRANCH="$(manifest_branch)"
@@ -1099,10 +1099,8 @@ show_menu() {
     gray "  ★ 时序: 先在编译机桌面登录签名会话 (2 小时时限) 再发布, CI 跑完时会话才还有效。"
 }
 
-# 6/7/8/9 处理的版本: 本菜单里刚 push 的那个优先; 没 push 过才取远端版本号最大的 tag。
-# 不能只看「最大」: beta 在外时给旧线发热修 (0.126.1), 最大的仍是 0.127.0-beta.1。
+# 6/7/8/9 处理的版本: 远端版本号最大的 tag。
 menu_target_version() {
-    [ -n "$MENU_PUSHED" ] && { printf '%s\n' "$MENU_PUSHED"; return 0; }
     [ -n "$MENU_LATEST" ] && { printf '%s\n' "$MENU_LATEST"; return 0; }
     err "远端没有 v* tag, 没有可处理的版本。"
     return 1
@@ -1130,29 +1128,24 @@ menu_loop() {
             "")  continue ;;
             q)   gray "已退出。"; return 0 ;;
             1)   do_check; rc=$? ;;
-            2)   v="$(bump_version "$MENU_BASE" patch)"; do_push "$v"; rc=$?; MENU_DIRTY=1
-                 [ "$rc" = 0 ] && MENU_PUSHED="$v" ;;
-            3)   v="$(bump_version "$MENU_BASE" minor)"; do_push "$v"; rc=$?; MENU_DIRTY=1
-                 [ "$rc" = 0 ] && MENU_PUSHED="$v" ;;
+            2)   v="$(bump_version "$MENU_BASE" patch)"; do_push "$v"; rc=$?; MENU_DIRTY=1 ;;
+            3)   v="$(bump_version "$MENU_BASE" minor)"; do_push "$v"; rc=$?; MENU_DIRTY=1 ;;
             4)   if [ -n "$MENU_LATEST" ] && [ "$MENU_BASE" = "$MENU_LATEST" ]; then
                      printf '\n'
                      warn "远端已有 v$MENU_BASE —— 重发会用 --force 覆盖该 tag。"
                      gray "  只有该版本的 Release 还是草稿时才允许, 脚本会先查一遍。"
                      if confirm "确认 force 重发 v$MENU_BASE ?" n; then
                          do_push "$MENU_BASE" 1; rc=$?
-                         [ "$rc" = 0 ] && MENU_PUSHED="$MENU_BASE"
                      else
                          gray "已取消。"; rc=0
                      fi
                  else
                      do_push "$MENU_BASE"; rc=$?
-                     [ "$rc" = 0 ] && MENU_PUSHED="$MENU_BASE"
                  fi
                  MENU_DIRTY=1 ;;
             5)   printf '\n'; read -e -r -p "版本号 (x.y.z 或 x.y.z-beta.N, 不带 v): " v
                  v="$(printf '%s' "$v" | tr -d '[:space:]')"
                  if valid_version "$v"; then do_push "$v"; rc=$?; MENU_DIRTY=1
-                     [ "$rc" = 0 ] && MENU_PUSHED="$v"
                  else err "版本号格式应为 x.y.z 或 x.y.z-beta.N (不带 v): $v"; rc=1; fi ;;
             6)   if v="$(menu_target_version)"; then do_wait "$v"; rc=$?; else rc=1; fi ;;
             7)   if v="$(menu_target_version)"; then do_sign_draft "$v"; rc=$?; else rc=1; fi ;;

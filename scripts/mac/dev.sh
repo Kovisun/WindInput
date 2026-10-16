@@ -358,15 +358,14 @@ app_build() {
     fi
 
     # 版本贯通: 从仓库根 VERSION 文件 (CI 由 tag 写入) 注入 CFBundleShortVersionString /
-    # CFBundleVersion (去预发布后缀). pkg 的文件名 / 向导标题取 VERSION 文件的完整版本,
-    # pkgbuild 版本取去后缀的核心, 故版本真源是 VERSION 文件. 无 VERSION 文件时保持 plist 原值 (0.0.0), 不破坏纯本地构建.
+    # CFBundleVersion, 版本真源是 VERSION 文件. 无 VERSION 文件时保持 plist 原值 (0.0.0), 不破坏纯本地构建.
     local VERSION_FILE="$REPO_DIR/docs/VERSION"
     local APP_VERSION
     if [[ -f "$VERSION_FILE" ]]; then
         APP_VERSION=$(tr -d '\xef\xbb\xbf \t\r\n' < "$VERSION_FILE")
         if [[ -n "$APP_VERSION" ]]; then
-            # 这两个键 Apple 要求纯数字点分: 预发布后缀 (-beta.1) 去掉, 完整串只进 pkg 文件名与标题。
-            /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${APP_VERSION%%-*}" "$APP_BUNDLE/Contents/Info.plist"
+            # 显示版本保留预发布后缀 (-beta.1), 与 Windows 一致; CFBundleVersion 供系统比较, 只用数字核心。
+            /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $APP_VERSION" "$APP_BUNDLE/Contents/Info.plist"
             /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${APP_VERSION%%-*}" "$APP_BUNDLE/Contents/Info.plist"
             info "version: $APP_VERSION (来自 VERSION 文件)"
         fi
@@ -576,7 +575,7 @@ build_setting() {
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>${ver%%-*}</string>
+    <string>$ver</string>
     <key>CFBundleVersion</key>
     <string>${ver%%-*}</string>
     <key>CFBundleIconFile</key>
@@ -1991,14 +1990,14 @@ pkg_build() {
     fi
 
     # VERSION = 完整版本号 (含 -beta.1 后缀, 用于文件名与标题; 与 Windows / Linux 产物同名规则);
-    # PKG_VERSION = 纯数字核心 (pkgbuild / pkg-ref 的版本比较用, 与 Info.plist 一致)。
+    # PKG_VERSION = 纯数字核心 (pkgbuild / pkg-ref 的版本字段, 与 CFBundleVersion 一致)。
     local VERSION PKG_VERSION
     VERSION="$(repo_version)"
     [[ -n "$VERSION" ]] || VERSION=$(/usr/libexec/PlistBuddy -c "Print CFBundleShortVersionString" "$APP_BUNDLE/Contents/Info.plist" 2>/dev/null || echo "0.0.0")
     PKG_VERSION="${VERSION%%-*}"
     local plist_ver
     plist_ver=$(/usr/libexec/PlistBuddy -c "Print CFBundleShortVersionString" "$APP_BUNDLE/Contents/Info.plist" 2>/dev/null || true)
-    if [[ -n "$plist_ver" && "$plist_ver" != "$PKG_VERSION" ]]; then
+    if [[ -n "$plist_ver" && "$plist_ver" != "$VERSION" ]]; then
         warn "app 内版本 $plist_ver 与 docs/VERSION ($VERSION) 不一致: .app 是旧构建? 加 --build 重编"
     fi
     local PKG_PATH="$DIST_DIR/$APP_NAME-${VERSION}-macOS.pkg"
@@ -2078,10 +2077,13 @@ with open(p, "rb") as f:
     arr = plistlib.load(f)
 for c in arr:
     c["BundleIsRelocatable"] = False
+    # 不让 Installer 按 bundle 版本拦截覆盖: 显示版本带 -beta.1 后缀, 它的比较结果不可靠,
+    # beta 之后装同号正式版可能被判为「不更新」而静默跳过 .app。
+    c["BundleIsVersionChecked"] = False
 with open(p, "wb") as f:
     plistlib.dump(arr, f)
 PY
-    info "已关闭 BundleIsRelocatable (锁定到暂存路径)"
+    info "已关闭 BundleIsRelocatable / BundleIsVersionChecked"
 
     # -------- pkgbuild + productbuild --------
     bold "==> pkgbuild + productbuild"
