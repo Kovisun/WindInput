@@ -103,22 +103,37 @@ manifest_branch() {
 latest_remote_version() {
     git -C "$PRODUCT_ROOT" ls-remote --tags --refs origin 'v*' 2>/dev/null \
         | sed 's#.*refs/tags/v##' \
-        | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' \
-        | sort -t. -k1,1n -k2,2n -k3,3n | tail -1
+        | while read -r v; do if valid_version "$v"; then printf '%s\n' "$v"; fi; done \
+        | semver_sort | tail -1
 }
 
+# 版本号升序 (每行一个)。预发布排在同号正式版之前: 0.127.0-beta.2 < 0.127.0-beta.10 < 0.127.0。
+semver_sort() {
+    awk '{ core = $0; pre = ""; i = index($0, "-")
+           if (i) { core = substr($0, 1, i - 1); pre = substr($0, i + 1) }
+           split(core, n, ".")
+           printf "%s\t%s\t%s\t%d\t%s\t%s\n", n[1], n[2], n[3], (pre == "" ? 1 : 0), pre, $0 }' \
+        | sort -t "$(printf '\t')" -k1,1n -k2,2n -k3,3n -k4,4n -k5,5V | cut -f6
+}
+
+# 预发布 (x.y.z-…) 的下一个版本是它的正式版 x.y.z, patch / minor 都一样——beta 之后要发的
+# 就是那个号。⚠️ 与 release.ps1 的 Step-Version 同算法。
 bump_version() {
     local cur="$1" kind="$2" a b c
+    case "$kind" in patch|minor) ;; *) err "未知的 bump 方式: $kind"; return 1 ;; esac
+    if [[ "$cur" == *-* ]]; then
+        printf '%s\n' "${cur%%-*}"
+        return 0
+    fi
     IFS=. read -r a b c <<<"$cur"
     case "$kind" in
         patch) c=$((c + 1)) ;;
         minor) b=$((b + 1)); c=0 ;;
-        *)     err "未知的 bump 方式: $kind"; return 1 ;;
     esac
     printf '%s.%s.%s\n' "$a" "$b" "$c"
 }
 
-valid_version() { [[ "$1" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; }
+valid_version() { [[ "$1" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z]+(\.[0-9A-Za-z]+)*)?$ ]]; }
 
 # bump 的基准版本。以远端最新 tag 为准 (tag 是版本真源); 但本机 docs/VERSION 更大时取它
 # —— 那说明有人手工提前 bump 过, 拿远端 tag 做基准会让版本号往回退。
@@ -132,7 +147,7 @@ bump_base() {
     valid_version "$file" || file=""
     [ -n "$remote" ] || { printf '%s\n' "${file:-0.0.0}"; return 0; }
     [ -n "$file" ]   || { printf '%s\n' "$remote"; return 0; }
-    printf '%s\n%s\n' "$remote" "$file" | sort -t. -k1,1n -k2,2n -k3,3n | tail -1
+    printf '%s\n%s\n' "$remote" "$file" | semver_sort | tail -1
 }
 
 # 解析「版本参数」: 显式版本号 / patch / minor / 留空(取远端最新, 用于 wait 等只读场景)。
@@ -143,7 +158,7 @@ resolve_version() {
         patch|minor)   cur="$(bump_base)"
                        [ -n "$cur" ] || { err "取不到基准版本, 无法 $arg bump"; return 1; }
                        bump_version "$cur" "$arg" ;;
-        *)             valid_version "$arg" || { err "版本号格式应为 x.y.z (不带 v): $arg"; return 1; }
+        *)             valid_version "$arg" || { err "版本号格式应为 x.y.z 或 x.y.z-beta.N (不带 v): $arg"; return 1; }
                        printf '%s\n' "$arg" ;;
     esac
 }
@@ -1027,7 +1042,7 @@ pause() { printf '\n'; read -e -r -p "按回车继续..." _; }
 # 重查一遍会把「看一眼状态」变成等待。只有 push 会改变这几个值, 所以只在它之后置脏;
 # 想手动重查按 r。
 MENU_DIRTY=1
-MENU_BASE=""; MENU_LATEST=""; MENU_FILEVER=""; MENU_AHEAD=""; MENU_BRANCH=""
+MENU_BASE=""; MENU_LATEST=""; MENU_FILEVER=""; MENU_AHEAD=""; MENU_BRANCH=""; MENU_PUSHED=""
 menu_refresh() {
     printf '%b正在查询远端 tag ...%b\r' "$C_GRAY" "$C_RESET"
     MENU_BRANCH="$(manifest_branch)"
@@ -1058,13 +1073,16 @@ show_menu() {
     printf '    1  预检        '; gray "五仓 / gh / 编译机 / 签名会话; 不做任何改动"
     printf '    2  发布 Patch  '; say "v$MENU_BASE  →  v$(bump_version "$MENU_BASE" patch)"
     printf '    3  发布 Minor  '; say "v$MENU_BASE  →  v$(bump_version "$MENU_BASE" minor)"
+    if [[ "$MENU_BASE" == *-* ]]; then
+        gray "                   (预发布转正: 2/3 都发 v${MENU_BASE%%-*}; 下一个 beta 或跳号用 5)"
+    fi
     printf '    4  发布当前版  '
     if [ -n "$MENU_LATEST" ] && [ "$MENU_BASE" = "$MENU_LATEST" ]; then
         printf 'v%s' "$MENU_BASE"; warn "   ⚠️ 远端已有此 tag —— 选它会 force 重发 (仅限草稿)"
     else
         printf 'v%s' "$MENU_BASE"; gray "   (docs/VERSION 的版本; 远端尚无此 tag)"
     fi
-    printf '    5  指定版本    '; gray "自己输入 x.y.z"
+    printf '    5  指定版本    '; gray "自己输入 x.y.z 或 x.y.z-beta.N"
     printf '\n'
     printf '%b  发布之后 (下面三项操作 %s):%b\n' "$C_YELLOW" "$(if [ -n "$MENU_LATEST" ]; then echo "v$MENU_LATEST"; else echo "最新 tag"; fi)" "$C_RESET"
     printf '    6  等 CI       '; gray "守着 release.yml 跑完 (约 20 分钟; windows 与 macos 两个 job)"
@@ -1081,8 +1099,10 @@ show_menu() {
     gray "  ★ 时序: 先在编译机桌面登录签名会话 (2 小时时限) 再发布, CI 跑完时会话才还有效。"
 }
 
-# 6/7/8 处理的版本: 刚 push 完时, 远端最新 tag 就是本次要处理的那个。
+# 6/7/8/9 处理的版本: 本菜单里刚 push 的那个优先; 没 push 过才取远端版本号最大的 tag。
+# 不能只看「最大」: beta 在外时给旧线发热修 (0.126.1), 最大的仍是 0.127.0-beta.1。
 menu_target_version() {
+    [ -n "$MENU_PUSHED" ] && { printf '%s\n' "$MENU_PUSHED"; return 0; }
     [ -n "$MENU_LATEST" ] && { printf '%s\n' "$MENU_LATEST"; return 0; }
     err "远端没有 v* tag, 没有可处理的版本。"
     return 1
@@ -1110,25 +1130,30 @@ menu_loop() {
             "")  continue ;;
             q)   gray "已退出。"; return 0 ;;
             1)   do_check; rc=$? ;;
-            2)   v="$(bump_version "$MENU_BASE" patch)"; do_push "$v"; rc=$?; MENU_DIRTY=1 ;;
-            3)   v="$(bump_version "$MENU_BASE" minor)"; do_push "$v"; rc=$?; MENU_DIRTY=1 ;;
+            2)   v="$(bump_version "$MENU_BASE" patch)"; do_push "$v"; rc=$?; MENU_DIRTY=1
+                 [ "$rc" = 0 ] && MENU_PUSHED="$v" ;;
+            3)   v="$(bump_version "$MENU_BASE" minor)"; do_push "$v"; rc=$?; MENU_DIRTY=1
+                 [ "$rc" = 0 ] && MENU_PUSHED="$v" ;;
             4)   if [ -n "$MENU_LATEST" ] && [ "$MENU_BASE" = "$MENU_LATEST" ]; then
                      printf '\n'
                      warn "远端已有 v$MENU_BASE —— 重发会用 --force 覆盖该 tag。"
                      gray "  只有该版本的 Release 还是草稿时才允许, 脚本会先查一遍。"
                      if confirm "确认 force 重发 v$MENU_BASE ?" n; then
                          do_push "$MENU_BASE" 1; rc=$?
+                         [ "$rc" = 0 ] && MENU_PUSHED="$MENU_BASE"
                      else
                          gray "已取消。"; rc=0
                      fi
                  else
                      do_push "$MENU_BASE"; rc=$?
+                     [ "$rc" = 0 ] && MENU_PUSHED="$MENU_BASE"
                  fi
                  MENU_DIRTY=1 ;;
-            5)   printf '\n'; read -e -r -p "版本号 (x.y.z, 不带 v): " v
+            5)   printf '\n'; read -e -r -p "版本号 (x.y.z 或 x.y.z-beta.N, 不带 v): " v
                  v="$(printf '%s' "$v" | tr -d '[:space:]')"
                  if valid_version "$v"; then do_push "$v"; rc=$?; MENU_DIRTY=1
-                 else err "版本号格式应为 x.y.z (不带 v): $v"; rc=1; fi ;;
+                     [ "$rc" = 0 ] && MENU_PUSHED="$v"
+                 else err "版本号格式应为 x.y.z 或 x.y.z-beta.N (不带 v): $v"; rc=1; fi ;;
             6)   if v="$(menu_target_version)"; then do_wait "$v"; rc=$?; else rc=1; fi ;;
             7)   if v="$(menu_target_version)"; then do_sign_draft "$v"; rc=$?; else rc=1; fi ;;
             8)   if v="$(menu_target_version)"; then do_upload "$v"; rc=$?; else rc=1; fi ;;
@@ -1172,7 +1197,7 @@ main() {
         status)     do_status ;;
         check)      do_check ;;
         push)
-            [ -n "${2:-}" ] || { err "push 需要版本号: <x.y.z> | patch | minor"; return 1; }
+            [ -n "${2:-}" ] || { err "push 需要版本号: <x.y.z[-beta.N]> | patch | minor"; return 1; }
             v="$(resolve_version "$2")" || return 1
             local f=0
             case "${3:-}" in

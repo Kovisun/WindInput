@@ -358,15 +358,16 @@ app_build() {
     fi
 
     # 版本贯通: 从仓库根 VERSION 文件 (CI 由 tag 写入) 注入 CFBundleShortVersionString /
-    # CFBundleVersion. pkg 后续读 CFBundleShortVersionString 作 .pkg 文件名/版本/向导标题,
-    # 故版本真源是 VERSION 文件. 无 VERSION 文件时保持 plist 原值 (0.0.0), 不破坏纯本地构建.
+    # CFBundleVersion (去预发布后缀). pkg 的文件名 / 向导标题取 VERSION 文件的完整版本,
+    # pkgbuild 版本取去后缀的核心, 故版本真源是 VERSION 文件. 无 VERSION 文件时保持 plist 原值 (0.0.0), 不破坏纯本地构建.
     local VERSION_FILE="$REPO_DIR/docs/VERSION"
     local APP_VERSION
     if [[ -f "$VERSION_FILE" ]]; then
         APP_VERSION=$(tr -d '\xef\xbb\xbf \t\r\n' < "$VERSION_FILE")
         if [[ -n "$APP_VERSION" ]]; then
-            /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $APP_VERSION" "$APP_BUNDLE/Contents/Info.plist"
-            /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $APP_VERSION" "$APP_BUNDLE/Contents/Info.plist"
+            # 这两个键 Apple 要求纯数字点分: 预发布后缀 (-beta.1) 去掉, 完整串只进 pkg 文件名与标题。
+            /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${APP_VERSION%%-*}" "$APP_BUNDLE/Contents/Info.plist"
+            /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${APP_VERSION%%-*}" "$APP_BUNDLE/Contents/Info.plist"
             info "version: $APP_VERSION (来自 VERSION 文件)"
         fi
     fi
@@ -575,9 +576,9 @@ build_setting() {
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>$ver</string>
+    <string>${ver%%-*}</string>
     <key>CFBundleVersion</key>
-    <string>$ver</string>
+    <string>${ver%%-*}</string>
     <key>CFBundleIconFile</key>
     <string>AppIcon</string>
     <!-- 与 IME app 的 Info.plist、Package.swift 的 platforms 对齐到 12.0: 整套产品的下限
@@ -1989,8 +1990,17 @@ pkg_build() {
         info "(无设置仓 $SETTING_DIR, 跳过设置组件)"
     fi
 
-    local VERSION
-    VERSION=$(/usr/libexec/PlistBuddy -c "Print CFBundleShortVersionString" "$APP_BUNDLE/Contents/Info.plist" 2>/dev/null || echo "0.0.0")
+    # VERSION = 完整版本号 (含 -beta.1 后缀, 用于文件名与标题; 与 Windows / Linux 产物同名规则);
+    # PKG_VERSION = 纯数字核心 (pkgbuild / pkg-ref 的版本比较用, 与 Info.plist 一致)。
+    local VERSION PKG_VERSION
+    VERSION="$(repo_version)"
+    [[ -n "$VERSION" ]] || VERSION=$(/usr/libexec/PlistBuddy -c "Print CFBundleShortVersionString" "$APP_BUNDLE/Contents/Info.plist" 2>/dev/null || echo "0.0.0")
+    PKG_VERSION="${VERSION%%-*}"
+    local plist_ver
+    plist_ver=$(/usr/libexec/PlistBuddy -c "Print CFBundleShortVersionString" "$APP_BUNDLE/Contents/Info.plist" 2>/dev/null || true)
+    if [[ -n "$plist_ver" && "$plist_ver" != "$PKG_VERSION" ]]; then
+        warn "app 内版本 $plist_ver 与 docs/VERSION ($VERSION) 不一致: .app 是旧构建? 加 --build 重编"
+    fi
     local PKG_PATH="$DIST_DIR/$APP_NAME-${VERSION}-macOS.pkg"
 
     # -------- 组 payload root --------
@@ -2088,7 +2098,7 @@ PY
         --component-plist "$COMP" \
         --scripts "$SCRIPTS" \
         --identifier "$PKG_ID" \
-        --version "$VERSION" \
+        --version "$PKG_VERSION" \
         --install-location "/" \
         "$COMPONENT_PKG"
 
@@ -2102,7 +2112,7 @@ PY
     <domains enable_anywhere="false" enable_currentUserHome="false" enable_localSystem="true"/>
     <choices-outline><line choice="default"/></choices-outline>
     <choice id="default" title="$TITLE"><pkg-ref id="$PKG_ID"/></choice>
-    <pkg-ref id="$PKG_ID" version="$VERSION" onConclusion="none">$(basename "$COMPONENT_PKG")</pkg-ref>
+    <pkg-ref id="$PKG_ID" version="$PKG_VERSION" onConclusion="none">$(basename "$COMPONENT_PKG")</pkg-ref>
 </installer-gui-script>
 XML
 

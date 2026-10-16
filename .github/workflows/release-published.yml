@@ -47,12 +47,18 @@ jobs:
       DOCS_REPO: ${{ vars.DOCS_REPO }}
       PAT: ${{ secrets.DOCS_REPO_PAT }}
       TAG: ${{ github.event.release.tag_name || inputs.tag }}
+      PRERELEASE: ${{ github.event.release.prerelease || false }}
     steps:
       # 文档仓侧由 .github/workflows/sync-changelog.yml 接收 changelog-updated,
       # 取 Release body 的 user-facing 标记块写入 data/releases.json 并开 PR 自动合并。
       # 该仓另有每天 04:00 CST 的 schedule 兜底,故此处失败只会退化为最长约一天的延迟。
       - name: 发送 repository_dispatch
         run: |
+          # 预发布不进文档站(文档仓脚本也会跳过,这里先不发,省一次空跑)。判据同 sync-to-r2。
+          if [ "$PRERELEASE" = "true" ] || [[ "${TAG#v}" == *-* ]]; then
+            echo "::notice::$TAG 是预发布版本,不通知文档仓。"
+            exit 0
+          fi
           if [ -z "$DOCS_REPO" ] || [ -z "$PAT" ]; then
             echo "::warning::未配置 vars.DOCS_REPO 或 secrets.DOCS_REPO_PAT,跳过通知;文档仓的每日 schedule 会兜底同步。"
             exit 0
