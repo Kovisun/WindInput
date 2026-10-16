@@ -130,16 +130,40 @@ pub fn try_lock(state_dir: &Path) -> anyhow::Result<Option<Lock>> {
         .create(true)
         .truncate(false)
         .open(state_dir.join("lock"))?;
-    match f.try_lock() {
-        Ok(()) => Ok(Some(Lock(f))),
-        Err(std::fs::TryLockError::WouldBlock) => Ok(None),
-        Err(std::fs::TryLockError::Error(e)) => Err(e.into()),
+    let r = f.try_lock();
+    Ok(lock_outcome(r, f))
+}
+
+/// 拿到 ⇒ 锁；被别的进程占着 ⇒ `None`（只读）；锁 API 本身报错（网络家目录上 flock 不可用
+/// 之类）⇒ 同样 `None` 并 WARN：退化为只读好过整个用户数据不可用。
+fn lock_outcome(r: Result<(), std::fs::TryLockError>, f: std::fs::File) -> Option<Lock> {
+    match r {
+        Ok(()) => Some(Lock(f)),
+        Err(std::fs::TryLockError::WouldBlock) => None,
+        Err(std::fs::TryLockError::Error(e)) => {
+            tracing::warn!("用户数据锁不可用（{e}），以只读模式运行：本次不保存学习与修改");
+            None
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 锁 API 本身报错（网络家目录上的 flock 等）⇒ 退化为只读，不让整个用户数据不可用。
+    #[test]
+    fn lock_api_error_degrades_to_readonly() {
+        let d = std::env::temp_dir().join(format!("wind_lockerr-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&d);
+        let f = std::fs::File::create(d.join("lock")).unwrap();
+        let e = std::fs::TryLockError::Error(std::io::Error::other("ENOLCK"));
+        assert!(lock_outcome(Err(e), f).is_none());
+        let f = std::fs::File::create(d.join("lock")).unwrap();
+        assert!(lock_outcome(Err(std::fs::TryLockError::WouldBlock), f).is_none());
+        let f = std::fs::File::create(d.join("lock")).unwrap();
+        assert!(lock_outcome(Ok(()), f).is_some());
+    }
 
     /// Review Focus 5：目录被复制到另一台机器 ⇒ 换新 device_id，旧日志封存，不与新日志混号。
     #[test]
