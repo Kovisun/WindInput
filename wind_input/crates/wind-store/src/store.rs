@@ -334,10 +334,20 @@ impl Store {
             Some(db)
         };
         let state_dir = loc.state_dir.clone();
+        // 先登记数据目录：之后的一切写入（含下面的迁移）都把上一版与坏文件留存放进 `.backup/`
+        wind_userdata::text::fold::register_data_root(&loc.text_dir);
         let ud = wind_userdata::engine::UserData::open(wind_userdata::engine::Dirs {
             state_dir: loc.state_dir.clone(),
             dir_id: loc.dir_id.clone(),
         })?;
+        if !ud.readonly() {
+            wind_userdata::text::fold::migrate_legacy_backups(
+                &loc.text_dir,
+                crate::banner_backfill::is_data_file,
+            );
+            // 绑定 / 载入任何数据之前：之后各处取到的就是补过说明行的内容与指纹
+            crate::banner_backfill::backfill_banners(&loc.text_dir);
+        }
         let runtime = std::sync::Arc::new(wind_userdata::runtime::Runtime::new(
             std::sync::Arc::new(ud),
         ));
@@ -471,7 +481,8 @@ impl Store {
             .collect();
         if let Ok(rd) = std::fs::read_dir(&self.text_dir) {
             for e in rd.flatten() {
-                if e.path().join("user.dict.yaml").is_file()
+                if !e.file_name().to_string_lossy().starts_with('.')
+                    && e.path().join("user.dict.yaml").is_file()
                     && let Some(n) = e.file_name().to_str()
                 {
                     schemas.insert(n.to_string());
@@ -521,6 +532,9 @@ impl Store {
             let Some(schema) = e.file_name().to_str().map(str::to_string) else {
                 continue;
             };
+            if schema.starts_with('.') {
+                continue; // `.backup/` 等
+            }
             for t in LEARNED_TARGETS {
                 if learned_binding(&self.text_dir, t, &schema).is_some_and(|b| b.path.is_file()) {
                     keys.insert((t, schema.clone()));
@@ -1272,13 +1286,8 @@ mod tests {
         assert!(dir.join("assoc.table.yaml").is_file());
     }
 
-    /// `data/` 下程序写出的每个文本文件，第一行是各自的说明行。
-    #[test]
-    fn every_data_file_starts_with_its_banner() {
-        use wind_userdata::text::banner;
-        let p = tmp_db("banner");
-        let _ = std::fs::remove_file(&p);
-        let s = Store::open(&p).unwrap();
+    /// 每类程序写出的数据文件都写一份（文件 → 说明行见 [`banner_table`]）。
+    fn fill_every_file(s: &Store) {
         s.add_user_word("pinyin", "nihao", "你好", 1, 0b101)
             .unwrap();
         s.learn_temp_word("pinyin", "zaijian", "再见", 1, 0b1001)
@@ -1298,15 +1307,21 @@ mod tests {
         s.put_stats_meta(&crate::stats::StatsMeta::default())
             .unwrap();
         s.set_phrase_sys_hash("h1").unwrap();
+        s.set_user_dict_enabled("pinyin", "pinyin", "x", false)
+            .unwrap();
         s.flush_user_data().unwrap();
-        let d = s.user_text_dir();
-        for (f, want) in [
+    }
+
+    fn banner_table() -> Vec<(&'static str, &'static str)> {
+        use wind_userdata::text::banner;
+        vec![
             ("pinyin/user.dict.yaml", banner::USER_DICT),
             ("pinyin/temp.dict.yaml", banner::TEMP),
             ("pinyin/draft.dict.yaml", banner::DRAFT),
             ("pinyin/freq.table.yaml", banner::FREQ),
             ("pinyin/assoc.table.yaml", banner::ASSOC),
             ("pinyin/shadow.dict.yaml", banner::SHADOW),
+            ("pinyin/dicts.toml", banner::USER_DICTS_META),
             ("phrases.dict.yaml", banner::PHRASES),
             ("completion.table.yaml", banner::COMPLETION),
             ("quick_format.toml", banner::QUICK_FORMAT),
@@ -1314,12 +1329,146 @@ mod tests {
             ("stats/2026-10.toml", banner::STATS),
             ("stats/meta.toml", banner::STATS),
             ("phrases.sys_hash", banner::PHRASE_SYS_HASH),
-        ] {
+        ]
+    }
+
+    /// `data/` 下程序写出的每个文本文件，第一行是各自的说明行。
+    #[test]
+    fn every_data_file_starts_with_its_banner() {
+        let p = tmp_db("banner");
+        let _ = std::fs::remove_file(&p);
+        let s = Store::open(&p).unwrap();
+        fill_every_file(&s);
+        let d = s.user_text_dir();
+        for (f, want) in banner_table() {
             let text = std::fs::read_to_string(d.join(f)).unwrap();
             assert_eq!(text.lines().next(), Some(want), "{f}");
         }
         assert_eq!(s.phrase_sys_hash().unwrap().as_deref(), Some("h1"));
         assert_eq!(s.get_daily_stat("2026-10-16").unwrap().total(), 3);
+    }
+
+    /// 打开时给没有说明行的数据文件补上（与整写同一行）：未折回的数据不丢；用户自放的分库、坏文件、
+    /// 第一行已是注释的不动；再次打开一个字节都不改。
+    #[test]
+    fn open_backfills_missing_banners_without_losing_pending_data() {
+        use wind_userdata::text::banner;
+        let p = tmp_db("backfill");
+        let _ = std::fs::remove_file(&p);
+        {
+            let s = Store::open(&p).unwrap();
+            fill_every_file(&s);
+            s.set_charset_doc("rare", "key: rare\n").unwrap();
+            // 待折回：不 flush
+            s.add_user_word("pinyin", "shijie", "世界", 2, 0b1001)
+                .unwrap();
+            s.learn_temp_word("pinyin", "haoa", "好啊", 1, 0b101)
+                .unwrap();
+        }
+        let d = derived_text_dir(&p);
+        let mut table = banner_table();
+        table.push(("charsets/rare.yaml", banner::CHARSETS));
+        for (f, want) in &table {
+            let t = std::fs::read_to_string(d.join(f)).unwrap();
+            if let Some(rest) = t.strip_prefix(&format!("{want}\n")) {
+                std::fs::write(d.join(f), rest).unwrap();
+            }
+        }
+        let lib = d.join("pinyin/dicts/mine.dict.yaml");
+        std::fs::create_dir_all(lib.parent().unwrap()).unwrap();
+        let lib_text = "---\nname: mine\ncolumns: [text, code]\n...\n好\thao\n";
+        std::fs::write(&lib, lib_text).unwrap();
+        let bad = d.join("wubi86/user.dict.yaml");
+        std::fs::create_dir_all(bad.parent().unwrap()).unwrap();
+        std::fs::write(&bad, "---\nname: [\n").unwrap();
+        let own = d.join("wubi86/shadow.dict.yaml");
+        std::fs::write(
+            &own,
+            "# 我自己的说明\n---\ncolumns: [code, text, action]\n...\n",
+        )
+        .unwrap();
+
+        let s = Store::open(&p).unwrap();
+        for (f, want) in &table {
+            let text = std::fs::read_to_string(d.join(f)).unwrap();
+            assert_eq!(text.lines().next(), Some(*want), "{f}");
+        }
+        assert_eq!(
+            std::fs::read_to_string(&lib).unwrap(),
+            lib_text,
+            "用户自放的分库不动"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&bad).unwrap(),
+            "---\nname: [\n",
+            "坏文件不动"
+        );
+        assert!(
+            std::fs::read_to_string(&own)
+                .unwrap()
+                .starts_with("# 我自己的说明\n")
+        );
+        s.flush_user_data().unwrap();
+        let user = std::fs::read_to_string(d.join("pinyin/user.dict.yaml")).unwrap();
+        assert!(user.contains("你好") && user.contains("世界"), "{user}");
+        let temp = std::fs::read_to_string(d.join("pinyin/temp.dict.yaml")).unwrap();
+        assert!(temp.contains("再见") && temp.contains("好啊"), "{temp}");
+        assert_eq!(s.phrase_sys_hash().unwrap().as_deref(), Some("h1"));
+        assert!(
+            s.get_charset_doc("rare")
+                .unwrap()
+                .unwrap()
+                .contains("key: rare")
+        );
+        assert!(
+            std::fs::read_to_string(d.join("pinyin/user.dict.yaml"))
+                .unwrap()
+                .starts_with(banner::USER_DICT)
+        );
+        drop(s);
+        let snap: Vec<Vec<u8>> = table
+            .iter()
+            .map(|(f, _)| std::fs::read(d.join(f)).unwrap())
+            .collect();
+        let s = Store::open(&p).unwrap();
+        for ((f, _), before) in table.iter().zip(&snap) {
+            assert_eq!(&std::fs::read(d.join(f)).unwrap(), before, "{f}");
+        }
+        drop(s);
+    }
+
+    /// 打开时把旧版留在数据文件旁边的 `.bak` / `.corrupt-<时间>` 挪进 `data/.backup/`。
+    #[test]
+    fn open_moves_legacy_backups_into_backup_dir() {
+        let p = tmp_db("legacy_bak");
+        let _ = std::fs::remove_file(&p);
+        {
+            let s = Store::open(&p).unwrap();
+            s.add_user_word("pinyin", "nihao", "你好", 1, 0b101)
+                .unwrap();
+            s.flush_user_data().unwrap();
+        }
+        let d = derived_text_dir(&p);
+        // 模拟旧版留下的数据目录：还没迁移过
+        std::fs::remove_file(d.join(".backup/.migrated")).unwrap();
+        std::fs::write(d.join("pinyin/user.dict.yaml.bak"), "old").unwrap();
+        std::fs::write(d.join("phrases.dict.yaml.corrupt-20261016-120000"), "bad").unwrap();
+        let s = Store::open(&p).unwrap();
+        assert!(!d.join("pinyin/user.dict.yaml.bak").exists());
+        assert!(!d.join("phrases.dict.yaml.corrupt-20261016-120000").exists());
+        assert!(
+            d.join(".backup/phrases.dict.yaml.corrupt-20261016-120000")
+                .is_file()
+        );
+        assert!(d.join(".backup/pinyin/user.dict.yaml").is_file());
+        assert!(!s.user_text_schemas().contains(".backup"));
+        drop(s);
+        // 迁移只跑一次：之后用户自己放的 `.bak`（哪怕与数据文件同名）重启后还在
+        std::fs::write(d.join("x.bak"), "mine").unwrap();
+        std::fs::write(d.join("pinyin/user.dict.yaml.bak"), "mine").unwrap();
+        let _s = Store::open(&p).unwrap();
+        assert_eq!(std::fs::read_to_string(d.join("x.bak")).unwrap(), "mine");
+        assert!(d.join("pinyin/user.dict.yaml.bak").is_file());
     }
 
     /// 打开时，`data/` 下已有学到的数据文本（换机复制过来）⇒ 直接绑定、可查。

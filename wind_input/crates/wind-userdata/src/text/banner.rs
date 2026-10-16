@@ -1,7 +1,8 @@
 //! `data/` 下程序写出的文本文件的第一行说明（设计 `user-dict-libraries-and-external-edit.md` §5）。
 //! 文案只在这张表里；说明行不参与解析，整文件重写时按当前文案生成；按行补丁时只给直接以 `---`
 //! 开头的文件补上，第一行是注释（含用户自己的）或带 BOM 的原样保留。
-//! 用户目录根的 `meta.toml` 与字符类文件由 wind-config 渲染，文案在那边就近存放。
+//! 用户目录根的 `meta.toml` 与字符类文件由 wind-config 渲染，文案在那边就近存放（字符类的那行这里
+//! 另存一份 [`CHARSETS`]，供启动时补说明行用）。
 
 pub const USER_DICT: &str =
     "# 清风输入法 · 用户词库：造的词、加的词都在这里。可手动编辑；文件头（--- 到 ...）请勿修改。";
@@ -23,6 +24,8 @@ pub const COMPLETION: &str =
 pub const QUICK_FORMAT: &str =
     "# 清风输入法 · 快捷输入的个人调整（调序、停用、自定义条目）。可手动编辑。";
 pub const COMMON_CHARS: &str = "# 清风输入法 · 常用字 / 生僻字的个人调整。可手动编辑。";
+/// 字符类的用户层文件（`charsets/<key>.yaml`）。由 wind-config 渲染，那边同名常量须与这里一致。
+pub const CHARSETS: &str = "# 清风输入法 · 字符类的个人调整。可手动编辑。";
 pub const STATS: &str = "# 清风输入法 · 输入统计。由程序自动维护，请勿手动修改。";
 pub const PHRASE_SYS_HASH: &str = "# 清风输入法 · 系统短语同步标记。由程序自动维护，请勿手动修改。";
 
@@ -74,6 +77,7 @@ mod tests {
         COMPLETION,
         QUICK_FORMAT,
         COMMON_CHARS,
+        CHARSETS,
         STATS,
         PHRASE_SYS_HASH,
     ];

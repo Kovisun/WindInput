@@ -567,7 +567,7 @@ pub type CodeRange = (u32, u32);
 /// 会奇怪为什么 emoji 类的备份里一个 emoji 都没有。
 /// 说明行（设计 `user-dict-libraries-and-external-edit.md` §5；其余数据文件的文案在
 /// `wind_userdata::text::banner`）。
-const STORED_DOC_BANNER: &str = "# 清风输入法 · 字符类的个人调整。可手动编辑。";
+pub const STORED_DOC_BANNER: &str = "# 清风输入法 · 字符类的个人调整。可手动编辑。";
 
 const STORED_DOC_HEADER: &str = "\
 # 只含你改过的字段与增删的成员；没写的沿用下层（定制层 → 出厂层）。

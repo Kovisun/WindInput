@@ -287,6 +287,15 @@ mod tests {
     use super::*;
     use wind_config::charset_def::{CharsetDef, parse_doc};
 
+    /// 字符类文件的说明行在 wind-config 渲染、在 wind-store 启动补写，两份文案必须一致。
+    #[test]
+    fn charset_banner_matches_store_backfill() {
+        assert_eq!(
+            wind_config::charset_def::STORED_DOC_BANNER,
+            wind_store::banner::CHARSETS
+        );
+    }
+
     /// 造合并结果：先垫两个**模拟出厂的区块类**，再叠加测试自己那份。
     ///
     /// ⚠️ 区块类已经全部搬进 `data/charsets/blocks.yaml`，代码里不再有内置清单

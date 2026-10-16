@@ -346,10 +346,7 @@ impl Store {
             return Ok(());
         }
         if corrupt && let Some(kept) = fold::preserve_corrupt(&p)? {
-            let kept_as = kept
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default();
+            let kept_as = fold::kept_as(&kept);
             issues::report(&p, IssueKind::Rebuilt { kept_as });
             fp = fold::fingerprint(None);
         }
@@ -457,6 +454,7 @@ impl Store {
         self.check_not_editing(&from)?;
         self.check_not_editing(&meta_path(self.user_text_dir(), ds))?;
         std::fs::rename(&from, &to)?;
+        fold::move_backup(&from, &to);
         if read_label(&to) == name {
             rewrite_head_name(&to, new_name)?;
         }
@@ -479,9 +477,7 @@ impl Store {
         self.check_not_editing(&p)?;
         self.check_not_editing(&meta_path(self.user_text_dir(), ds))?;
         std::fs::remove_file(&p)?;
-        let mut bak = p.clone().into_os_string();
-        bak.push(".bak");
-        let _ = std::fs::remove_file(bak);
+        fold::remove_backup(&p);
         issues::clear(&p);
         self.modify_meta(ds, |m| {
             let mut changed = false;
@@ -684,6 +680,26 @@ mod tests {
         assert!(scan(root, "none").is_empty());
     }
 
+    /// 分库的上一版在 `.backup/` 里：改名跟着走，删除一并删掉；数据文件旁边没有 `.bak`。
+    #[test]
+    fn lib_backup_follows_rename_and_delete() {
+        let s = store("bakmv");
+        let root = s.user_text_dir().to_path_buf();
+        s.import_user_dict("wb", "a", &[row("a", "工", 1)]).unwrap();
+        let p = lib_path(&root, "wb", "a");
+        assert!(s.remove_user_dict_entry("wb", "a", "a", "工").unwrap());
+        let bak = root.join(".backup/wb/dicts/a.dict.yaml");
+        assert!(bak.is_file());
+        assert!(!root.join("wb/dicts/a.dict.yaml.bak").exists());
+        s.rename_user_dict("wb", "a", "b").unwrap();
+        assert!(!bak.exists());
+        let bak_b = root.join(".backup/wb/dicts/b.dict.yaml");
+        assert!(bak_b.is_file());
+        assert!(!p.exists());
+        s.delete_user_dict("wb", "b").unwrap();
+        assert!(!bak_b.exists());
+    }
+
     #[test]
     fn create_writes_banner_and_header_and_rejects_dup() {
         let s = store("create");
@@ -735,7 +751,7 @@ mod tests {
         assert_eq!(issues::list_under(&mp)[0].kind, IssueKind::Isolated);
         s.set_user_dict_enabled("wb", "wb", "a", false).unwrap();
         assert_eq!(off_names(&root, "wb", "wb"), ["a"]);
-        let kept = std::fs::read_dir(root.join("wb"))
+        let kept = std::fs::read_dir(root.join(".backup/wb"))
             .unwrap()
             .flatten()
             .filter(|e| {

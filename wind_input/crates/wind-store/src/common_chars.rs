@@ -256,7 +256,7 @@ mod tests {
         std::fs::write(&f, "common: [\n").unwrap();
         s.common_doc().sync();
         s.clear_common_char_overrides().unwrap();
-        let kept: Vec<_> = std::fs::read_dir(f.parent().unwrap())
+        let kept: Vec<_> = std::fs::read_dir(s.user_text_dir().join(".backup"))
             .unwrap()
             .flatten()
             .filter(|e| {

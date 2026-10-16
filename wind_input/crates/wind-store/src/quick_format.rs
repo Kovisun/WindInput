@@ -426,7 +426,7 @@ mod tests {
             s.get_quick_format("date").unwrap().unwrap().moved[0].id,
             "date.lunar"
         );
-        let kept = std::fs::read_dir(f.parent().unwrap())
+        let kept = std::fs::read_dir(s.user_text_dir().join(".backup"))
             .unwrap()
             .flatten()
             .any(|e| {

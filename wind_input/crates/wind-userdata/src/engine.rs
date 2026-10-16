@@ -898,10 +898,7 @@ impl UserData {
             crate::issues::report(
                 &b.path,
                 crate::issues::IssueKind::Rebuilt {
-                    kept_as: kept
-                        .file_name()
-                        .map(|n| n.to_string_lossy().into_owned())
-                        .unwrap_or_default(),
+                    kept_as: crate::text::fold::kept_as(&kept),
                 },
             );
         }

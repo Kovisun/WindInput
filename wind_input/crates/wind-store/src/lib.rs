@@ -3,6 +3,7 @@
 
 pub mod abbrev_index;
 pub mod assoc_history;
+mod banner_backfill;
 pub mod charsets;
 pub mod common_chars;
 pub mod completion;
@@ -33,6 +34,7 @@ pub mod user_dicts;
 pub mod user_words;
 pub use wind_userdata::engine::check_schema_id;
 pub use wind_userdata::issues;
+pub use wind_userdata::text::banner;
 pub use wind_wdict as wdict;
 
 pub use store::Store;

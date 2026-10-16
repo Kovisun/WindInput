@@ -278,6 +278,7 @@ pub fn create_backup(
         .flatten()
         .filter(|e| e.path().is_dir())
         .filter_map(|e| e.file_name().to_str().map(str::to_string))
+        .filter(|n| !n.starts_with('.')) // `.backup/` 不进包
         .collect();
     data_schemas.sort();
     for ds in &data_schemas {
@@ -1431,6 +1432,10 @@ mod tests {
         let lib = root.join("pinyin/dicts/成语.dict.yaml");
         let lib_bytes = fs::read(&lib).unwrap();
         let meta_bytes = fs::read(root.join("pinyin/dicts.toml")).unwrap();
+        // `.backup/` 里的上一版 / 坏文件留存不进包
+        fs::create_dir_all(root.join(".backup/dicts")).unwrap();
+        fs::write(root.join(".backup/dicts.toml"), "x").unwrap();
+        fs::write(root.join(".backup/dicts/坏.dict.yaml"), "---\n...\n").unwrap();
         let pkg = t.path().join("b.zip");
         create_backup(
             &s,
@@ -1456,6 +1461,11 @@ mod tests {
         assert_eq!(
             entry("data/pinyin/dicts.toml").unwrap().r#type,
             "user_dicts_meta"
+        );
+        assert!(
+            m.contents.iter().all(|e| !e.path.contains(".backup")),
+            "{:?}",
+            m.contents.iter().map(|e| &e.path).collect::<Vec<_>>()
         );
         assert_eq!(section_of("user_dict_file"), "dict");
         assert_eq!(section_of("user_dicts_meta"), "dict");
