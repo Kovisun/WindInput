@@ -7976,14 +7976,11 @@ impl EngineManager {
         let mut ab_items: Vec<(u32, u16, u32, i32)> = Vec::new();
         let mut merged: Vec<(&str, i32, u64)> = Vec::new();
         let mut long_codes_without_abbrev = 0usize;
-        loop {
-            let Some(min_code) = cursors
-                .iter_mut()
-                .filter_map(|c| c.peek().map(|(k, _)| k.clone()))
-                .min()
-            else {
-                break;
-            };
+        while let Some(min_code) = cursors
+            .iter_mut()
+            .filter_map(|c| c.peek().map(|(k, _)| k.clone()))
+            .min()
+        {
             merged.clear();
             for (ti, c) in cursors.iter_mut().enumerate() {
                 if c.peek().is_some_and(|(k, _)| *k == min_code) {

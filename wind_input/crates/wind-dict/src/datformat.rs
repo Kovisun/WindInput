@@ -3127,7 +3127,8 @@ mod tests {
     /// 产物逐字节相同。这是「两条路径共用一套构建」的对拍基础。
     #[test]
     fn stream_writer_matches_batch_writer_byte_for_byte() {
-        let data: Vec<(&str, Vec<(&str, i32, u32, u64)>)> = vec![
+        type Entries<'a> = Vec<(&'a str, i32, u32, u64)>;
+        let data: Vec<(&str, Entries)> = vec![
             (
                 "nihao",
                 vec![("你好", 100, 0, 0b101), ("拟好", 20, 1, 0b101)],

@@ -625,7 +625,7 @@ pub fn prune_slot(slot: &Path, current: &Path, keep: usize) {
             variants.push((mtime.max(used), p));
         }
     }
-    variants.sort_by(|a, b| b.0.cmp(&a.0)); // 新的在前；`current` 已占一个名额
+    variants.sort_by_key(|v| std::cmp::Reverse(v.0)); // 新的在前；`current` 已占一个名额
     for (_, p) in variants.into_iter().skip(keep.saturating_sub(1)) {
         let _ = std::fs::remove_file(&p);
         let _ = std::fs::remove_file(fp_sidecar(&p));

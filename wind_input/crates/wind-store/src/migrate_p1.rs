@@ -64,12 +64,15 @@ fn merge_legacy(legacy: Vec<SnapshotEntry>, existing: Vec<SnapshotEntry>) -> Vec
     map.into_values().collect()
 }
 
+/// 旧表一行 `(code, text, value)` 的解码器。
+type LegacyDecode<'a> = dyn Fn(&str, &str, &[u8]) -> Option<SnapshotEntry> + 'a;
+
 impl Store {
     /// 读旧表 `table` 全部行，按方案分组；`decode(code, text, value) -> Option<SnapshotEntry>`。
     fn legacy_rows(
         &self,
         table: redb::TableDefinition<&str, &[u8]>,
-        decode: &dyn Fn(&str, &str, &[u8]) -> Option<SnapshotEntry>,
+        decode: &LegacyDecode,
     ) -> anyhow::Result<Rows> {
         self.with_db(|db| {
             let txn = db.begin_read()?;
@@ -145,7 +148,7 @@ impl Store {
     /// 旧表里某方案的行数 `(临时词, 词频, 草稿)`，供 `examples/p1_migrate_check.rs` 与迁移结果比对。
     #[doc(hidden)]
     pub fn legacy_counts(&self, schema: &str) -> anyhow::Result<(usize, usize, usize)> {
-        let n = |table, dec: &dyn Fn(&str, &str, &[u8]) -> Option<SnapshotEntry>| {
+        let n = |table, dec: &LegacyDecode| {
             self.legacy_rows(table, dec)
                 .map(|r| r.get(schema).map_or(0, |v| v.len()))
         };
@@ -167,6 +170,7 @@ impl Store {
 /// 往旧表直接写行（模拟老版本写的库）。测试与跨 crate 测试用，生产代码不调。
 #[doc(hidden)]
 impl Store {
+    #[allow(clippy::too_many_arguments)] // 参数与旧表字段一一对应
     pub fn legacy_put_temp(
         &self,
         schema: &str,
