@@ -125,4 +125,4 @@ Windows 已在靶机 Dev 实例上验过升级、删 `state/`、手改往返；L
 
 **反馈**
 
-请附：日志目录（设置 → 关于 → 打开日志目录）、用户目录里的 `meta.toml`、`data\` 的文件清单（不必附文件内容）。
+请附：日志目录（安装版 `%LOCALAPPDATA%\WindInput\logs`，便携版 `localdata\logs`）、用户目录里的 `meta.toml`、`data\` 的文件清单（不必附文件内容）。
