@@ -15,7 +15,7 @@ pub const MIGRATED_P3_PHRASES: &str = "migrated-p3-phrases";
 /// 全部迁移完成时 [`Store::format_version_reached`] 的值。
 pub const FULLY_MIGRATED_VERSION: u32 = 5;
 
-/// 旧库链各阶段的完成标记（只在旧库链进行中作断点续做用；`format_version` 写到 6 后删除）。
+/// 旧库链各阶段的完成标记（只在旧库链进行中作断点续做用；`format_version` 写到 5 后删除）。
 pub fn all_migration_markers() -> [&'static str; 5] {
     ALL_MIGRATION_MARKERS
 }

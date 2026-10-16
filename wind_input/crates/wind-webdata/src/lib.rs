@@ -365,7 +365,8 @@ fn today_str() -> String {
 ///
 /// - `process`：`{bytes, kind}`，口径见 `wind_coordinator::process_memory`（Windows Private、
 ///   Linux / Android RssAnon；macOS 两者皆 `null`）。
-/// - `redb`：redb 不暴露页缓存的在用量，只给上限与「空闲回收」已发生的次数；无 store 时 `null`。
+/// - `redb`：redb 不暴露页缓存的在用量，只给上限与「空闲回收」已发生的次数；旧库没打开（迁移
+///   全部完成后运行期不再打开它）或无 store 时 `null`。
 /// - 字节数都是各结构按容量自报、不含分配器开销，只用来回答「是哪一档涨了」。
 fn memory_stats_json<H: WebDataHost + ?Sized>(h: &H) -> Value {
     let process = wind_coordinator::process_memory::private_memory();
@@ -402,7 +403,7 @@ fn memory_stats_json<H: WebDataHost + ?Sized>(h: &H) -> Value {
         "reverseLookup": {
             "chaiziBytes": chaizi, "pinyinBytes": pinyin, "commentBytes": comments,
         },
-        "redb": h.user_store().map(|s| json!({
+        "redb": h.user_store().filter(|s| !s.is_paused()).map(|s| json!({
             "cacheLimitBytes": wind_store::store::DEFAULT_CACHE_SIZE_BYTES,
             "pageCacheDrops": s.page_cache_drops(),
         })),
@@ -10767,7 +10768,9 @@ mod memory_stats_tests {
         for k in ["chaiziBytes", "pinyinBytes", "commentBytes"] {
             assert!(v["reverseLookup"][k].is_u64(), "reverseLookup.{k}：{v}");
         }
-        assert!(v["redb"]["cacheLimitBytes"].as_u64().unwrap() > 0);
-        assert!(v["redb"]["pageCacheDrops"].is_u64());
+        assert!(
+            v["redb"].is_null(),
+            "全新用户目录不打开旧库，不该报它的缓存上限：{v}"
+        );
     }
 }

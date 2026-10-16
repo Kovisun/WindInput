@@ -195,7 +195,7 @@ pub struct Store {
     /// 用户词文本根目录（P2 起用户词的真源）。
     text_dir: PathBuf,
     /// 旧库链（P1–P4a）已迁完：来自 `meta.toml`（`StateLoc::legacy_done`），或本进程里
-    /// `format_version` 刚写到 6、标记已删（`forget_legacy_markers`）。
+    /// `format_version` 刚写到 5、标记已删（`forget_legacy_markers`）。
     pub(crate) legacy_done: std::sync::atomic::AtomicBool,
     /// 各方案的 Shadow 规则表（P3 起真源是 `user/<schema>/shadow.dict.yaml`），首次访问时载入。
     /// 每日统计文件读改写的串行化（收集器 flush 与设置页查询 / 清理并发）。
