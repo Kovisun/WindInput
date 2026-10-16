@@ -107,18 +107,21 @@ Windows 已在靶机 Dev 实例上验过升级、删 `state/`、手改往返；L
 2026-10-16 补：预发布版本号全链路审计后修正——`release.sh` 拒收 `x.y.z-beta.N`、两个发版脚本在 beta
 之后 bump 结果不一致（现均「转正」为 x.y.z）、文档仓会把 beta 写进 `releases.json` / `latest.json`
 （下载直链 404，现同步脚本与定时兜底均按版本号后缀跳过，主仓 notify-docs 同步加闸）、安装器 PE 版本
-被拆成 0.127.0.1、TSF DLL 的 FileVersion 字符串、macOS Info.plist 版本字段非纯数字、正式版发布说明的
-上一 tag 会取到 beta。构建期注入（service / setting build.rs）、deb 版本（`~beta`）、应用内升级比较
-（semver）本就正确。
+被拆成 0.127.0.1、macOS 的 CFBundleVersion 非纯数字、正式版发布说明的上一 tag 会取到 beta。构建期注入
+（service / setting build.rs）、deb 版本（`~beta`）、应用内升级比较（semver）本就正确。
+
+版本号显示的统一规则：给人看的字段（各 exe / DLL / 安装包的 FileVersion、ProductVersion 字符串，macOS
+的 CFBundleShortVersionString）一律保留 `-beta.N`；给系统比较的数字字段（PE 数字版本、CFBundleVersion、
+pkg 版本）只取 x.y.z。macOS pkg 关闭 BundleIsVersionChecked，覆盖安装不受显示版本的后缀影响。
 
 待做：靶机验证会话结束落盘（需人工注销一次看日志）；Linux / macOS 按 §5.2 实机验证；文档仓的预发布
 闸（CI 那笔）须在发 beta 前推上去。
 
 发版操作注意：
-- 发 beta：`release.sh push 0.127.0-beta.1`（或菜单 5）；之后的 `wait` / `sign-draft` 子命令**带上版本号**——
-  不带时取远端版本号最大的 tag（菜单里已改为优先取本次 push 的那个）。
-- 签名段会在编译机重新打包：签名前确认编译机的 wind-installer 已含「PE 版本忽略预发布后缀」那笔。
-- macOS：beta 与 0.127.0 的 bundle 版本同为 0.127.0，正式版覆盖安装 beta 需真机确认一次。
+- 发 beta：`release.sh push 0.127.0-beta.1`（或菜单 5）；之后的 `wait` / `sign-draft` 不带版本号时（含菜单
+  6–9）取远端版本号最大的 tag。beta 在外期间给旧线发版，要用子命令并带上版本号。
+- 签名段会在编译机重新打包：签名前确认编译机的 wind-installer 已含版本资源那两笔修正。
+- macOS：正式版覆盖安装 beta 需真机确认一次。
 
 ## 7 beta 发布公告草稿（Release 正文人工填写区）
 
