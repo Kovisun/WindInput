@@ -663,9 +663,6 @@ fn web_data_dispatch<H: WebDataRpc + ?Sized>(
         "charset.clearRedundant" => h.web_charset_clear_redundant(params),
         "charset.delete" => h.web_charset_delete(params),
         "charset.create" => h.web_charset_create(params),
-        "charset.editFile" => h.web_charset_edit_file(params),
-        "charset.exportEdit" => h.web_charset_export_edit(params),
-        "charset.importFile" => h.web_charset_import_file(params),
         "commonChars.list" => h.web_common_chars_list(params),
         "commonChars.query" => h.web_common_chars_query(params),
         "commonChars.set" => h.web_common_chars_set(params),
@@ -3827,67 +3824,6 @@ pub trait WebDataRpc: WebDataHost {
         let key = str_param(params, "key")?;
         self.charset_delete(key)?;
         Ok(json!({ "ok": true }))
-    }
-
-    /// `charset.editFile {key?}` —— 「外部编辑」对话框的探测：编辑文件在哪、存不存在、
-    /// 何时改的。**不写文件**。`key` 缺省 = 新建类模板（报告将分配到的 key）。
-    ///
-    /// 这是「外部编辑」这套对话框的领域接口三件套之一（editFile / exportEdit / importFile），
-    /// 其它词库要接同一个对话框时照这组语义实现。
-    fn web_charset_edit_file(&self, params: &Value) -> anyhow::Result<Value> {
-        let key = params.get("key").and_then(|k| k.as_str());
-        let f = self.charset_edit_file(key)?;
-        Ok(json!({
-            "key": f.key,
-            "name": f.name,
-            "builtin": f.builtin,
-            "path": f.path.to_string_lossy(),
-            "exists": f.exists,
-            "modified": f.modified,
-        }))
-    }
-
-    /// `charset.exportEdit {key?}` —— 外部编辑：导出完整视图到临时文件，返回路径。
-    /// `key` 缺省 = 导出新建类模板。
-    ///
-    /// 打开编辑器是**设置页**的事（它在用户会话里，也知道平台）；core 只负责把文件
-    /// 写出来。文件首行写明「不会被自动读取」。
-    fn web_charset_export_edit(&self, params: &Value) -> anyhow::Result<Value> {
-        let path = match params.get("key").and_then(|k| k.as_str()) {
-            Some(key) => self.charset_export_edit(key)?,
-            None => self.charset_export_template()?,
-        };
-        Ok(json!({ "path": path.to_string_lossy() }))
-    }
-
-    /// `charset.importFile {path, apply?}` —— 从文件加载（回读外部编辑 / 导入手写 yaml）。
-    /// `apply: false` = 只试算：同样的解析与 diff、同样的摘要，但不落库。
-    fn web_charset_import_file(&self, params: &Value) -> anyhow::Result<Value> {
-        let path = str_param(params, "path")?;
-        let apply = params
-            .get("apply")
-            .and_then(|a| a.as_bool())
-            .unwrap_or(true);
-        let path = std::path::Path::new(path);
-        let out = if apply {
-            self.charset_import_file(path)?
-        } else {
-            self.charset_import_preview(path)?
-        };
-        let items: Vec<Value> = out
-            .iter()
-            .map(|c| {
-                json!({
-                    "key": c.key,
-                    "name": c.name,
-                    "builtin": c.builtin,
-                    "added": c.added,
-                    "removed": c.removed,
-                    "fields": c.fields,
-                })
-            })
-            .collect();
-        Ok(json!({ "classes": items }))
     }
 
     fn web_common_chars_bulk(&self, params: &Value) -> anyhow::Result<Value> {

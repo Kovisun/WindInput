@@ -112,30 +112,6 @@ pub trait WebDataHost {
     /// 删一个**自建**类；出厂类会被拒绝（它们只能停用或恢复默认）。
     fn charset_delete(&self, key: &str) -> anyhow::Result<()>;
 
-    /// 「外部编辑」对话框的探测：编辑文件的落点与现状，不写文件。`None` = 新建类模板。
-    fn charset_edit_file(
-        &self,
-        key: Option<&str>,
-    ) -> anyhow::Result<crate::handle_charset::CharsetEditFile>;
-
-    /// 「外部编辑」：把一个类的完整视图写到临时文件，返回路径给设置页去打开。
-    fn charset_export_edit(&self, key: &str) -> anyhow::Result<std::path::PathBuf>;
-
-    /// 「新建类」：写一份模板到临时文件，返回路径。
-    fn charset_export_template(&self) -> anyhow::Result<std::path::PathBuf>;
-
-    /// 「从文件加载」：出厂有的 key 当覆盖（diff 后存），没有的当自建类。立即热载。
-    fn charset_import_file(
-        &self,
-        path: &std::path::Path,
-    ) -> anyhow::Result<Vec<crate::handle_charset::CharsetImported>>;
-
-    /// 上者的试算：同样的解析与 diff，只报摘要、不落库。
-    fn charset_import_preview(
-        &self,
-        path: &std::path::Path,
-    ) -> anyhow::Result<Vec<crate::handle_charset::CharsetImported>>;
-
     /// 重新装配字符类 registry。备份还原写了库之后必须调，否则运行时还是旧的。
     fn reload_charsets(&self);
 
@@ -356,30 +332,6 @@ impl WebDataHost for Coordinator {
     }
     fn charset_delete(&self, key: &str) -> anyhow::Result<()> {
         Coordinator::charset_delete(self, key)
-    }
-    fn charset_edit_file(
-        &self,
-        key: Option<&str>,
-    ) -> anyhow::Result<crate::handle_charset::CharsetEditFile> {
-        Coordinator::charset_edit_file(self, key)
-    }
-    fn charset_export_edit(&self, key: &str) -> anyhow::Result<std::path::PathBuf> {
-        Coordinator::charset_export_edit(self, key)
-    }
-    fn charset_export_template(&self) -> anyhow::Result<std::path::PathBuf> {
-        Coordinator::charset_export_template(self)
-    }
-    fn charset_import_file(
-        &self,
-        path: &std::path::Path,
-    ) -> anyhow::Result<Vec<crate::handle_charset::CharsetImported>> {
-        Coordinator::charset_import_file(self, path)
-    }
-    fn charset_import_preview(
-        &self,
-        path: &std::path::Path,
-    ) -> anyhow::Result<Vec<crate::handle_charset::CharsetImported>> {
-        Coordinator::charset_import_preview(self, path)
     }
     fn reload_charsets(&self) {
         Coordinator::reload_charsets(self)
