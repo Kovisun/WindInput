@@ -5,6 +5,7 @@
 //! 操作按给出顺序依次作用到「文件行 + 本轮新增行」的内存模型上，最后统一输出：
 //! - `Upsert`：已有同键行 ⇒ 第一行的权重取 `max(旧, 新)`（无权重列则不动），拼音文件里该行码
 //!   无空格（边界未知）而操作带边界时把码改写成带空格的；没有 ⇒ 追加到末尾；
+//! - `Insert`：没有同键行才追加，权重列留空（用户分库：没给权重就按方案默认）；有 ⇒ 空操作；
 //! - `Delete`：删所有同键行（含本轮新增的）；
 //! - `SetWeight`：只改第一行；早于文件修改时间的视为被手改覆盖，跳过；没有该行 ⇒ 空操作。
 //!
@@ -21,6 +22,11 @@ pub enum PatchOp {
         text: String,
         boundary: u64,
         weight: i32,
+    },
+    Insert {
+        code: String,
+        text: String,
+        boundary: u64,
     },
     Delete {
         code: String,
@@ -75,7 +81,8 @@ struct Added {
     key: (String, String),
     code: String,
     boundary: u64,
-    weight: i32,
+    /// None：权重列留空（`Insert`）。
+    weight: Option<i32>,
     alive: bool,
 }
 
@@ -174,6 +181,7 @@ pub fn patch_with_banner(
     for op in ops {
         let (code, text) = match op {
             PatchOp::Upsert { code, text, .. }
+            | PatchOp::Insert { code, text, .. }
             | PatchOp::Delete { code, text }
             | PatchOp::SetWeight { code, text, .. } => (code, text),
         };
@@ -205,7 +213,7 @@ pub fn patch_with_banner(
                     }
                     lines[i] = Some(line);
                 } else if let Some(a) = first_added {
-                    added[a].weight = added[a].weight.max(*weight);
+                    added[a].weight = Some(added[a].weight.map_or(*weight, |w| w.max(*weight)));
                     if added[a].boundary == 0 {
                         added[a].boundary = *boundary;
                     }
@@ -215,7 +223,19 @@ pub fn patch_with_banner(
                         key,
                         code: flat,
                         boundary: *boundary,
-                        weight: *weight,
+                        weight: Some(*weight),
+                        alive: true,
+                    });
+                }
+            }
+            PatchOp::Insert { boundary, .. } => {
+                if first_line.is_none() && first_added.is_none() {
+                    added_at.insert(key.clone(), added.len());
+                    added.push(Added {
+                        key,
+                        code: flat,
+                        boundary: *boundary,
+                        weight: None,
                         alive: true,
                     });
                 }
@@ -242,7 +262,7 @@ pub fn patch_with_banner(
                         lines[i] = Some(with_weight(line, wc, *weight));
                     }
                 } else if let Some(a) = first_added {
-                    added[a].weight = *weight;
+                    added[a].weight = Some(*weight);
                 }
             }
         }
@@ -275,8 +295,13 @@ pub fn patch_with_banner(
             a.key.1.clone()
         };
         cols[layout.code_col] = wind_wdict::join_code_by_boundary(&a.code, a.boundary);
-        if let Some(wc) = layout.weight_col {
-            cols[wc] = a.weight.to_string();
+        if let (Some(wc), Some(w)) = (layout.weight_col, a.weight) {
+            cols[wc] = w.to_string();
+        }
+        // 权重留空且在末列：不留行尾的空列
+        let keep = layout.text_col.max(layout.code_col) + 1;
+        while cols.len() > keep && cols.last().is_some_and(String::is_empty) {
+            cols.pop();
         }
         rows.push(cols.join("\t"));
     }
@@ -311,6 +336,40 @@ mod tests {
     /// 直接以 `---` 开头的文件补丁后多出的说明行。
     fn banned(s: &str) -> String {
         format!("{}\n{s}", crate::text::banner::USER_DICT)
+    }
+
+    /// `Insert`：没有同键行才追加且权重列留空；已有就不动（权重不改）。
+    #[test]
+    fn insert_appends_blank_weight_and_keeps_existing() {
+        let head = "---\nname: x\ncolumns: [text, code, weight]\n...\n工\ta\t5\n";
+        let ins = |code: &str, text: &str| PatchOp::Insert {
+            code: code.into(),
+            text: text.into(),
+            boundary: 0,
+        };
+        let out = |ops: &[PatchOp]| {
+            String::from_utf8(
+                patch_with_banner(
+                    head.as_bytes(),
+                    Path::new("x.dict.yaml"),
+                    false,
+                    ops,
+                    0,
+                    "x",
+                    false,
+                    None,
+                )
+                .unwrap(),
+            )
+            .unwrap()
+        };
+        assert_eq!(out(&[ins("a", "工")]), head);
+        assert_eq!(out(&[ins("b", "式")]), format!("{head}式\tb\n"));
+        assert_eq!(
+            out(&[ins("b", "式"), up("b", "式", 0, 3)]),
+            format!("{head}式\tb\t3\n"),
+            "同轮再 Upsert 给了权重"
+        );
     }
 
     fn run(orig: &str, ops: &[PatchOp]) -> String {

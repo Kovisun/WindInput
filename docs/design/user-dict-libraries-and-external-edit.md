@@ -160,7 +160,7 @@ columns: [text, code, weight]
 
 ## 5.2 用户分库的界面增删与按方案删数据
 
-- `userDicts.addEntry {schemaId, name, text, code, weight?}` → `{ok}`：按 (词, 码) 去重，已有的改成给的权重（可调低），没给权重就不动；新词没给权重时权重列留空（按方案默认）。`userDicts.clear {schemaId, name}` → `{ok, removed}`：保留文件头与说明行。都走按行补丁 + 指纹复核，外部编辑中拒绝，改了失效用到该数据方案的方案。码 / 词不能为空、不能含 tab 或换行。
+- `userDicts.addEntry {schemaId, name, text, code, weight?}` → `{ok}`：按 (词, 码) 去重，已有的改成给的权重（可调低），没给权重就不动；新词没给权重时权重列留空（按方案默认）；权重不是整数、或分库没有权重列却给了权重 ⇒ 报错。`userDicts.clear {schemaId, name}` → `{ok, removed}`：保留文件头与说明行，以及仍在注释区的注释行（`# no comment` 之后 `#` 开头的是词条，一并删）。都走按行补丁 + 指纹复核，外部编辑中拒绝，改了失效用到该数据方案的方案。码 / 词不能为空、不能含 tab 或换行。
 - `userdata.purgeSchema {schemaId}` → `{ok, removed}`：删数据方案目录、`.backup/` 里它的那份与 `schema_overrides/<id>.toml`；先清各目标让待写回的操作摘掉，再删目录、失效引擎。与别的已装方案共用数据（拼音族）⇒ 拒绝「与「<名>」共用数据，不能单独删除」；有文件正在外部编辑 ⇒ 拒绝。统计不动。
 - `data.locate` 的返回多一个 `exists`（目标此刻在不在）。
 

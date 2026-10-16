@@ -586,6 +586,8 @@ fn web_data_dispatch<H: WebDataRpc + ?Sized>(
         "userDicts.list" => user_dicts::list(h, params),
         "userDicts.entries" => user_dicts::entries(h, params),
         "userDicts.removeEntry" => user_dicts::remove_entry(h, params),
+        "userDicts.addEntry" => user_dicts::add_entry(h, params),
+        "userDicts.clear" => user_dicts::clear(h, params),
         "userDicts.create" => user_dicts::create(h, params),
         "userDicts.rename" => user_dicts::rename(h, params),
         "userDicts.delete" => user_dicts::delete(h, params),

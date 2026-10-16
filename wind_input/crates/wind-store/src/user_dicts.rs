@@ -525,6 +525,130 @@ impl Store {
         fold::commit_text(&p, &out, Some(&fold::fingerprint(Some(&bytes))))?;
         Ok(true)
     }
+
+    /// 按行补丁加一条，按 (词, 码) 去重：已有 ⇒ 改成 `weight`（没给就不动）；没有 ⇒ 追加（没给权重
+    /// 时权重列留空，按方案默认）。`code` 可带音节空格；`boundary` 非 0 时优先。返回文件改没改。
+    pub fn add_user_dict_entry(
+        &self,
+        ds: &str,
+        name: &str,
+        code: &str,
+        text: &str,
+        boundary: u64,
+        weight: Option<i32>,
+    ) -> anyhow::Result<bool> {
+        use wind_userdata::text::PatchOp;
+        self.ensure_writable()?;
+        validate_entry(code, text)?;
+        let p = self.existing_lib(ds, name)?;
+        self.check_not_editing(&p)?;
+        let Some((bytes, mtime)) = fold::read_text(&p)? else {
+            anyhow::bail!("分库不存在：{name}");
+        };
+        let pinyin = ds == PINYIN_DS;
+        let (flat, spaced, norm_text) = wind_userdata::text::normalize_key(code, text, false);
+        let boundary = if boundary != 0 { boundary } else { spaced };
+        let dict = wind_userdata::text::parse(&bytes, &p, false)
+            .map_err(|e| anyhow::anyhow!("分库 {name} 无法解析：{e:?}"))?;
+        if weight.is_some() {
+            let body = std::str::from_utf8(&bytes)?;
+            let body = body.strip_prefix('\u{feff}').unwrap_or(body);
+            if wind_dict::rime_layout(body, &p).is_none_or(|l| l.weight_col.is_none()) {
+                anyhow::bail!("分库 {name} 没有权重列，不能设权重");
+            }
+        }
+        let existing = dict
+            .entries
+            .iter()
+            .find(|e| e.code == flat && e.text == norm_text);
+        let op = match (existing, weight) {
+            (Some(_), None) => return Ok(false),
+            (Some(e), Some(w)) if e.weight == w => return Ok(false),
+            (Some(_), Some(w)) => PatchOp::SetWeight {
+                code: flat,
+                text: norm_text,
+                weight: w,
+                // 界面的显式修改：不受「早于文件修改时间的视为被手改覆盖」限制
+                ts_secs: i64::MAX,
+            },
+            (None, Some(w)) => PatchOp::Upsert {
+                code: flat,
+                text: norm_text,
+                boundary,
+                weight: w,
+            },
+            (None, None) => PatchOp::Insert {
+                code: flat,
+                text: norm_text,
+                boundary,
+            },
+        };
+        let out = wind_userdata::text::patch_with_banner(
+            &bytes,
+            &p,
+            false,
+            &[op],
+            mtime,
+            name,
+            pinyin,
+            None,
+        )
+        .map_err(|e| anyhow::anyhow!("分库 {name} 无法解析：{e:?}"))?;
+        if out == bytes {
+            return Ok(false);
+        }
+        fold::commit_text(&p, &out, Some(&fold::fingerprint(Some(&bytes))))?;
+        Ok(true)
+    }
+
+    /// 清空分库：保留文件头（含说明行）及紧跟其后、仍在注释区的注释行（`# no comment` 之后 `#`
+    /// 开头的是词条），删掉全部词条。返回删掉的条数。
+    pub fn clear_user_dict(&self, ds: &str, name: &str) -> anyhow::Result<usize> {
+        self.ensure_writable()?;
+        let p = self.existing_lib(ds, name)?;
+        self.check_not_editing(&p)?;
+        let Some((bytes, _)) = fold::read_text(&p)? else {
+            anyhow::bail!("分库不存在：{name}");
+        };
+        let n = wind_userdata::text::parse(&bytes, &p, false)
+            .map_err(|e| anyhow::anyhow!("分库 {name} 无法解析：{e:?}"))?
+            .entries
+            .len();
+        let s = std::str::from_utf8(&bytes)?;
+        let (bom, s) = s
+            .strip_prefix('\u{feff}')
+            .map_or(("", s), |rest| ("\u{feff}", rest));
+        let Some((body_offset, cutoff)) = wind_dict::rime_body_layout(s) else {
+            anyhow::bail!("分库 {name} 无法解析：缺少文件头结束行 ...");
+        };
+        let mut out = format!("{bom}{}", &s[..body_offset]);
+        let mut off = body_offset;
+        for seg in s[body_offset..].split_inclusive('\n') {
+            let in_comment_zone = cutoff.is_none_or(|c| off <= c);
+            if !(seg.starts_with('#') && in_comment_zone) {
+                break;
+            }
+            out.push_str(seg);
+            off += seg.len();
+        }
+        if out.as_bytes() == bytes.as_slice() {
+            return Ok(0);
+        }
+        fold::commit_text(&p, out.as_bytes(), Some(&fold::fingerprint(Some(&bytes))))?;
+        Ok(n)
+    }
+}
+
+/// 界面加词的码 / 词：非空、不含 tab 与换行（一行一条、tab 分列）。
+fn validate_entry(code: &str, text: &str) -> anyhow::Result<()> {
+    let bad = |s: &str| s.contains(['\t', '\n', '\r']);
+    if code.trim().is_empty() || text.is_empty() {
+        anyhow::bail!("编码和词条都不能为空");
+    }
+    if bad(code) || bad(text) {
+        anyhow::bail!("编码和词条里不能有制表符或换行");
+    }
+    Ok(())
 }
 
 fn parse_lib(p: &Path) -> anyhow::Result<wind_userdata::text::TextDict> {
@@ -678,6 +802,176 @@ mod tests {
         let names: Vec<String> = scan(root, "wb").into_iter().map(|l| l.name).collect();
         assert_eq!(names, ["a", "b"]);
         assert!(scan(root, "none").is_empty());
+    }
+
+    fn lib_rows(s: &Store, ds: &str, name: &str) -> Vec<(String, String, i32)> {
+        let mut v: Vec<_> = s
+            .user_dict_entries(ds, name)
+            .unwrap()
+            .into_iter()
+            .map(|e| (e.text, e.code, e.weight))
+            .collect();
+        v.sort();
+        v
+    }
+
+    /// 加词按 (词, 码) 去重：已有的改成给的权重（可调低），没给权重就不动；新词没给权重时权重列留空。
+    #[test]
+    fn add_entry_upserts_by_text_and_code() {
+        let s = store("add");
+        s.import_user_dict("wb", "a", &[row("a", "工", 5)]).unwrap();
+        assert!(
+            s.add_user_dict_entry("wb", "a", "aa", "式", 0, Some(3))
+                .unwrap()
+        );
+        assert!(
+            s.add_user_dict_entry("wb", "a", "a", "工", 0, Some(9))
+                .unwrap()
+        );
+        assert!(
+            !s.add_user_dict_entry("wb", "a", "a", "工", 0, None)
+                .unwrap()
+        );
+        assert!(
+            !s.add_user_dict_entry("wb", "a", "a", "工", 0, Some(9))
+                .unwrap()
+        );
+        assert!(
+            s.add_user_dict_entry("wb", "a", "ab", "戈", 0, None)
+                .unwrap()
+        );
+        assert!(
+            s.add_user_dict_entry("wb", "a", "aa", "式", 0, Some(1))
+                .unwrap()
+        );
+        assert_eq!(
+            lib_rows(&s, "wb", "a"),
+            [
+                ("工".into(), "a".into(), 9),
+                ("式".into(), "aa".into(), 1),
+                ("戈".into(), "ab".into(), 0)
+            ]
+        );
+        let p = lib_path(s.user_text_dir(), "wb", "a");
+        assert!(std::fs::read_to_string(&p).unwrap().ends_with("戈\tab\n"));
+        for (code, text) in [
+            ("", "x"),
+            ("a", ""),
+            ("a", "x\ty"),
+            ("a\nb", "x"),
+            ("a", "x\r"),
+        ] {
+            assert!(
+                s.add_user_dict_entry("wb", "a", code, text, 0, Some(1))
+                    .is_err(),
+                "{code:?} {text:?}"
+            );
+        }
+        assert!(
+            s.add_user_dict_entry("wb", "无", "a", "x", 0, None)
+                .is_err(),
+            "分库不存在"
+        );
+    }
+
+    /// 拼音分库：带空格的码按音节写。
+    #[test]
+    fn add_entry_keeps_syllables_in_pinyin_lib() {
+        let s = store("add_py");
+        s.create_user_dict("pinyin", "c").unwrap();
+        s.add_user_dict_entry("pinyin", "c", "ni hao", "你好", 0, Some(2))
+            .unwrap();
+        let p = lib_path(s.user_text_dir(), "pinyin", "c");
+        assert!(
+            std::fs::read_to_string(&p)
+                .unwrap()
+                .contains("你好\tni hao\t2\n")
+        );
+    }
+
+    /// 清空：留文件头与说明行，删光词条；再清一次是 0。
+    #[test]
+    fn clear_keeps_header_and_banner() {
+        let s = store("clear");
+        s.import_user_dict(
+            "pinyin",
+            "c",
+            &[row("ni hao", "你好", 1), row("a", "啊", 1)],
+        )
+        .unwrap();
+        assert_eq!(s.clear_user_dict("pinyin", "c").unwrap(), 2);
+        let text = std::fs::read_to_string(lib_path(s.user_text_dir(), "pinyin", "c")).unwrap();
+        assert!(text.starts_with(banner::USER_DICT_LIB), "{text}");
+        assert!(text.contains("code_spacing: syllable"), "{text}");
+        assert!(lib_rows(&s, "pinyin", "c").is_empty());
+        assert_eq!(s.clear_user_dict("pinyin", "c").unwrap(), 0);
+        assert!(s.clear_user_dict("pinyin", "无").is_err());
+    }
+
+    /// 清空按解析器的注释区算：`# no comment` 之后 `#` 开头的是词条，一并删掉；返回数与删掉的一致。
+    #[test]
+    fn clear_treats_hash_lines_after_no_comment_as_entries() {
+        let s = store("clear_nc");
+        let p = lib_path(s.user_text_dir(), "wb", "c");
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(
+            &p,
+            "---\nname: c\ncolumns: [text, code, weight]\n...\n# 注释\n# no comment\n#井\tjing\t2\n你\tni\t1\n",
+        )
+        .unwrap();
+        assert_eq!(s.clear_user_dict("wb", "c").unwrap(), 2);
+        assert!(lib_rows(&s, "wb", "c").is_empty());
+        assert_eq!(
+            std::fs::read_to_string(&p).unwrap(),
+            "---\nname: c\ncolumns: [text, code, weight]\n...\n# 注释\n# no comment\n"
+        );
+    }
+
+    /// 没有权重列的分库：给了权重 ⇒ 报错、文件不动；不给照常加。
+    #[test]
+    fn add_entry_with_weight_needs_weight_column() {
+        let s = store("add_now");
+        let p = lib_path(s.user_text_dir(), "wb", "n");
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, "---\nname: n\ncolumns: [text, code]\n...\n工\ta\n").unwrap();
+        let before = std::fs::read(&p).unwrap();
+        let e = s
+            .add_user_dict_entry("wb", "n", "b", "了", 0, Some(5))
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("没有权重列"), "{e}");
+        assert!(
+            s.add_user_dict_entry("wb", "n", "a", "工", 0, Some(5))
+                .is_err()
+        );
+        assert_eq!(std::fs::read(&p).unwrap(), before);
+        assert!(
+            s.add_user_dict_entry("wb", "n", "b", "了", 0, None)
+                .unwrap()
+        );
+    }
+
+    /// 外部编辑中：加词、清空都挡住，文件不动。
+    #[test]
+    fn add_and_clear_rejected_while_editing() {
+        let s = store("add_edit");
+        s.import_user_dict("wb", "a", &[row("a", "工", 5)]).unwrap();
+        let sess = s.begin_edit("wb/dicts/a.dict.yaml").unwrap();
+        let before = std::fs::read(&sess.path).unwrap();
+        let e = s
+            .add_user_dict_entry("wb", "a", "b", "x", 0, None)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("正在外部编辑"), "{e}");
+        assert!(
+            s.clear_user_dict("wb", "a")
+                .unwrap_err()
+                .to_string()
+                .contains("正在外部编辑")
+        );
+        assert_eq!(std::fs::read(&sess.path).unwrap(), before);
+        s.end_edit("wb/dicts/a.dict.yaml").unwrap();
+        assert_eq!(s.clear_user_dict("wb", "a").unwrap(), 1);
     }
 
     /// 分库的上一版在 `.backup/` 里：改名跟着走，删除一并删掉；数据文件旁边没有 `.bak`。

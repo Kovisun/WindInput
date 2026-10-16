@@ -134,6 +134,43 @@ pub(super) fn remove_entry<H: WebDataRpc + ?Sized>(h: &H, params: &Value) -> any
     Ok(json!({ "ok": true, "removed": removed }))
 }
 
+/// `userDicts.addEntry {schemaId, name, text, code, weight?}` → `{ok}`。按 (词, 码) 去重：已有的
+/// 改成给的权重，没给权重就不动；新词没给权重时权重列留空（按方案默认）。
+pub(super) fn add_entry<H: WebDataRpc + ?Sized>(h: &H, params: &Value) -> anyhow::Result<Value> {
+    let (schema_id, ds, store) = writable(h, params)?;
+    let name = str_param(params, "name")?;
+    let text = store_text(str_param(params, "text")?);
+    let code = str_param(params, "code")?;
+    let weight = match params.get("weight") {
+        None | Some(Value::Null) => None,
+        Some(v) => Some(
+            v.as_i64()
+                .and_then(|w| i32::try_from(w).ok())
+                .ok_or_else(|| anyhow::anyhow!("权重须是整数：{v}"))?,
+        ),
+    };
+    // 拼音码同加词界面：ü 归一、补音节边界（码表原样）
+    let (code, boundary) = if code.contains(['\t', '\n', '\r']) {
+        (code.to_string(), 0)
+    } else {
+        h.normalize_add_code(schema_id, code, &text)
+    };
+    if store.add_user_dict_entry(&ds, name, &code, &text, boundary, weight)? {
+        changed(h, &ds);
+    }
+    Ok(json!({ "ok": true }))
+}
+
+/// `userDicts.clear {schemaId, name}` → `{ok, removed}`：删光词条，保留文件头。
+pub(super) fn clear<H: WebDataRpc + ?Sized>(h: &H, params: &Value) -> anyhow::Result<Value> {
+    let (_, ds, store) = writable(h, params)?;
+    let removed = store.clear_user_dict(&ds, str_param(params, "name")?)?;
+    if removed > 0 {
+        changed(h, &ds);
+    }
+    Ok(json!({ "ok": true, "removed": removed }))
+}
+
 /// `userDicts.create {schemaId, name}` → `{ok, file}`。
 pub(super) fn create<H: WebDataRpc + ?Sized>(h: &H, params: &Value) -> anyhow::Result<Value> {
     let (_, ds, store) = writable(h, params)?;
@@ -458,6 +495,70 @@ mod tests {
             .is_err(),
             "不存在"
         );
+    }
+
+    /// 界面加词 / 清空：改文件、失效重建；外部编辑中拒绝。
+    #[test]
+    fn add_entry_and_clear() {
+        let f = fx("add");
+        let ct = f.ct.clone();
+        f.rpc("userDicts.create", json!({"schemaId": ct, "name": "我的"}))
+            .unwrap();
+        let add = |p: Value| {
+            let mut p = p;
+            p["schemaId"] = json!(ct);
+            p["name"] = json!("我的");
+            f.rpc("userDicts.addEntry", p)
+        };
+        assert_eq!(
+            add(json!({"code": "a", "text": "戈", "weight": 100})).unwrap(),
+            json!({"ok": true})
+        );
+        assert_eq!(f.texts(&ct, "a")[..2], ["戈", "工"], "加词后失效重建");
+        add(json!({"code": "a", "text": "戈", "weight": 1})).unwrap();
+        add(json!({"code": "b", "text": "新"})).unwrap();
+        let e = f
+            .rpc(
+                "userDicts.entries",
+                json!({"schemaId": ct, "name": "我的", "offset": 0, "limit": 10, "sortBy": "code"}),
+            )
+            .unwrap();
+        assert_eq!(e["total"], 2);
+        assert_eq!(e["items"][0]["weight"], 1, "{e}");
+        assert!(add(json!({"code": "a\tb", "text": "x"})).is_err());
+        for w in [json!("5"), json!(1.5), json!(1u64 << 40)] {
+            assert!(
+                add(json!({"code": "z", "text": "x", "weight": w})).is_err(),
+                "{w}"
+            );
+        }
+        assert!(add(json!({"code": "", "text": "x"})).is_err());
+
+        f.rpc(
+            "data.beginEdit",
+            json!({"kind": "user_dict", "schemaId": ct, "name": "我的"}),
+        )
+        .unwrap();
+        let err = add(json!({"code": "c", "text": "丙"}))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("正在外部编辑"), "{err}");
+        assert!(
+            f.rpc("userDicts.clear", json!({"schemaId": ct, "name": "我的"}))
+                .is_err()
+        );
+        f.rpc(
+            "data.endEdit",
+            json!({"kind": "user_dict", "schemaId": ct, "name": "我的"}),
+        )
+        .unwrap();
+
+        let r = f
+            .rpc("userDicts.clear", json!({"schemaId": ct, "name": "我的"}))
+            .unwrap();
+        assert_eq!(r, json!({"ok": true, "removed": 2}));
+        assert_eq!(f.texts(&ct, "b"), Vec::<String>::new(), "清空后失效重建");
+        assert_eq!(f.texts(&ct, "a")[0], "工");
     }
 
     #[test]
