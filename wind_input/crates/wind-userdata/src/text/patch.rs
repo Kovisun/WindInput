@@ -34,10 +34,9 @@ pub enum PatchOp {
     },
 }
 
-fn header(name: &str, syllable_codes: bool) -> String {
+fn header(banner: &str, name: &str, syllable_codes: bool) -> String {
     let mut h = format!(
-        "{}\n---\nname: {name}\ncolumns: [text, code, weight]\nwind:\n  kind: words\n",
-        super::banner::USER_DICT
+        "{banner}\n---\nname: {name}\ncolumns: [text, code, weight]\nwind:\n  kind: words\n"
     );
     if syllable_codes {
         h.push_str("  code_spacing: syllable\n");
@@ -49,7 +48,17 @@ fn header(name: &str, syllable_codes: bool) -> String {
 
 /// 整文件渲染（迁移 / 清空 / 导入 / 新建）：说明行、LF、无 BOM、`columns: [text, code, weight]`。
 pub fn render(name: &str, syllable_codes: bool, rows: &[(String, String, u64, i32)]) -> String {
-    let mut s = header(name, syllable_codes);
+    render_with(super::banner::USER_DICT, name, syllable_codes, rows)
+}
+
+/// 同 [`render`]，说明行由调用方给（用户分库）。
+pub fn render_with(
+    banner: &str,
+    name: &str,
+    syllable_codes: bool,
+    rows: &[(String, String, u64, i32)],
+) -> String {
+    let mut s = header(banner, name, syllable_codes);
     for (code, text, boundary, weight) in rows {
         s.push_str(&wind_wdict::escape_text_field(text));
         s.push('\t');
@@ -105,12 +114,38 @@ pub fn patch(
     new_file_name: &str,
     syllable_codes: bool,
 ) -> Result<Vec<u8>, ParseError> {
+    patch_with_banner(
+        original,
+        path,
+        lowercase,
+        ops,
+        file_mtime_secs,
+        new_file_name,
+        syllable_codes,
+        Some(super::banner::USER_DICT),
+    )
+}
+
+/// 同 [`patch`]；`banner` 为 None 时不给直接以 `---` 开头的文件补说明行（用户分库：用户自己
+/// 放进来的文件不动）。
+#[allow(clippy::too_many_arguments)]
+pub fn patch_with_banner(
+    original: &[u8],
+    path: &Path,
+    lowercase: bool,
+    ops: &[PatchOp],
+    file_mtime_secs: i64,
+    new_file_name: &str,
+    syllable_codes: bool,
+    banner: Option<&str>,
+) -> Result<Vec<u8>, ParseError> {
     let fresh: std::borrow::Cow<[u8]>;
     let original: &[u8] = if original.is_empty() {
-        fresh = header(new_file_name, syllable_codes).into_bytes().into();
+        let b = banner.unwrap_or(super::banner::USER_DICT);
+        fresh = header(b, new_file_name, syllable_codes).into_bytes().into();
         &fresh
     } else {
-        fresh = super::banner::prepend_if_bare(original, Some(super::banner::USER_DICT));
+        fresh = super::banner::prepend_if_bare(original, banner);
         &fresh
     };
     let dict = parse(original, path, lowercase)?;
@@ -466,5 +501,38 @@ mod tests {
             t.elapsed()
         );
         assert_eq!(out.lines().filter(|l| l.contains('\t')).count(), 60_000);
+    }
+
+    /// 用户分库：整写用分库的说明行；删行补丁不给用户自己放进来的文件补说明行。
+    #[test]
+    fn lib_banner_on_render_and_untouched_on_patch() {
+        let banner = crate::text::banner::USER_DICT_LIB;
+        let out = render_with(
+            banner,
+            "\"成语\"",
+            false,
+            &[("a".into(), "工".into(), 0, 3)],
+        );
+        assert!(
+            out.starts_with(&format!("{banner}\n---\nname: \"成语\"\n")),
+            "{out}"
+        );
+        let orig = "---\n...\n工\ta\t3\n式\taa\t1\n";
+        let del = PatchOp::Delete {
+            code: "a".into(),
+            text: "工".into(),
+        };
+        let got = patch_with_banner(
+            orig.as_bytes(),
+            Path::new("x.dict.yaml"),
+            false,
+            &[del],
+            0,
+            "x",
+            false,
+            None,
+        )
+        .unwrap();
+        assert_eq!(String::from_utf8(got).unwrap(), "---\n...\n式\taa\t1\n");
     }
 }

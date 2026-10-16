@@ -220,6 +220,11 @@ pub struct Store {
     pub(crate) shadows: Mutex<
         std::collections::HashMap<String, std::sync::Arc<wind_userdata::text::table::TextTable>>,
     >,
+    /// 外部编辑会话：文件绝对路径 → 会话。只在内存，重启即无。
+    pub(crate) edit_sessions:
+        Mutex<std::collections::BTreeMap<PathBuf, crate::external_edit::EditEntry>>,
+    /// 租约到期自动结束后，交回变了的项（协调器据此重建内存镜像）。
+    pub(crate) edit_expired_hook: Mutex<Option<crate::external_edit::ChangedHook>>,
     db: Mutex<Option<Database>>,
     /// 本库的页缓存上限；`resume` 重开时要用同一个值，故随实例存着。
     cache_bytes: usize,
@@ -353,6 +358,8 @@ impl Store {
             common_good: Default::default(),
             charsets_fp: Mutex::new(None),
             phrase_table: std::sync::OnceLock::new(),
+            edit_sessions: Mutex::new(Default::default()),
+            edit_expired_hook: Mutex::new(None),
             db: Mutex::new(db),
             cache_bytes,
             touched: std::sync::atomic::AtomicBool::new(false),
@@ -539,6 +546,7 @@ impl Store {
     }
 
     /// 小文件去抖落盘线程（生产由协调器起；测试 / 工具靠 `Drop` 落盘）。只持 `Weak`。
+    /// 顺带结束超过租约的外部编辑会话。
     pub fn spawn_small_file_flusher(self: &std::sync::Arc<Self>, every: std::time::Duration) {
         let weak = std::sync::Arc::downgrade(self);
         let _ = std::thread::Builder::new()
@@ -550,6 +558,7 @@ impl Store {
                     if let Err(e) = me.flush_small_files() {
                         warn!("小文件落盘失败：{e:#}");
                     }
+                    me.expire_edit_sessions(crate::external_edit::EDIT_LEASE);
                 }
             });
     }

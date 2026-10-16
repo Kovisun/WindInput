@@ -13,6 +13,8 @@
 //! [`WebDataHost`] 窄面（定义在 wind-coordinator::web_host）触宿主，
 //! 把 wind-transfer/fontdb 等重依赖挡在 Android 闭包之外。
 
+mod user_dicts;
+
 use serde_json::{Value, json};
 use wind_coordinator::handle_common_chars::CommonCharEdit;
 use wind_coordinator::handle_quick_format::QuickFormatEdit;
@@ -573,6 +575,22 @@ fn web_data_dispatch<H: WebDataRpc + ?Sized>(
         "dict.reload" => h.web_dict_reload(params),
         // 显式折回全部待写回的数据（备份 / 导出 / 调试前）。
         "dict.flush" => h.web_dict_flush(),
+        // 外部编辑会话（设计 user-dict-libraries-and-external-edit §4.2）：begin 暂停该文件的
+        // 写回 / 挡住界面修改并给出绝对路径，end 按文件载入并恢复；超过租约 core 自动 end。
+        "data.beginEdit" => h.web_data_begin_edit(params),
+        "data.endEdit" => h.web_data_end_edit(params),
+        "data.editSessions" => h.web_data_edit_sessions(),
+        // 「打开数据目录」：数据目录或其下方案目录 / 数据文件的绝对路径。
+        "data.locate" => h.web_data_locate(params),
+        // 用户分库（设计 user-dict-libraries-and-external-edit §3）：`<数据方案>/dicts/*.dict.yaml`。
+        "userDicts.list" => user_dicts::list(h, params),
+        "userDicts.entries" => user_dicts::entries(h, params),
+        "userDicts.removeEntry" => user_dicts::remove_entry(h, params),
+        "userDicts.create" => user_dicts::create(h, params),
+        "userDicts.rename" => user_dicts::rename(h, params),
+        "userDicts.delete" => user_dicts::delete(h, params),
+        "userDicts.importAs" => user_dicts::import_as(h, params),
+        "userDicts.setEnabled" => user_dicts::set_enabled(h, params),
 
         // ── temp.*（临时词，redb）─────────────────────────────
         "temp.list" => h.web_temp_list(params),
@@ -703,32 +721,35 @@ fn web_data_dispatch<H: WebDataRpc + ?Sized>(
 
 /// 数据文件问题 → 设置页用的 JSON（路径相对数据目录、`/` 分隔）。
 fn storage_issues_json(store: &wind_store::Store) -> Vec<Value> {
-    use wind_store::issues::IssueKind;
     let root = store.user_text_dir();
     store
         .data_issues()
-        .into_iter()
-        .map(|i| {
-            let rel = i.path.strip_prefix(root).unwrap_or(&i.path);
-            let path: Vec<String> = rel
-                .components()
-                .map(|c| c.as_os_str().to_string_lossy().into_owned())
-                .collect();
-            let mut v = json!({ "path": path.join("/") });
-            match i.kind {
-                IssueKind::BadLines(n) => {
-                    v["kind"] = json!("bad_lines");
-                    v["lines"] = json!(n);
-                }
-                IssueKind::Isolated => v["kind"] = json!("isolated"),
-                IssueKind::Rebuilt { kept_as } => {
-                    v["kind"] = json!("rebuilt");
-                    v["kept_as"] = json!(kept_as);
-                }
-            }
-            v
-        })
+        .iter()
+        .map(|i| issue_json(root, i))
         .collect()
+}
+
+/// 一条数据文件问题：路径相对数据目录（`storageStatus` 与 `data.endEdit` 共用）。
+fn issue_json(root: &std::path::Path, i: &wind_store::issues::FileIssue) -> Value {
+    use wind_store::issues::IssueKind;
+    let rel = i.path.strip_prefix(root).unwrap_or(&i.path);
+    let path: Vec<String> = rel
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect();
+    let mut v = json!({ "path": path.join("/") });
+    match &i.kind {
+        IssueKind::BadLines(n) => {
+            v["kind"] = json!("bad_lines");
+            v["lines"] = json!(n);
+        }
+        IssueKind::Isolated => v["kind"] = json!("isolated"),
+        IssueKind::Rebuilt { kept_as } => {
+            v["kind"] = json!("rebuilt");
+            v["kept_as"] = json!(kept_as);
+        }
+    }
+    v
 }
 
 pub trait WebDataRpc: WebDataHost {
@@ -1213,20 +1234,125 @@ pub trait WebDataRpc: WebDataHost {
                     .collect();
                 store.reload_user_text_paths(&paths)?
             }
-            None => store.sync_user_texts(),
+            None => {
+                let mut r = store.sync_user_texts();
+                // 用户分库：比对已建引擎记下的指纹，变了才失效
+                r.extend(
+                    self.engine_mgr()
+                        .user_dicts_changed()
+                        .into_iter()
+                        .map(|ds| format!("{}{ds}", wind_store::user_words::USER_DICTS_CHANGED)),
+                );
+                r
+            }
         };
         // 变了的项重建对应的内存镜像（短语层、快捷格式、常用字、字符集）
         self.apply_user_text_changes(&reloaded);
         Ok(json!({ "reloaded": reloaded }))
     }
 
-    /// `dict.flush` → `{ok: true}`。
+    /// `dict.flush` → `{ok: true, held: [file]}`；`held`：外部编辑中、这次没写回的用户词文件。
     fn web_dict_flush(&self) -> anyhow::Result<Value> {
         let store = self
             .user_store()
             .ok_or_else(|| anyhow::anyhow!("无持久化存储"))?;
         store.flush_user_data()?;
-        Ok(json!({ "ok": true }))
+        Ok(json!({ "ok": true, "held": store.held_edit_files() }))
+    }
+
+    /// 外部编辑的目标文件：`{path}`，或 `{schemaId, kind: words|shadow}`（按数据方案换算，拼音族
+    /// 折叠到 "pinyin"），或 `{kind: phrases|quick_format|common_chars}`。
+    fn edit_target_param(
+        &self,
+        store: &wind_store::Store,
+        params: &Value,
+    ) -> anyhow::Result<String> {
+        if let Some(p) = params.get("path").and_then(Value::as_str) {
+            return Ok(p.to_string());
+        }
+        let schema = || -> anyhow::Result<String> {
+            Ok(self
+                .engine_mgr()
+                .data_schema_id(str_param(params, "schemaId")?))
+        };
+        let path = match str_param(params, "kind")? {
+            "words" => store.user_text_path(&schema()?),
+            "shadow" => store.shadow_path(&schema()?),
+            "phrases" => store.phrases_path(),
+            "quick_format" => store.quick_format_path(),
+            "common_chars" => store.common_chars_path(),
+            "user_dict" => wind_store::user_dicts::lib_path(
+                store.user_text_dir(),
+                &schema()?,
+                str_param(params, "name")?,
+            ),
+            "user_dicts" => wind_store::user_dicts::meta_path(store.user_text_dir(), &schema()?),
+            other => anyhow::bail!("不支持编辑的类别：{other}"),
+        };
+        Ok(path.to_string_lossy().into_owned())
+    }
+
+    /// `data.beginEdit {path}`（或类别参数，见 [`Self::edit_target_param`]）→
+    /// `{path: 绝对路径, file: 相对数据目录, kind}`。只读模式拒绝。
+    fn web_data_begin_edit(&self, params: &Value) -> anyhow::Result<Value> {
+        if let Some(r) = self.storage_readonly_reason() {
+            anyhow::bail!("{r}");
+        }
+        let store = self
+            .user_store()
+            .ok_or_else(|| anyhow::anyhow!("无持久化存储"))?;
+        let s = store.begin_edit(&self.edit_target_param(store, params)?)?;
+        Ok(json!({
+            "path": s.path.to_string_lossy(),
+            "file": s.file,
+            "kind": s.kind.as_str(),
+        }))
+    }
+
+    /// `data.endEdit {path}`（或类别参数）→ `{changed, issues}`；变了的项重建内存镜像（同 `dict.reload`）。
+    fn web_data_end_edit(&self, params: &Value) -> anyhow::Result<Value> {
+        let store = self
+            .user_store()
+            .ok_or_else(|| anyhow::anyhow!("无持久化存储"))?;
+        let r = store.end_edit(&self.edit_target_param(store, params)?)?;
+        self.apply_user_text_changes(&r.reloaded);
+        let root = store.user_text_dir();
+        let issues: Vec<Value> = r.issues.iter().map(|i| issue_json(root, i)).collect();
+        Ok(json!({ "changed": r.changed, "issues": issues }))
+    }
+
+    /// `data.editSessions` → `[{file, since_secs}]`（设置端重开窗口时恢复编辑条）。
+    fn web_data_edit_sessions(&self) -> anyhow::Result<Value> {
+        let Some(store) = self.user_store() else {
+            return Ok(json!([]));
+        };
+        Ok(Value::Array(
+            store
+                .edit_sessions()
+                .into_iter()
+                .map(|(file, d)| json!({ "file": file, "since_secs": d.as_secs() }))
+                .collect(),
+        ))
+    }
+
+    /// `data.locate {path?}` → `{path}`；`{schemaId}` 定位该方案的数据目录（拼音族折叠）。
+    fn web_data_locate(&self, params: &Value) -> anyhow::Result<Value> {
+        let store = self
+            .user_store()
+            .ok_or_else(|| anyhow::anyhow!("无持久化存储"))?;
+        let schema_dir = match (
+            params.get("path"),
+            params.get("schemaId").and_then(Value::as_str),
+        ) {
+            (None, Some(s)) => Some(self.engine_mgr().data_schema_id(s)),
+            _ => None,
+        };
+        let p = store.locate_data_path(
+            schema_dir
+                .as_deref()
+                .or_else(|| params.get("path").and_then(Value::as_str)),
+        )?;
+        Ok(json!({ "path": p.to_string_lossy() }))
     }
 
     fn web_dict_clear(&self, params: &Value) -> anyhow::Result<Value> {
@@ -1877,7 +2003,9 @@ pub trait WebDataRpc: WebDataHost {
         toml::Value::Array(
             dicts
                 .iter()
-                .filter(|d| !d.id.is_empty())
+                .filter(|d| {
+                    !d.id.is_empty() && !d.id.starts_with(wind_store::user_dicts::ID_PREFIX)
+                })
                 .filter_map(|d| {
                     let mut t = toml::value::Table::new();
                     t.insert("id".to_string(), toml::Value::String(d.id.clone()));
@@ -1908,6 +2036,10 @@ pub trait WebDataRpc: WebDataHost {
         }
         if !found {
             anyhow::bail!("方案 {} 无附加词库 {}", id, dict_id);
+        }
+        // 用户分库的开关在 dicts.toml，不进 override
+        if dict_id.starts_with(wind_store::user_dicts::ID_PREFIX) {
+            return user_dicts::set_dict_enabled(self, id, dict_id, enabled);
         }
         let dicts_val = Self::sparse_dict_overrides(&merged.dictionaries);
         let mut ov = self
@@ -2331,6 +2463,15 @@ pub trait WebDataRpc: WebDataHost {
         }
         if touched("userdata/quick_format.yaml") {
             changed.push("quick_format".to_string());
+        }
+        // 用户分库（`data/<数据方案>/…`）写回了：失效用到该数据方案的方案
+        for p in &r.restored {
+            if let Some((ds, _)) = p.strip_prefix("data/").and_then(|r| r.split_once('/')) {
+                let k = format!("{}{ds}", wind_store::user_words::USER_DICTS_CHANGED);
+                if !changed.contains(&k) {
+                    changed.push(k);
+                }
+            }
         }
         self.apply_user_text_changes(&changed);
         if let Some(c) = collector {
@@ -5438,11 +5579,205 @@ outside: rare
         let r = c.web_data_rpc("dict.reload", &json!({})).unwrap();
         assert!(r.get("reloaded").is_some_and(|v| v.is_array()), "{r}");
         let r = c.web_data_rpc("dict.flush", &json!({})).unwrap();
-        assert_eq!(r, json!({"ok": true}));
+        assert_eq!(r, json!({"ok": true, "held": []}));
         assert!(
             c.web_data_rpc("dict.reload", &json!({"paths": ["/etc/passwd"]}))
                 .is_err()
         );
+    }
+
+    /// 外部编辑（设计 user-dict-libraries-and-external-edit §4.2）：begin 返回路径与类别，编辑期间
+    /// 界面改同一张表被拒，end 载入手改并重建镜像，之后照常可改；越界与程序维护的文件拒绝。
+    #[test]
+    fn data_edit_session_rpcs() {
+        let c = coord("data_edit");
+        let root = c.user_store().unwrap().user_text_dir().to_path_buf();
+        let r = c
+            .web_data_rpc("data.beginEdit", &json!({"path": "phrases.dict.yaml"}))
+            .unwrap();
+        let abs = root.join("phrases.dict.yaml");
+        assert_eq!(r["path"], abs.to_string_lossy().as_ref(), "{r}");
+        assert_eq!(r["file"], "phrases.dict.yaml");
+        assert_eq!(r["kind"], "phrases");
+        let s = c.web_data_rpc("data.editSessions", &json!({})).unwrap();
+        assert_eq!(s[0]["file"], "phrases.dict.yaml", "{s}");
+        assert!(s[0]["since_secs"].is_u64(), "{s}");
+        let e = c
+            .web_data_rpc("phrase.add", &json!({"code": "dz", "text": "地址"}))
+            .unwrap_err();
+        assert!(e.to_string().contains("正在外部编辑"), "{e}");
+        std::fs::write(
+            &abs,
+            std::fs::read_to_string(&abs).unwrap() + "yx\tme@x.com\t1\n",
+        )
+        .unwrap();
+        let r = c
+            .web_data_rpc("data.endEdit", &json!({"path": abs.to_string_lossy()}))
+            .unwrap();
+        assert_eq!(r, json!({"changed": true, "issues": []}));
+        assert!(c.debug_phrase_texts("yx").contains(&"me@x.com".to_string()));
+        c.web_data_rpc("phrase.add", &json!({"code": "dz", "text": "地址"}))
+            .unwrap();
+        assert_eq!(
+            c.web_data_rpc("data.editSessions", &json!({})).unwrap(),
+            json!([])
+        );
+        assert!(
+            c.web_data_rpc("data.beginEdit", &json!({"path": "/etc/passwd"}))
+                .is_err()
+        );
+        assert!(
+            c.web_data_rpc("data.beginEdit", &json!({"path": "../user.dict.yaml"}))
+                .is_err()
+        );
+        let e = c
+            .web_data_rpc("data.beginEdit", &json!({"path": "pinyin/temp.dict.yaml"}))
+            .unwrap_err();
+        assert!(e.to_string().contains("自动维护"), "{e}");
+    }
+
+    /// 用户词会话：dict.flush 跳过暂停写回的文件并在返回里列出；endEdit 带回坏行。
+    #[test]
+    fn data_edit_words_holds_flush_and_reports_issues() {
+        let c = coord("data_edit_words");
+        let r = c
+            .web_data_rpc("data.beginEdit", &json!({"path": "pinyin/user.dict.yaml"}))
+            .unwrap();
+        assert_eq!(r["kind"], "words");
+        let r = c.web_data_rpc("dict.flush", &json!({})).unwrap();
+        assert_eq!(r, json!({"ok": true, "held": ["pinyin/user.dict.yaml"]}));
+        let f = std::path::PathBuf::from(
+            c.web_data_rpc("data.locate", &json!({"path": "pinyin/user.dict.yaml"}))
+                .unwrap()["path"]
+                .as_str()
+                .unwrap(),
+        );
+        std::fs::write(&f, std::fs::read_to_string(&f).unwrap() + "只有一列\n").unwrap();
+        let r = c
+            .web_data_rpc("data.endEdit", &json!({"path": "pinyin/user.dict.yaml"}))
+            .unwrap();
+        assert_eq!(r["issues"][0]["path"], "pinyin/user.dict.yaml", "{r}");
+        assert_eq!(r["issues"][0]["kind"], "bad_lines", "{r}");
+        assert_eq!(r["issues"][0]["lines"], 1, "{r}");
+        let r = c.web_data_rpc("dict.flush", &json!({})).unwrap();
+        assert_eq!(r, json!({"ok": true, "held": []}));
+        wind_store::issues::clear(&f);
+    }
+
+    /// 租约到期按 end 处理：手改的短语载入，输入期短语层随之重建（协调器装的回调）。
+    #[test]
+    fn expired_edit_session_rebuilds_phrase_layer() {
+        let c = coord("data_edit_lease");
+        let store = c.user_store().cloned().unwrap();
+        c.web_data_rpc("data.beginEdit", &json!({"path": "phrases.dict.yaml"}))
+            .unwrap();
+        let f = store.phrases_path();
+        std::fs::write(
+            &f,
+            std::fs::read_to_string(&f).unwrap() + "yx\tme@x.com\t1\n",
+        )
+        .unwrap();
+        assert!(
+            !c.debug_phrase_texts("yx").contains(&"me@x.com".to_string()),
+            "前置：镜像未变"
+        );
+        assert_eq!(store.expire_edit_sessions(std::time::Duration::ZERO), 1);
+        assert!(c.debug_phrase_texts("yx").contains(&"me@x.com".to_string()));
+        assert_eq!(
+            c.web_data_rpc("data.editSessions", &json!({})).unwrap(),
+            json!([])
+        );
+    }
+
+    /// 编辑目标按类别给：用户词 / 候选调整带方案（拼音族折叠到 pinyin），小表只给类别；
+    /// begin 与 end 两种参数形式指向同一会话；locate 认方案。
+    #[test]
+    fn data_edit_accepts_kind_and_schema() {
+        let tag = "data_edit_kind";
+        let path =
+            std::env::temp_dir().join(format!("wind_webdata_{tag}_{}.redb", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let store = Arc::new(Store::open(&path).unwrap());
+        let data = charsets_data_dir(tag);
+        std::fs::create_dir_all(data.join("schemas")).unwrap();
+        std::fs::write(
+            data.join("schemas/double_pinyin.schema.toml"),
+            "[engine]\ntype = \"pinyin\"\n",
+        )
+        .unwrap();
+        let c = Coordinator::new_headless_with_store(Config::default(), Some(&data), store);
+        let begin = |p: Value| c.web_data_rpc("data.beginEdit", &p);
+        let r = begin(json!({"schemaId": "double_pinyin", "kind": "words"})).unwrap();
+        assert_eq!(
+            (&r["file"], &r["kind"]),
+            (&json!("pinyin/user.dict.yaml"), &json!("words"))
+        );
+        let r = begin(json!({"schemaId": "wubi86", "kind": "shadow"})).unwrap();
+        assert_eq!(
+            (&r["file"], &r["kind"]),
+            (&json!("wubi86/shadow.dict.yaml"), &json!("shadow"))
+        );
+        for (kind, file) in [
+            ("phrases", "phrases.dict.yaml"),
+            ("quick_format", "quick_format.toml"),
+            ("common_chars", "common_chars.yaml"),
+        ] {
+            let r = begin(json!({"kind": kind})).unwrap();
+            assert_eq!(
+                (&r["file"], &r["kind"]),
+                (&json!(file), &json!(kind)),
+                "{r}"
+            );
+        }
+        assert!(begin(json!({"kind": "words"})).is_err(), "用户词要带方案");
+        assert!(begin(json!({"kind": "temp", "schemaId": "wubi86"})).is_err());
+        assert!(begin(json!({"schemaId": "../x", "kind": "words"})).is_err());
+        assert_eq!(
+            c.web_data_rpc("data.editSessions", &json!({}))
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .len(),
+            5
+        );
+        let end = |p: Value| c.web_data_rpc("data.endEdit", &p).unwrap();
+        end(json!({"schemaId": "double_pinyin", "kind": "words"}));
+        end(json!({"schemaId": "wubi86", "kind": "shadow"}));
+        for kind in ["phrases", "quick_format", "common_chars"] {
+            end(json!({"kind": kind}));
+        }
+        assert_eq!(
+            c.web_data_rpc("data.editSessions", &json!({})).unwrap(),
+            json!([])
+        );
+        let root = c.user_store().unwrap().user_text_dir().to_path_buf();
+        let at = |p: Value| c.web_data_rpc("data.locate", &p).unwrap()["path"].clone();
+        assert_eq!(
+            at(json!({"schemaId": "double_pinyin"})),
+            root.join("pinyin").to_string_lossy().as_ref()
+        );
+        assert_eq!(
+            at(json!({"schemaId": "wubi86"})),
+            root.join("wubi86").to_string_lossy().as_ref()
+        );
+    }
+
+    /// data.locate：数据目录、方案目录、数据文件；越界拒绝。
+    #[test]
+    fn data_locate_returns_paths_inside_data_dir() {
+        let c = coord("data_locate");
+        let root = c.user_store().unwrap().user_text_dir().to_path_buf();
+        let at = |p: Value| c.web_data_rpc("data.locate", &p);
+        assert_eq!(
+            at(json!({})).unwrap()["path"],
+            root.to_string_lossy().as_ref()
+        );
+        assert_eq!(
+            at(json!({"path": "wubi86"})).unwrap()["path"],
+            root.join("wubi86").to_string_lossy().as_ref()
+        );
+        assert!(at(json!({"path": "/etc"})).is_err());
+        assert!(at(json!({"path": "../x"})).is_err());
     }
 
     /// ★ S3 复审 M3：这些方法也扫整表 / 是批量写，名单里不能缺。

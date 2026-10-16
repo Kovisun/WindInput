@@ -142,6 +142,8 @@ pub struct UserData {
     last_write: Mutex<BTreeMap<TargetKey, std::time::Instant>>,
     /// 文本目标折回失败的退避：(连续失败次数, 下次可重试时刻)。成功即清。
     text_retry: Mutex<BTreeMap<TargetKey, (u32, std::time::Instant)>>,
+    /// 外部编辑会话中暂停写回的文本目标：空闲折回与压实都跳过，查询与日志照常。
+    held: Mutex<BTreeSet<TargetKey>>,
     /// 文本目标的空闲时长（默认 `TEXT_IDLE`；测试可改）。
     text_idle: Mutex<std::time::Duration>,
     /// 待处理上限（默认 `TEXT_MAX_PENDING`；测试可改）。
@@ -521,6 +523,7 @@ impl UserData {
             text_bindings: Mutex::new(BTreeMap::new()),
             last_write: Mutex::new(BTreeMap::new()),
             text_retry: Mutex::new(BTreeMap::new()),
+            held: Mutex::new(BTreeSet::new()),
             text_idle: Mutex::new(TEXT_IDLE),
             text_max_pending: Mutex::new(TEXT_MAX_PENDING),
             first_pending: Mutex::new(BTreeMap::new()),
@@ -1353,6 +1356,9 @@ impl UserData {
         let b = self
             .text_binding(target, schema)
             .ok_or_else(|| anyhow::anyhow!("目标未绑定文本"))?;
+        if self.is_held(target, schema) {
+            bail!("正在外部编辑 {}，完成后再改", b.path.display());
+        }
         let _f = self.fold_lock.lock().unwrap_or_else(|e| e.into_inner());
         // 先把待处理操作折回，迁移 / 导入的整写才不会盖掉它们。折回失败（文本隔离 / 编辑器竞争）
         // 不拦整体替换：`rows` 就是新全集（清空、还原是用户显式的整体动作），下面按水位把这些
@@ -1393,6 +1399,7 @@ impl UserData {
         let lw = self.last_write.lock().unwrap_or_else(|e| e.into_inner());
         let fp = self.first_pending.lock().unwrap_or_else(|e| e.into_inner());
         let retry = self.text_retry.lock().unwrap_or_else(|e| e.into_inner());
+        let held = self.held.lock().unwrap_or_else(|e| e.into_inner());
         let now = std::time::Instant::now();
         let aged = |m: &BTreeMap<TargetKey, std::time::Instant>, k: &TargetKey, d| {
             m.get(k)
@@ -1404,6 +1411,7 @@ impl UserData {
                 v.delta.pending(k.0, &k.1) > 0
                     && (aged(&lw, k, idle) || aged(&fp, k, max_pending))
                     && retry.get(k).is_none_or(|(_, at)| now >= *at)
+                    && !held.contains(k)
             })
             .collect()
     }
@@ -1415,6 +1423,43 @@ impl UserData {
             .unwrap_or_else(|e| e.into_inner())
             .get(key)
             .is_some_and(|(_, at)| std::time::Instant::now() < *at)
+    }
+
+    /// 暂停该文本目标的写回（外部编辑会话）。
+    pub fn hold_text(&self, target: Target, schema: &str) {
+        self.held
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert((target, schema.to_string()));
+    }
+
+    /// 恢复写回，并立即尝试折回一次（失败按退避处理）。
+    pub fn release_text(&self, target: Target, schema: &str) {
+        let was = self
+            .held
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&(target, schema.to_string()));
+        if was && self.text_binding(target, schema).is_some() && self.pending(target, schema) > 0 {
+            self.fold_text_logged(target, schema);
+        }
+    }
+
+    pub fn is_held(&self, target: Target, schema: &str) -> bool {
+        self.held
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(&(target, schema.to_string()))
+    }
+
+    /// 暂停写回中的文本目标。
+    pub fn held_texts(&self) -> Vec<(Target, String)> {
+        self.held
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .cloned()
+            .collect()
     }
 
     /// 折回空闲够久的文本目标；返回折回成功的目标数。单个目标失败（隔离 / 读不了 / 编辑器
@@ -1553,8 +1598,8 @@ impl UserData {
         // 里的操作不受影响）；未绑定的等绑定后再折回。
         for (t, s) in self.view().delta.targets() {
             if self.text_binding(t, &s).is_some() {
-                // 退避中的（文件隔离 / 读不了）不在压实时反复重试
-                if !self.in_text_backoff(&(t, s.clone())) {
+                // 退避中的（文件隔离 / 读不了）不在压实时反复重试；外部编辑中的不写回
+                if !self.in_text_backoff(&(t, s.clone())) && !self.is_held(t, &s) {
                     self.fold_text_logged(t, &s);
                 }
             } else if !self.text_owned(t, &s) {

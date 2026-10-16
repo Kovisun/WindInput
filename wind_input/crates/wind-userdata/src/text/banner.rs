@@ -5,6 +5,8 @@
 
 pub const USER_DICT: &str =
     "# 清风输入法 · 用户词库：造的词、加的词都在这里。可手动编辑；文件头（--- 到 ...）请勿修改。";
+pub const USER_DICT_LIB: &str = "# 清风输入法 · 用户分库：自己整理的词表，可按方案开关。可手动编辑；文件头（--- 到 ...）请勿修改。";
+pub const USER_DICTS_META: &str = "# 清风输入法 · 用户分库的开关（按方案）。可手动编辑。";
 pub const SHADOW: &str =
     "# 清风输入法 · 候选调整（置顶 / 删除）。可手动编辑；文件头（--- 到 ...）请勿修改。";
 pub const TEMP: &str =
@@ -61,6 +63,8 @@ mod tests {
 
     const ALL: &[&str] = &[
         USER_DICT,
+        USER_DICT_LIB,
+        USER_DICTS_META,
         SHADOW,
         TEMP,
         DRAFT,

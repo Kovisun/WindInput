@@ -216,6 +216,7 @@ impl Store {
     /// 读改写整份快捷格式调整；全表为空则删文件。文件解析不了 ⇒ Err、什么都不写（M-1）。
     fn modify_quick_file(&self, f: &mut dyn FnMut(&mut QuickFile)) -> anyhow::Result<()> {
         let doc = self.quick_doc();
+        self.check_not_editing(doc.path())?;
         doc.modify(&mut |cur| {
             let mut qf = cur
                 .map(parse_quick)
@@ -338,6 +339,7 @@ impl Store {
         rows: Vec<(String, QuickFormatRecord)>,
         replace: bool,
     ) -> anyhow::Result<()> {
+        self.check_not_editing(self.quick_doc().path())?;
         if replace {
             // 整份还原是用户显式的整体动作：坏文件先留存，再写
             crate::last_good::preserve_if_unparsable(self.quick_doc(), &parse_quick)?;

@@ -1240,10 +1240,7 @@ impl Coordinator {
         let last_seg_is_pinyin = crate::wildcard::last_seg_is_pinyin(state);
         let pinyin_schema = if last_seg_is_pinyin {
             let active = self.engine_mgr.active_schema_id();
-            self.engine_mgr
-                .schema_merged(&active)
-                .map(|s| s.engine.mixed.secondary_schema.clone())
-                .filter(|s| !s.is_empty())
+            self.engine_mgr.mixed_secondary_schema(&active)
         } else {
             None
         };

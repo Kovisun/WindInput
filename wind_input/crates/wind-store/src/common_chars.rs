@@ -92,7 +92,7 @@ fn parse_common(s: &str) -> anyhow::Result<BTreeMap<String, bool>> {
     Ok(m)
 }
 
-fn render_common(m: &BTreeMap<String, bool>) -> String {
+pub(crate) fn render_common(m: &BTreeMap<String, bool>) -> String {
     let f = CommonFile {
         common: m
             .iter()
@@ -130,6 +130,7 @@ impl Store {
     /// 读改写全部覆盖，一次提交；全空则删文件。文件解析不了 ⇒ Err、什么都不写（M-1）。
     fn modify_common(&self, f: &mut dyn FnMut(&mut BTreeMap<String, bool>)) -> anyhow::Result<()> {
         let doc = self.common_doc();
+        self.check_not_editing(doc.path())?;
         doc.modify(&mut |cur| {
             let mut m = cur
                 .map(parse_common)
@@ -202,6 +203,7 @@ impl Store {
 
     /// 清空全部覆盖（词库管理界面的「全部恢复出厂」）。返回清掉的条数。
     pub fn clear_common_char_overrides(&self) -> anyhow::Result<usize> {
+        self.check_not_editing(self.common_doc().path())?;
         let n = self.common_map().len();
         crate::last_good::preserve_if_unparsable(self.common_doc(), &parse_common)?;
         self.common_doc().replace(None)?;

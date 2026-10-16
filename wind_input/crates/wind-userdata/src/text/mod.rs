@@ -8,4 +8,4 @@ pub mod patch;
 pub mod table;
 
 pub use format::{ParseError, TextDict, TextEntry, WindHeader, normalize_key, parse};
-pub use patch::{PatchOp, patch, render};
+pub use patch::{PatchOp, patch, patch_with_banner, render, render_with};

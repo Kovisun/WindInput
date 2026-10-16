@@ -3060,6 +3060,15 @@ impl Coordinator {
         coordinator.reload_common_chars();
         // 命令栏：装配 Services（ime/config/dict 后端）+ 自身 Weak 引用。
         coordinator.init_cmdbar();
+        // 外部编辑会话超过租约由 store 自动结束：变了的项照 `dict.reload` 重建内存镜像。只持 Weak。
+        if let Some(store) = coordinator.store.as_ref() {
+            let weak = Arc::downgrade(&coordinator);
+            store.set_edit_expired_hook(Arc::new(move |changed: &[String]| {
+                if let Some(c) = weak.upgrade() {
+                    c.apply_user_text_changes(changed);
+                }
+            }));
+        }
         // 按词查编码用户层后台建好 → 重刷当前这屏候选，把用户码补上（否则要等下一次按键）。
         // 与 `spawn_index_warm` 建成反查索引后的重渲染同一个做法；只持 Weak。
         {
@@ -9532,6 +9541,11 @@ impl Coordinator {
         }
         if has("charsets") {
             self.reload_charsets();
+        }
+        for c in changed {
+            if let Some(ds) = c.strip_prefix(wind_store::user_words::USER_DICTS_CHANGED) {
+                self.engine_mgr.invalidate_user_dicts(ds);
+            }
         }
     }
 

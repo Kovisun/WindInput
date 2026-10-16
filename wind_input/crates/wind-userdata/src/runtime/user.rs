@@ -271,7 +271,8 @@ impl Runtime {
         if !ops.is_empty() {
             self.ud.apply_batch(&ops)?;
         }
-        if self.ud.text_binding(U, schema).is_some() {
+        // 外部编辑中不写回：留在 delta，结束编辑时折回
+        if self.ud.text_binding(U, schema).is_some() && !self.ud.is_held(U, schema) {
             self.ud.fold_text(U, schema)?;
         }
         self.bump_words(schema);

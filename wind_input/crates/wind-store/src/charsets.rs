@@ -50,6 +50,7 @@ impl Store {
     /// 文本合法性由调用方负责——本层不解析。
     pub fn set_charset_doc(&self, key: &str, text: &str) -> anyhow::Result<()> {
         let p = self.charset_path(key)?;
+        self.check_not_editing(&p)?;
         wind_userdata::text::fold::commit_text(&p, text.as_bytes(), None)?;
         self.remember_charsets_fp();
         Ok(())
@@ -58,6 +59,7 @@ impl Store {
     /// 删掉一个类的用户层（自建类 = 整个类消失；出厂类 = 回到出厂）。`false` = 本就没有。
     pub fn remove_charset_doc(&self, key: &str) -> anyhow::Result<bool> {
         let p = self.charset_path(key)?;
+        self.check_not_editing(&p)?;
         let existed = match std::fs::remove_file(&p) {
             Ok(()) => true,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
@@ -96,6 +98,10 @@ impl Store {
     /// 清空用户层（备份「替换」模式用）。返回删掉的条数。
     pub fn clear_charset_docs(&self) -> anyhow::Result<usize> {
         let docs = self.list_charset_docs()?;
+        // 先全查一遍：有一个在编辑就整体不动，不清到一半
+        for (k, _) in &docs {
+            self.check_not_editing(&self.charset_path(k)?)?;
+        }
         for (k, _) in &docs {
             self.remove_charset_doc(k)?;
         }

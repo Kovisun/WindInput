@@ -240,7 +240,7 @@ impl Store {
         self.user_text_dir().join("phrases.dict.yaml")
     }
 
-    fn phrase_table(&self) -> std::sync::Arc<wind_userdata::text::table::TextTable> {
+    pub(crate) fn phrase_table(&self) -> std::sync::Arc<wind_userdata::text::table::TextTable> {
         self.phrase_table
             .get_or_init(|| {
                 std::sync::Arc::new(wind_userdata::text::table::TextTable::open(
@@ -268,6 +268,7 @@ impl Store {
         &self,
         rows: Vec<((String, String), Option<FileRow>)>,
     ) -> anyhow::Result<()> {
+        self.check_not_editing(&self.phrases_path())?;
         if rows.is_empty() {
             return Ok(());
         }
@@ -719,6 +720,7 @@ impl Store {
     /// 重置为默认：清空短语文件（用户行与修改行），返回删除条数。
     pub fn reset_phrases(&self) -> anyhow::Result<usize> {
         let n = self.file_phrase_rows().len();
+        self.check_not_editing(&self.phrases_path())?;
         self.phrase_table().replace_all(&[])?;
         Ok(n)
     }
