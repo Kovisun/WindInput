@@ -561,6 +561,122 @@ mod tests {
         assert_eq!(f.texts(&ct, "a")[0], "工");
     }
 
+    /// 删除方案的全部用户数据：用户词、分库、方案覆盖都没了、引擎随之重建；拼音族共用数据拒绝。
+    #[test]
+    fn purge_schema_removes_user_data_and_refuses_shared() {
+        let f = fx("purge");
+        let ct = f.ct.clone();
+        let store = f.c.user_store().cloned().unwrap();
+        f.rpc("userDicts.create", json!({"schemaId": ct, "name": "我的"}))
+            .unwrap();
+        f.rpc(
+            "userDicts.addEntry",
+            json!({"schemaId": ct, "name": "我的", "code": "a", "text": "戈", "weight": 100}),
+        )
+        .unwrap();
+        store.add_user_word(&ct, "aa", "域", 999, 0).unwrap();
+        let ov = f.dir.join("ov").join(format!("{ct}.toml"));
+        std::fs::create_dir_all(ov.parent().unwrap()).unwrap();
+        std::fs::write(&ov, "[engine.codetable]\nmax_code_length = 4\n").unwrap();
+        assert_eq!(f.texts(&ct, "a")[0], "戈");
+        let r = f
+            .rpc("userdata.purgeSchema", json!({"schemaId": ct}))
+            .unwrap();
+        let removed: Vec<String> = serde_json::from_value(r["removed"].clone()).unwrap();
+        assert!(
+            removed.contains(&format!("{ct}/dicts/我的.dict.yaml")),
+            "{removed:?}"
+        );
+        assert!(
+            removed.contains(&format!("schema_overrides/{ct}.toml")),
+            "{removed:?}"
+        );
+        assert_eq!(r["ok"], true);
+        assert!(!f.root().join(&ct).exists());
+        assert!(!ov.exists());
+        assert_eq!(f.texts(&ct, "a"), ["工", "式"], "{:?}", f.texts(&ct, "a"));
+
+        // 第二个拼音方案与 py 共用 `pinyin` 数据
+        let py2 = format!("{}_2", f.py);
+        std::fs::write(
+            f.dir.join("schemas").join(format!("{py2}.schema.toml")),
+            format!("[schema]\nid = \"{py2}\"\nname = \"拼二\"\n[engine]\ntype = \"pinyin\"\n"),
+        )
+        .unwrap();
+        let e = f
+            .rpc("userdata.purgeSchema", json!({"schemaId": f.py}))
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("共用数据，不能单独删除"), "{e}");
+        if let Some(cache) = Config::cache_dir() {
+            let _ = std::fs::remove_dir_all(cache.join(&py2));
+        }
+    }
+
+    /// 混输把码表数据写进主方案的数据方案、拼音数据写进 `pinyin`：两头都不能单删；混输自身也不能删
+    /// （数据不在它名下）。`data.locate {schemaId}` 的 purgeable / reason 与 purge 同一判据。
+    #[test]
+    fn purge_schema_guards_mixed_both_ways() {
+        let f = fx("purge_mx");
+        let (ct, py) = (f.ct.clone(), f.py.clone());
+        let loc = |id: &str| f.rpc("data.locate", json!({"schemaId": id})).unwrap();
+        assert_eq!(loc(&ct)["purgeable"], true, "{}", loc(&ct));
+        assert!(loc(&ct).get("reason").is_none());
+
+        let mx = format!("zz_wdudl_mx_purge_{}", std::process::id());
+        std::fs::write(
+            f.dir.join("schemas").join(format!("{mx}.schema.toml")),
+            format!(
+                "[schema]\nid = \"{mx}\"\nname = \"混\"\n[engine]\ntype = \"mixed\"\n\
+                 [engine.mixed]\nprimary_schema = \"{ct}\"\nsecondary_schema = \"{py}\"\n"
+            ),
+        )
+        .unwrap();
+        let purge = |id: &str| {
+            f.rpc("userdata.purgeSchema", json!({"schemaId": id}))
+                .unwrap_err()
+                .to_string()
+        };
+        for id in [&ct, &py] {
+            let e = purge(id);
+            assert!(e.contains("与「混」共用数据，不能单独删除"), "{id}: {e}");
+            let l = loc(id);
+            assert_eq!(l["purgeable"], false, "{l}");
+            assert_eq!(l["reason"], e, "locate 与 purge 同一句");
+        }
+        let e = purge(&mx);
+        assert_eq!(e, "混输方案的数据在「测」和拼音里，请在那里删除");
+        assert_eq!(loc(&mx)["purgeable"], false);
+        assert_eq!(loc(&mx)["reason"], e);
+        if let Some(cache) = Config::cache_dir() {
+            let _ = std::fs::remove_dir_all(cache.join(&mx));
+        }
+    }
+
+    /// 保留目录（统计 / 字符分类 / .backup）与未安装的 id 不能拿来删。
+    #[test]
+    fn purge_schema_rejects_reserved_and_unknown() {
+        let f = fx("purge_rsv");
+        let stats = f.root().join("stats");
+        std::fs::create_dir_all(&stats).unwrap();
+        std::fs::write(stats.join("2026-10.toml"), "a = 1\n").unwrap();
+        for id in ["stats", "Stats", "charsets", "CHARSETS", ".backup", "nope"] {
+            assert!(
+                f.rpc("userdata.purgeSchema", json!({"schemaId": id}))
+                    .is_err(),
+                "{id}"
+            );
+            assert_eq!(
+                f.rpc("data.locate", json!({"schemaId": id}))
+                    .map(|v| v["purgeable"].clone())
+                    .unwrap_or(json!(false)),
+                false,
+                "{id}"
+            );
+        }
+        assert!(stats.join("2026-10.toml").exists());
+    }
+
     #[test]
     fn create_rename_delete_and_bad_names() {
         let f = fx("names");

@@ -1081,6 +1081,82 @@ impl Store {
         &self.path
     }
 
+    /// 删除一个数据方案（`data/<ds>/` 整个目录与 `.backup/<ds>/`）的全部用户数据，返回删掉的文件
+    /// （相对数据目录、`/` 分隔）。先清各目标（待写回的操作随之摘掉，之后不会写回），再删目录。
+    /// 该方案有文件正在外部编辑 ⇒ 拒绝。统计不分方案，不动。
+    pub fn purge_data_schema(&self, ds: &str) -> anyhow::Result<Vec<String>> {
+        wind_userdata::engine::check_schema_id(ds)?;
+        // `data/` 下与数据方案同级的保留目录：删了就是全部统计 / 字符分类调整
+        if ["stats", "charsets"]
+            .iter()
+            .any(|r| ds.eq_ignore_ascii_case(r))
+        {
+            anyhow::bail!("{ds} 不是数据方案");
+        }
+        if self.runtime.data().readonly() {
+            anyhow::bail!("只读模式：本次运行不保存修改");
+        }
+        let prefix = format!("{ds}/");
+        if let Some((f, _)) = self
+            .edit_sessions()
+            .into_iter()
+            .find(|(f, _)| f.starts_with(&prefix))
+        {
+            anyhow::bail!("正在外部编辑 {f}，完成后再删");
+        }
+        let root = self.text_dir.clone();
+        let dirs = [
+            root.join(ds),
+            root.join(wind_userdata::text::fold::BACKUP_DIR).join(ds),
+        ];
+        let mut removed = Vec::new();
+        for d in &dirs {
+            let mut stack = vec![d.clone()];
+            while let Some(dir) = stack.pop() {
+                for e in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+                    let p = e.path();
+                    if e.file_type().is_ok_and(|t| t.is_dir()) {
+                        stack.push(p);
+                    } else if let Ok(rel) = p.strip_prefix(&root) {
+                        removed.push(
+                            rel.components()
+                                .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                                .collect::<Vec<_>>()
+                                .join("/"),
+                        );
+                    }
+                }
+            }
+        }
+        removed.sort();
+        self.clear_user_words(ds)?;
+        self.clear_temp_words(ds)?;
+        self.clear_drafts(ds)?;
+        self.clear_freq(ds)?;
+        self.clear_assoc_history(ds)?;
+        self.clear_shadow(ds)?;
+        self.shadows
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(ds);
+        for d in &dirs {
+            match std::fs::remove_dir_all(d) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
+        for i in crate::issues::list_under(&dirs[0]) {
+            crate::issues::clear(&i.path);
+        }
+        self.bump_words_gen(ds);
+        info!(
+            "已删除数据方案 {ds} 的全部用户数据（{} 个文件）",
+            removed.len()
+        );
+        Ok(removed)
+    }
+
     /// 枚举出现过的全部数据方案 id：redb 的用户词 / shadow 表 + 运行时引擎（临时词 / 草稿 / 词频 /
     /// 联想历史）。
     /// 备份用：确保有数据但未在当前配置启用的方案也被覆盖。
@@ -1435,6 +1511,68 @@ mod tests {
             assert_eq!(&std::fs::read(d.join(f)).unwrap(), before, "{f}");
         }
         drop(s);
+    }
+
+    /// 删除一个数据方案的全部用户数据：目录与 `.backup/` 里的都删；待写回的操作一并清掉，之后
+    /// 写回（压实 / 维护）不会把文件写回来；别的方案不动；正在外部编辑时拒绝。
+    #[test]
+    fn purge_data_schema_removes_everything_of_that_schema() {
+        let p = tmp_db("purge");
+        let _ = std::fs::remove_file(&p);
+        let s = Store::open(&p).unwrap();
+        let d = s.user_text_dir().to_path_buf();
+        s.add_user_word("wubi86", "a", "工", 1, 0).unwrap();
+        s.flush_user_data().unwrap();
+        s.add_user_word("wubi86", "aa", "式", 1, 0).unwrap(); // 未折回
+        s.add_user_word("wubi86", "aa", "式", 9, 0).unwrap(); // 产生上一版
+        s.flush_user_data().unwrap();
+        s.add_user_word("wubi86", "b", "了", 1, 0).unwrap();
+        s.learn_temp_word("wubi86", "c", "以", 1, 0).unwrap();
+        s.pin_shadow("wubi86", "a", "工", None, 0).unwrap();
+        s.create_user_dict("wubi86", "我的").unwrap();
+        s.add_user_word("pinyin", "ni", "你", 1, 0b1).unwrap();
+        s.flush_user_data().unwrap();
+        s.learn_temp_word("wubi86", "d", "在", 1, 0).unwrap();
+        assert!(d.join(".backup/wubi86").is_dir());
+
+        let sess = s.begin_edit("wubi86/user.dict.yaml").unwrap();
+        let e = s.purge_data_schema("wubi86").unwrap_err().to_string();
+        assert!(e.contains("正在外部编辑"), "{e}");
+        s.end_edit(&sess.path.to_string_lossy()).unwrap();
+
+        let removed = s.purge_data_schema("wubi86").unwrap();
+        for f in [
+            "wubi86/user.dict.yaml",
+            "wubi86/temp.dict.yaml",
+            "wubi86/shadow.dict.yaml",
+            "wubi86/dicts/我的.dict.yaml",
+            ".backup/wubi86/user.dict.yaml",
+        ] {
+            assert!(removed.contains(&f.to_string()), "{f}: {removed:?}");
+        }
+        assert!(!d.join("wubi86").exists());
+        assert!(!d.join(".backup/wubi86").exists());
+        assert!(
+            s.search_user_words_prefix("wubi86", "", 0)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(s.count_temp_words("wubi86").unwrap(), 0);
+        s.flush_user_data().unwrap();
+        s.runtime()
+            .data()
+            .maintain_text_idle(std::time::Duration::ZERO)
+            .unwrap();
+        assert!(!d.join("wubi86").exists(), "不写回");
+        assert!(d.join("pinyin/user.dict.yaml").is_file(), "别的方案不动");
+        assert!(s.purge_data_schema("../x").is_err());
+        // 保留目录：统计 / 字符分类不是数据方案（大小写不敏感，Windows 上是同一个目录）
+        std::fs::create_dir_all(d.join("stats")).unwrap();
+        std::fs::write(d.join("stats/2026-10.toml"), "a = 1\n").unwrap();
+        for ds in ["stats", "Stats", "charsets", "CharSets", ".backup"] {
+            assert!(s.purge_data_schema(ds).is_err(), "{ds}");
+        }
+        assert!(d.join("stats/2026-10.toml").is_file());
     }
 
     /// 打开时把旧版留在数据文件旁边的 `.bak` / `.corrupt-<时间>` 挪进 `data/.backup/`。

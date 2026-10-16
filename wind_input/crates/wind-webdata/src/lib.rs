@@ -593,6 +593,8 @@ fn web_data_dispatch<H: WebDataRpc + ?Sized>(
         "userDicts.delete" => user_dicts::delete(h, params),
         "userDicts.importAs" => user_dicts::import_as(h, params),
         "userDicts.setEnabled" => user_dicts::set_enabled(h, params),
+        // 删除一个方案的全部用户数据（数据方案目录、它的备份、方案覆盖）；共用数据的拒绝。
+        "userdata.purgeSchema" => h.web_userdata_purge_schema(params),
 
         // ── temp.*（临时词，redb）─────────────────────────────
         "temp.list" => h.web_temp_list(params),
@@ -1395,7 +1397,16 @@ pub trait WebDataRpc: WebDataHost {
                 .as_deref()
                 .or_else(|| params.get("path").and_then(Value::as_str)),
         )?;
-        Ok(json!({ "path": p.to_string_lossy(), "exists": p.exists() }))
+        let mut v = json!({ "path": p.to_string_lossy(), "exists": p.exists() });
+        if schema_dir.is_some() {
+            let id = params["schemaId"].as_str().unwrap_or_default();
+            let reason = self.purge_block_reason(id);
+            v["purgeable"] = json!(reason.is_none());
+            if let Some(r) = reason {
+                v["reason"] = json!(r);
+            }
+        }
+        Ok(v)
     }
 
     fn web_dict_clear(&self, params: &Value) -> anyhow::Result<Value> {
@@ -2157,6 +2168,83 @@ pub trait WebDataRpc: WebDataHost {
             "keptShared": r.kept_shared,
             "schemaIds": r.schema_ids,
         }))
+    }
+
+    /// 某方案写入的全部数据方案：非混输 = 自身的数据方案；混输 = 主方案的数据方案 + 有拼音子方案时的
+    /// `pinyin`（与 `EngineManager::write_data_schema_id` 的分流一致）。
+    fn written_data_schemes(&self, id: &str) -> Vec<String> {
+        let em = self.engine_mgr();
+        if em.schema_engine_type(id).as_deref() != Some("mixed") {
+            return vec![em.data_schema_id(id)];
+        }
+        let mut v = Vec::new();
+        if em.mixed_primary_schema(id).is_some() {
+            v.extend(em.write_data_schema_id(id, wind_candidate::CandidateSource::CodeTable));
+        }
+        if em.mixed_secondary_schema(id).is_some() {
+            v.extend(em.write_data_schema_id(id, wind_candidate::CandidateSource::Pinyin));
+        }
+        v
+    }
+
+    /// `userdata.purgeSchema` 拒绝的原因（能删 ⇒ None）；`data.locate` 的 `purgeable` / `reason`
+    /// 用同一个判据。未安装的不删（防把 `stats` 之类的保留目录当方案）；混输的数据在主方案与拼音
+    /// 名下，自身不删；数据方案被别的已装方案写入（拼音族、混输的主 / 拼音一侧）不单删。
+    fn purge_block_reason(&self, id: &str) -> Option<String> {
+        let em = self.engine_mgr();
+        let installed = em.installed_schemas();
+        if !installed.iter().any(|s| s == id) {
+            return Some(format!("未安装方案 {id}"));
+        }
+        if em.schema_engine_type(id).as_deref() == Some("mixed") {
+            let mut at: Vec<String> = Vec::new();
+            if let Some(p) = em.mixed_primary_schema(id) {
+                at.push(format!("「{}」", em.schema_name(&p)));
+            }
+            if em.mixed_secondary_schema(id).is_some() {
+                at.push("拼音".into());
+            }
+            return Some(if at.is_empty() {
+                "混输方案没有自己的数据".into()
+            } else {
+                format!("混输方案的数据在{}里，请在那里删除", at.join("和"))
+            });
+        }
+        let ds = em.data_schema_id(id);
+        installed
+            .iter()
+            .find(|s| *s != id && self.written_data_schemes(s).contains(&ds))
+            .map(|other| format!("与「{}」共用数据，不能单独删除", em.schema_name(other)))
+    }
+
+    /// `userdata.purgeSchema {schemaId}` → `{ok, removed: [相对路径]}`：删掉该方案的全部用户数据
+    /// ——数据方案目录（用户词 / Shadow / 学到的数据 / 分库与开关）、`.backup/` 里它的那份、
+    /// `schema_overrides/<id>.toml`。数据方案与别的已装方案共用（拼音族）⇒ 拒绝；有文件正在外部
+    /// 编辑 ⇒ 拒绝。统计不动。`removed` 里数据文件相对数据目录，方案覆盖写 `schema_overrides/<id>.toml`。
+    fn web_userdata_purge_schema(&self, params: &Value) -> anyhow::Result<Value> {
+        if let Some(r) = self.storage_readonly_reason() {
+            anyhow::bail!("{r}");
+        }
+        let id = str_param(params, "schemaId")?;
+        if let Some(r) = self.purge_block_reason(id) {
+            anyhow::bail!("{r}");
+        }
+        let ds = self.engine_mgr().data_schema_id(id);
+        let store = self
+            .user_store()
+            .ok_or_else(|| anyhow::anyhow!("无持久化存储"))?;
+        let r = store.purge_data_schema(&ds);
+        // 删到一半失败也失效：分库文件可能已删，引擎不能拿着旧数据
+        self.apply_user_text_changes(&[
+            ds.clone(),
+            format!("{}{ds}", wind_store::user_words::USER_DICTS_CHANGED),
+        ]);
+        let mut removed = r?;
+        if self.engine_mgr().delete_schema_override(id)? {
+            removed.push(format!("schema_overrides/{id}.toml"));
+        }
+        self.refresh_schema_derived_config();
+        Ok(json!({ "ok": true, "removed": removed }))
     }
 
     /// 用户 schemas 根目录(%APPDATA%/WindInput/schemas),不存在则创建。
