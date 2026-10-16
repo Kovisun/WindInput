@@ -750,6 +750,11 @@ fn issue_json(root: &std::path::Path, i: &wind_store::issues::FileIssue) -> Valu
             v["kind"] = json!("rebuilt");
             v["kept_as"] = json!(kept_as);
         }
+        IssueKind::Invalid { message } => {
+            v["kind"] = json!("invalid");
+            v["file"] = v["path"].clone();
+            v["message"] = json!(message);
+        }
     }
     v
 }
@@ -1262,8 +1267,9 @@ pub trait WebDataRpc: WebDataHost {
         Ok(json!({ "ok": true, "held": store.held_edit_files() }))
     }
 
-    /// 外部编辑的目标文件：`{path}`，或 `{schemaId, kind: words|shadow}`（按数据方案换算，拼音族
-    /// 折叠到 "pinyin"），或 `{kind: phrases|quick_format|common_chars}`。
+    /// 外部编辑的目标文件：`{path}`，或 `{schemaId, kind: words|shadow|temp|freq|user_dicts}`、
+    /// `{schemaId, kind: user_dict, name}`（按数据方案换算，拼音族折叠到 "pinyin"），或
+    /// `{kind: phrases|quick_format|common_chars}`、`{kind: charsets, key}`。
     fn edit_target_param(
         &self,
         store: &wind_store::Store,
@@ -1289,6 +1295,12 @@ pub trait WebDataRpc: WebDataHost {
                 str_param(params, "name")?,
             ),
             "user_dicts" => wind_store::user_dicts::meta_path(store.user_text_dir(), &schema()?),
+            "charsets" => store.charset_path(str_param(params, "key")?)?,
+            "temp" => store.user_text_dir().join(schema()?).join("temp.dict.yaml"),
+            "freq" => store
+                .user_text_dir()
+                .join(schema()?)
+                .join("freq.table.yaml"),
             other => anyhow::bail!("不支持编辑的类别：{other}"),
         };
         Ok(path.to_string_lossy().into_owned())
@@ -1303,6 +1315,9 @@ pub trait WebDataRpc: WebDataHost {
         let store = self
             .user_store()
             .ok_or_else(|| anyhow::anyhow!("无持久化存储"))?;
+        if params.get("kind").and_then(Value::as_str) == Some("charsets") {
+            self.prepare_charset_edit(store, str_param(params, "key")?)?;
+        }
         let s = store.begin_edit(&self.edit_target_param(store, params)?)?;
         Ok(json!({
             "path": s.path.to_string_lossy(),
@@ -1311,7 +1326,28 @@ pub trait WebDataRpc: WebDataHost {
         }))
     }
 
+    /// 按 key 编辑字符分类：出厂没有、用户层也没有的 key 拒绝；用户层还没有这个类的文件 ⇒ 先写一份
+    /// 只带 key 的（说明行 + 头部），编辑器里打开就是可改的样子。
+    fn prepare_charset_edit(&self, store: &wind_store::Store, key: &str) -> anyhow::Result<()> {
+        if store.get_charset_doc(key)?.is_some() {
+            return Ok(());
+        }
+        if !self.engine_mgr().charset_factory().contains_key(key) {
+            anyhow::bail!("没有名为「{key}」的字符分类");
+        }
+        let doc = wind_config::charset_def::CharsetDoc {
+            def: wind_config::charset_def::CharsetDef {
+                key: key.to_string(),
+                ..Default::default()
+            },
+            added: Vec::new(),
+            removed: Vec::new(),
+        };
+        store.set_charset_doc(key, &wind_config::charset_def::render_doc(&doc)?)
+    }
+
     /// `data.endEdit {path}`（或类别参数）→ `{changed, issues}`；变了的项重建内存镜像（同 `dict.reload`）。
+    /// 问题在重建之后再取：字符分类的校验发生在重建字符分类时。
     fn web_data_end_edit(&self, params: &Value) -> anyhow::Result<Value> {
         let store = self
             .user_store()
@@ -1319,7 +1355,12 @@ pub trait WebDataRpc: WebDataHost {
         let r = store.end_edit(&self.edit_target_param(store, params)?)?;
         self.apply_user_text_changes(&r.reloaded);
         let root = store.user_text_dir();
-        let issues: Vec<Value> = r.issues.iter().map(|i| issue_json(root, i)).collect();
+        let issues: Vec<Value> = store
+            .data_issues()
+            .iter()
+            .filter(|i| i.path == r.path)
+            .map(|i| issue_json(root, i))
+            .collect();
         Ok(json!({ "changed": r.changed, "issues": issues }))
     }
 
@@ -1337,7 +1378,7 @@ pub trait WebDataRpc: WebDataHost {
         ))
     }
 
-    /// `data.locate {path?}` → `{path}`；`{schemaId}` 定位该方案的数据目录（拼音族折叠）。
+    /// `data.locate {path?}` → `{path, exists}`（`exists`：该目录 / 文件此刻在不在）；`{schemaId}` 定位该方案的数据目录（拼音族折叠）。
     fn web_data_locate(&self, params: &Value) -> anyhow::Result<Value> {
         let store = self
             .user_store()
@@ -1354,7 +1395,7 @@ pub trait WebDataRpc: WebDataHost {
                 .as_deref()
                 .or_else(|| params.get("path").and_then(Value::as_str)),
         )?;
-        Ok(json!({ "path": p.to_string_lossy() }))
+        Ok(json!({ "path": p.to_string_lossy(), "exists": p.exists() }))
     }
 
     fn web_dict_clear(&self, params: &Value) -> anyhow::Result<Value> {
@@ -5633,7 +5674,7 @@ outside: rare
                 .is_err()
         );
         let e = c
-            .web_data_rpc("data.beginEdit", &json!({"path": "pinyin/temp.dict.yaml"}))
+            .web_data_rpc("data.beginEdit", &json!({"path": "pinyin/draft.dict.yaml"}))
             .unwrap_err();
         assert!(e.to_string().contains("自动维护"), "{e}");
     }
@@ -5731,8 +5772,20 @@ outside: rare
                 "{r}"
             );
         }
+        for (kind, file) in [
+            ("temp", "pinyin/temp.dict.yaml"),
+            ("freq", "pinyin/freq.table.yaml"),
+        ] {
+            let r = begin(json!({"schemaId": "double_pinyin", "kind": kind})).unwrap();
+            assert_eq!(
+                (&r["file"], &r["kind"]),
+                (&json!(file), &json!(kind)),
+                "{r}"
+            );
+        }
         assert!(begin(json!({"kind": "words"})).is_err(), "用户词要带方案");
-        assert!(begin(json!({"kind": "temp", "schemaId": "wubi86"})).is_err());
+        assert!(begin(json!({"kind": "temp"})).is_err(), "临时词要带方案");
+        assert!(begin(json!({"kind": "draft", "schemaId": "wubi86"})).is_err());
         assert!(begin(json!({"schemaId": "../x", "kind": "words"})).is_err());
         assert_eq!(
             c.web_data_rpc("data.editSessions", &json!({}))
@@ -5740,10 +5793,23 @@ outside: rare
                 .as_array()
                 .unwrap()
                 .len(),
-            5
+            7
+        );
+        let r = c.web_data_rpc("dict.flush", &json!({})).unwrap();
+        let mut held: Vec<String> = serde_json::from_value(r["held"].clone()).unwrap();
+        held.sort();
+        assert_eq!(
+            held,
+            [
+                "pinyin/freq.table.yaml",
+                "pinyin/temp.dict.yaml",
+                "pinyin/user.dict.yaml"
+            ]
         );
         let end = |p: Value| c.web_data_rpc("data.endEdit", &p).unwrap();
         end(json!({"schemaId": "double_pinyin", "kind": "words"}));
+        end(json!({"schemaId": "double_pinyin", "kind": "temp"}));
+        end(json!({"schemaId": "double_pinyin", "kind": "freq"}));
         end(json!({"schemaId": "wubi86", "kind": "shadow"}));
         for kind in ["phrases", "quick_format", "common_chars"] {
             end(json!({"kind": kind}));
@@ -5764,6 +5830,75 @@ outside: rare
         );
     }
 
+    /// 字符分类按 key 编辑：没有个人调整就先建一份只带 key 的；不认识的 key 拒绝。结束时格式坏
+    /// 报 invalid、改出厂范围 / 整表替换被忽略并报 invalid，修好后问题消失。
+    #[test]
+    fn data_edit_charsets_by_key_and_reports_invalid() {
+        let c = coord("data_edit_cs");
+        let store = c.user_store().cloned().unwrap();
+        let p = store.charset_path("common_han").unwrap();
+        assert!(!p.exists());
+        let begin =
+            |k: &str| c.web_data_rpc("data.beginEdit", &json!({"kind": "charsets", "key": k}));
+        let end = || {
+            c.web_data_rpc(
+                "data.endEdit",
+                &json!({"kind": "charsets", "key": "common_han"}),
+            )
+            .unwrap()
+        };
+        let e = begin("nope").unwrap_err().to_string();
+        assert!(e.contains("字符分类"), "{e}");
+        let r = begin("common_han").unwrap();
+        assert_eq!(
+            (&r["file"], &r["kind"]),
+            (&json!("charsets/common_han.yaml"), &json!("charsets"))
+        );
+        let text = std::fs::read_to_string(&p).unwrap();
+        assert!(
+            text.starts_with(wind_config::charset_def::STORED_DOC_BANNER),
+            "{text}"
+        );
+        assert!(text.contains("key: common_han"), "{text}");
+        assert_eq!(end(), json!({"changed": false, "issues": []}));
+
+        begin("common_han").unwrap();
+        std::fs::write(&p, "---\nkey: common_han\nname: [\n").unwrap();
+        let r = end();
+        assert_eq!(r["issues"][0]["kind"], "invalid", "{r}");
+        assert_eq!(r["issues"][0]["file"], "charsets/common_han.yaml", "{r}");
+        assert!(
+            r["issues"][0]["message"].as_str().unwrap().contains("格式"),
+            "{r}"
+        );
+
+        begin("common_han").unwrap();
+        std::fs::write(
+            &p,
+            "---\nkey: common_han\nname: 我的常用\nranges: [U+4E00-U+4E01]\nreplace: true\n",
+        )
+        .unwrap();
+        let r = end();
+        assert_eq!(r["issues"][0]["kind"], "invalid", "{r}");
+        assert!(
+            r["issues"][0]["message"]
+                .as_str()
+                .unwrap()
+                .contains("出厂字符分类的范围不能改"),
+            "{r}"
+        );
+        assert!(
+            c.engine_mgr()
+                .charsets()
+                .class_by_key("common_han")
+                .is_some()
+        );
+
+        begin("common_han").unwrap();
+        std::fs::write(&p, "---\nkey: common_han\nname: 我的常用\n").unwrap();
+        assert_eq!(end()["issues"], json!([]));
+    }
+
     /// data.locate：数据目录、方案目录、数据文件；越界拒绝。
     #[test]
     fn data_locate_returns_paths_inside_data_dir() {
@@ -5780,6 +5915,13 @@ outside: rare
         );
         assert!(at(json!({"path": "/etc"})).is_err());
         assert!(at(json!({"path": "../x"})).is_err());
+        std::fs::create_dir_all(&root).unwrap();
+        assert_eq!(at(json!({})).unwrap()["exists"], true);
+        assert_eq!(at(json!({"path": "wubi86"})).unwrap()["exists"], false);
+        assert_eq!(
+            at(json!({"path": "wubi86/user.dict.yaml"})).unwrap()["exists"],
+            false
+        );
     }
 
     /// ★ S3 复审 M3：这些方法也扫整表 / 是批量写，名单里不能缺。

@@ -838,6 +838,10 @@ impl UserData {
     /// 由当前视图（段 + delta）渲染出文本、写盘、装段推进水位。写入复核「文件仍不存在」。
     fn adopt_view(&self, b: &TextBinding, target: Target, schema: &str) -> anyhow::Result<()> {
         let _f = self.fold_lock.lock().unwrap_or_else(|e| e.into_inner());
+        // 两处同时绑定（后台维护与前台调用）都判成要采纳：后到的那个文件已在，不再写
+        if b.path.exists() && self.text_owned(target, schema) {
+            return Ok(());
+        }
         let (upto, base) = self.upto_and_view()?;
         let entries = merge_for_fold(
             base.snapshots
@@ -905,6 +909,15 @@ impl UserData {
         Ok(())
     }
 
+    /// 外部编辑中（暂停写回）⇒ Err：整写会被编辑器随后的保存盖掉，或盖掉用户正在改的内容。
+    /// 须在持 `fold_lock` 时调（[`Self::hold_text`] 也取它），检查与写之间才插不进暂停。
+    fn check_not_held(&self, b: &TextBinding, target: Target, schema: &str) -> anyhow::Result<()> {
+        if self.is_held(target, schema) {
+            bail!("正在外部编辑 {}，完成后再改", b.path.display());
+        }
+        Ok(())
+    }
+
     /// 表格文本目标的 `fold_with`（清空 / 导入 / 淘汰）：由文件当前内容 + 待处理操作得全集，跑
     /// `policy`，整文件写回。文件解析不了 ⇒ Err、不写（自动清理不得覆盖坏文件，§2.5）。
     fn fold_table_with(
@@ -916,6 +929,7 @@ impl UserData {
         policy: &mut dyn FnMut(Vec<SnapshotEntry>) -> Vec<SnapshotEntry>,
     ) -> anyhow::Result<()> {
         let _f = self.fold_lock.lock().unwrap_or_else(|e| e.into_inner());
+        self.check_not_held(b, target, schema)?;
         let (upto, base) = self.upto_and_view()?;
         let cur = crate::text::fold::read_text(&b.path)?;
         let fp_before = crate::text::fold::fingerprint(cur.as_ref().map(|(x, _)| x.as_slice()));
@@ -986,6 +1000,7 @@ impl UserData {
             .text_binding(target, schema)
             .ok_or_else(|| anyhow::anyhow!("目标未绑定文本"))?;
         let _f = self.fold_lock.lock().unwrap_or_else(|e| e.into_inner());
+        self.check_not_held(&b, target, schema)?;
         Self::preserve_if_corrupt(&b)?;
         let (upto, _) = self.upto_and_view()?;
         entries.sort_by(|a, b| {
@@ -1295,6 +1310,23 @@ impl UserData {
         self.fold_text_locked(&b, target, schema)
     }
 
+    /// 同 [`Self::fold_text`]，但外部编辑中（暂停写回）就不写、返回 `Ok(false)`——在锁内判，
+    /// 与 [`Self::hold_text`] 互斥。后台维护、压实、导入后的折回走这里。
+    pub fn fold_text_unless_held(&self, target: Target, schema: &str) -> anyhow::Result<bool> {
+        if self.readonly() {
+            bail!("只读模式");
+        }
+        let b = self
+            .text_binding(target, schema)
+            .ok_or_else(|| anyhow::anyhow!("目标未绑定文本"))?;
+        let _f = self.fold_lock.lock().unwrap_or_else(|e| e.into_inner());
+        if self.is_held(target, schema) {
+            return Ok(false);
+        }
+        self.fold_text_locked(&b, target, schema)?;
+        Ok(true)
+    }
+
     /// 文件被手改 / 换掉 / 删除 ⇒ 由文本重建段（水位不回退），delta 不动——已折回的记录不回放，
     /// 删掉的行不复活，未折回的操作仍叠加。指纹没变 ⇒ `Ok(false)`。
     pub fn sync_text(&self, target: Target, schema: &str) -> anyhow::Result<bool> {
@@ -1305,7 +1337,16 @@ impl UserData {
             .text_binding(target, schema)
             .ok_or_else(|| anyhow::anyhow!("目标未绑定文本"))?;
         let _f = self.fold_lock.lock().unwrap_or_else(|e| e.into_inner());
-        let cur = crate::text::fold::read_text(&b.path)?;
+        // 读不了（被占用、权限、不是文件）也登记问题：外部编辑结束、重新载入时用户看得到原因
+        let cur = crate::text::fold::read_text(&b.path).inspect_err(|e| {
+            crate::issues::report(
+                &b.path,
+                crate::issues::IssueKind::Invalid {
+                    message: format!("文件读不了，本次未载入：{e:#}"),
+                },
+            )
+        })?;
+        crate::issues::clear_invalid(&b.path);
         let fp = crate::text::fold::fingerprint(cur.as_ref().map(|(x, _)| x.as_slice()));
         let key = (target, schema.to_string());
         let (old_fp, folded) = {
@@ -1353,10 +1394,8 @@ impl UserData {
         let b = self
             .text_binding(target, schema)
             .ok_or_else(|| anyhow::anyhow!("目标未绑定文本"))?;
-        if self.is_held(target, schema) {
-            bail!("正在外部编辑 {}，完成后再改", b.path.display());
-        }
         let _f = self.fold_lock.lock().unwrap_or_else(|e| e.into_inner());
+        self.check_not_held(&b, target, schema)?;
         // 先把待处理操作折回，迁移 / 导入的整写才不会盖掉它们。折回失败（文本隔离 / 编辑器竞争）
         // 不拦整体替换：`rows` 就是新全集（清空、还原是用户显式的整体动作），下面按水位把这些
         // 操作一并摘掉——否则文件一坏，清空 / 备份还原就永远做不成。
@@ -1422,8 +1461,10 @@ impl UserData {
             .is_some_and(|(_, at)| std::time::Instant::now() < *at)
     }
 
-    /// 暂停该文本目标的写回（外部编辑会话）。
+    /// 暂停该文本目标的写回（外部编辑会话）。取 `fold_lock`：进行中的写回 / 整写先写完，之后的
+    /// 都在锁内看到暂停。
     pub fn hold_text(&self, target: Target, schema: &str) {
+        let _f = self.fold_lock.lock().unwrap_or_else(|e| e.into_inner());
         self.held
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -1474,10 +1515,11 @@ impl UserData {
     /// `fold_text`，失败记 WARN 并登记退避；成功清退避。
     fn fold_text_logged(&self, target: Target, schema: &str) -> bool {
         let key = (target, schema.to_string());
-        let r = self.fold_text(target, schema);
+        let r = self.fold_text_unless_held(target, schema);
         let mut retry = self.text_retry.lock().unwrap_or_else(|e| e.into_inner());
         match r {
-            Ok(()) => {
+            Ok(false) => false,
+            Ok(true) => {
                 retry.remove(&key);
                 if self.view().delta.pending(target, schema) == 0 {
                     self.first_pending

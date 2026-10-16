@@ -194,7 +194,7 @@ impl crate::Coordinator {
         anyhow::ensure!(
             self.engine_mgr.charsets().class_by_key(key).is_some()
                 || !charset_def::is_empty_override(&doc),
-            "没有名为「{key}」的字符类"
+            "没有名为「{key}」的字符分类"
         );
 
         apply_edit(&mut doc, edit)?;
@@ -225,7 +225,7 @@ impl crate::Coordinator {
         );
         anyhow::ensure!(
             self.charset_store()?.remove_charset_doc(key)?,
-            "没有名为「{key}」的字符类"
+            "没有名为「{key}」的字符分类"
         );
         self.reload_charsets();
         Ok(())
@@ -248,7 +248,7 @@ impl crate::Coordinator {
         let user = self.user_doc(key)?;
         anyhow::ensure!(
             factory.contains_key(key) || !charset_def::is_empty_override(&user),
-            "没有名为「{key}」的字符类"
+            "没有名为「{key}」的字符分类"
         );
         let text = charset_def::render_edit_view(factory.get(key), &user)?;
         let path = write_edit_file(dir, key, &text)?;
@@ -274,7 +274,7 @@ impl crate::Coordinator {
                 let user = self.user_doc(k)?;
                 anyhow::ensure!(
                     factory.contains_key(k) || !charset_def::is_empty_override(&user),
-                    "没有名为「{k}」的字符类"
+                    "没有名为「{k}」的字符分类"
                 );
                 let name = factory
                     .get(k)
@@ -286,7 +286,7 @@ impl crate::Coordinator {
         };
         anyhow::ensure!(
             charset_def::is_valid_key(&key),
-            "字符类的 key「{key}」不合法"
+            "字符分类的 key「{key}」不合法"
         );
         let path = dir.join(format!("{key}.yaml"));
         let meta = std::fs::metadata(&path).ok();
@@ -379,7 +379,7 @@ impl crate::Coordinator {
         let text = std::fs::read_to_string(path)
             .map_err(|e| anyhow::anyhow!("读 {} 失败：{e}", path.display()))?;
         let docs = charset_def::parse_docs(&text)?;
-        anyhow::ensure!(!docs.is_empty(), "文件里没有任何字符类");
+        anyhow::ensure!(!docs.is_empty(), "文件里没有任何字符分类");
 
         let factory = self.engine_mgr.charset_factory();
         let mut pending: Vec<(CharsetDoc, CharsetImported)> = Vec::new();
@@ -429,7 +429,10 @@ impl crate::Coordinator {
     ) -> anyhow::Result<CharsetCleanupOutcome> {
         let store = self.charset_store()?;
         let reg = self.engine_mgr.charsets();
-        anyhow::ensure!(reg.class_by_key(key).is_some(), "没有名为「{key}」的字符类");
+        anyhow::ensure!(
+            reg.class_by_key(key).is_some(),
+            "没有名为「{key}」的字符分类"
+        );
 
         let rows = store.list_common_char_overrides()?;
         let cc = self.common_chars.read().unwrap_or_else(|e| e.into_inner());
@@ -496,7 +499,7 @@ impl crate::Coordinator {
     fn charset_store(&self) -> anyhow::Result<&wind_store::Store> {
         self.store
             .as_deref()
-            .ok_or_else(|| anyhow::anyhow!("无持久化存储，字符类的调整无处落盘"))
+            .ok_or_else(|| anyhow::anyhow!("无持久化存储，字符分类的调整无处落盘"))
     }
 
     /// 用户层现有的全部调整，按 key 索引。没有 store 时为空。
@@ -559,7 +562,7 @@ impl crate::Coordinator {
 }
 
 /// 「新建类」模板的显示名。用户在文件里改成自己的。
-const TEMPLATE_NAME: &str = "我的字符类";
+const TEMPLATE_NAME: &str = "我的字符分类";
 
 /// 「新建类」模板给的 `order`，**比所有出厂类都小**。
 ///

@@ -582,7 +582,7 @@ const STORED_DOC_HEADER: &str = "\
 pub fn render_doc(doc: &CharsetDoc) -> anyhow::Result<String> {
     anyhow::ensure!(
         is_valid_key(&doc.def.key),
-        "字符类的 key「{}」不合法",
+        "字符分类的 key「{}」不合法",
         doc.def.key
     );
     let head = serde_yaml::to_string(&doc.def)?;
@@ -613,7 +613,7 @@ pub fn render_doc(doc: &CharsetDoc) -> anyhow::Result<String> {
 /// ★ 首行「此文件不会被自动读取」是用户拍板的措辞：这份文件是**导出的副本**，改完
 /// 必须回设置页导入。不说这句，用户会改完等着生效，然后判定功能坏了。
 const EDIT_VIEW_HEADER: &str = "\
-# ⚠️ 此文件不会被自动读取。改完保存后，回到设置页「字符集分类」→「外部编辑」，点「加载外部文件」。
+# ⚠️ 此文件不会被自动读取。改完保存后，回到设置页「字符集」→「新建分类…」，点「加载外部文件」。
 #
 # 这是「{name}」（key: {key}）当前生效的完整定义 = 出厂 + 你的调整。
 # 直接增删 `...` 之后的字符行即可；导入时只记下与出厂的差异，出厂更新仍会跟随。
@@ -626,7 +626,7 @@ const EDIT_VIEW_HEADER: &str = "\
 /// 自建类（含「新建类」模板）的编辑视图头部。与 [`EDIT_VIEW_HEADER`] 分开：自建类没有
 /// 「出厂」可跟随，导入是整份替换；而且 ranges 归用户写，得给写法。
 const CUSTOM_VIEW_HEADER: &str = "\
-# ⚠️ 此文件不会被自动读取。改完保存后，回到设置页「字符集分类」→「外部编辑」，点「加载外部文件」。
+# ⚠️ 此文件不会被自动读取。改完保存后，回到设置页「字符集」→「新建分类…」，点「加载外部文件」。
 #
 # 这是自建字符类「{name}」（key: {key}）的完整定义，导入时整份替换库里的那份。
 # 成员写在 `...` 之后，一行一个；范围写在 ranges 里，如 `ranges: [U+2600-U+26FF, U+3299]`。
@@ -659,7 +659,7 @@ pub fn render_edit_view(
 ) -> anyhow::Result<String> {
     anyhow::ensure!(
         is_valid_key(&user.def.key),
-        "字符类的 key「{}」不合法",
+        "字符分类的 key「{}」不合法",
         user.def.key
     );
     // 生效字段 = 出厂字段被用户层逐字段覆盖。
@@ -735,7 +735,7 @@ pub fn diff_against_factory(
 ) -> anyhow::Result<CharsetDoc> {
     anyhow::ensure!(
         is_valid_key(&parsed.def.key),
-        "字符类的 key「{}」不合法",
+        "字符分类的 key「{}」不合法",
         parsed.def.key
     );
     let Some(f) = factory else {

@@ -5862,13 +5862,17 @@ impl EngineManager {
         Self::warn_stale_charset_files();
         // 层序与 `resolve_schema_resource` 一致（后者是 user > custom > data，
         // 这里是靠后的覆盖靠前的）。
-        let defs = wind_config::charset_def::load_layered(
+        let mut defs = wind_config::charset_def::load_factory(
             data_dir,
             wind_config::Config::custom_data_dir().as_deref(),
-            store
-                .map(crate::charset_assembly::user_docs_from_store)
-                .unwrap_or_default(),
         );
+        // 用户层按出厂校验（改出厂范围 / 整份替换被忽略并登记问题），再叠上去
+        if let Some(store) = store {
+            let docs = crate::charset_assembly::validated_user_docs(store, &defs);
+            for doc in docs {
+                wind_config::charset_def::apply_doc(&mut defs, doc);
+            }
+        }
         crate::charset_assembly::assemble(
             &defs,
             data_dir,
@@ -5925,7 +5929,7 @@ impl EngineManager {
     /// | 旧落点 | 何时失效 | 现在在哪 |
     /// |---|---|---|
     /// | `schemas/common_chars.txt` | 2026-09-04 | `charsets/common_han.yaml` 的列表体 |
-    /// | `charsets/*.yaml` | 2026-09-05 | `data/charsets/*.yaml`（设置页「外部编辑」对话框里加载） |
+    /// | `charsets/*.yaml` | 2026-09-05 | `data/charsets/*.yaml`（设置页「新建分类…」对话框里加载） |
     ///
     /// ⚠️ 两者都是**静默失效**：文件还在、程序不读、也不报错。用户看到的是「我明明改了
     /// 字表，判定却还是自带那套」。提醒不能省。第二条没写迁移：那个落点从未发布。
@@ -5937,7 +5941,7 @@ impl EngineManager {
         if stale.is_file() {
             warn!(
                 "{} 已不再生效——常用字表现在在 charsets/common_han.yaml 里。要沿用你的名单，\
-                 请在设置页「字符集分类」→「外部编辑」里对常用汉字「选择其它文件…」加载它",
+                 请在设置页「字符集」→「新建分类…」里用「选择其它文件…」加载它",
                 stale.display()
             );
         }
@@ -5945,8 +5949,8 @@ impl EngineManager {
         let stale_dir = dir.join(wind_config::charset_def::CHARSETS_DIR_NAME);
         if dir_has_yaml(&stale_dir) {
             warn!(
-                "{} 已不再被读取——字符类的用户层现在在数据库里。里面的文件可在设置页\
-                 「字符集分类」→「外部编辑」里用「选择其它文件…」逐个加载",
+                "{} 已不再被读取——字符分类的个人调整现在在用户数据目录 data/charsets/ 里。\
+                 里面的文件可在设置页「字符集」→「新建分类…」里用「选择其它文件…」逐个加载",
                 stale_dir.display()
             );
         }

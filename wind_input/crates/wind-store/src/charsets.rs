@@ -1,17 +1,19 @@
-//! 字符类的**用户层**（设置页「字符集分类」+ 外部编辑回读 + 备份还原）。
+//! 字符类的**用户层**（设置页「字符集」→「字符分类」：直接「编辑文件」，或「新建分类…」对话框的
+//! 导出编辑回读；备份还原）。
 //!
 //! ## 文件是真相源（P4a 起，设计 §2.4）
 //!
 //! ```text
 //! 出厂 data/charsets/*.yaml（只读，随安装包）
 //!   ↓ 定制 data_custom/charsets/*.yaml（只读）
-//!   ↓ 用户层 <userdata>/user/charsets/<key>.yaml（自建类、对出厂类的字段覆盖与成员增删）
+//!   ↓ 用户层 <userdata>/data/charsets/<key>.yaml（自建类、对出厂类的字段覆盖与成员增删）
 //! registry
 //! ```
 //!
 //! 曾经放进 redb，唯一的理由是「程序和人同写一个文件，后保存者赢、另一方静默丢失」。现在程序
 //! 的写入是显式的整份替换（设置页保存、编辑副本回读，「这份就是新内容」），手改文件经
-//! `sync_charsets` 在配置重载 / `dict.reload` 时生效；编辑副本 → 回读的流程照旧。仍存在的一种
+//! `sync_charsets` 在配置重载 / `dict.reload` / 结束编辑时生效；编辑副本 → 回读的流程照旧。重建
+//! 时按出厂校验（`wind_engine::charset_assembly::validated_user_docs`），不合规的登记问题。仍存在的一种
 //! 冲突：设置页保存与编辑器同时保存同一个类，后写者胜（设置页的写入是显式整份替换，不复核）。
 //!
 //! ## 内容就是 yaml 文本本身
@@ -35,7 +37,7 @@ impl Store {
     /// 某类的用户层文件。`key` 是一个路径分量（越界 / 非法 ⇒ Err）。
     pub fn charset_path(&self, key: &str) -> anyhow::Result<std::path::PathBuf> {
         wind_userdata::engine::check_schema_id(key)
-            .map_err(|_| anyhow::anyhow!("非法字符类 key：{key:?}"))?;
+            .map_err(|_| anyhow::anyhow!("非法字符分类 key：{key:?}"))?;
         Ok(self.charsets_dir().join(format!("{key}.yaml")))
     }
 

@@ -10,12 +10,10 @@ pub const USER_DICT_LIB: &str = "# 清风输入法 · 用户分库：自己整�
 pub const USER_DICTS_META: &str = "# 清风输入法 · 用户分库的开关（按方案）。可手动编辑。";
 pub const SHADOW: &str =
     "# 清风输入法 · 候选调整（置顶 / 删除）。可手动编辑；文件头（--- 到 ...）请勿修改。";
-pub const TEMP: &str =
-    "# 清风输入法 · 临时词库：自动学到、尚未转正的词。由程序自动维护，请勿手动修改。";
+pub const TEMP: &str = "# 清风输入法 · 临时词库：自动学到、尚未转正的词。可在设置里用「编辑文件」修改，编辑期间新学到的内容会在完成后合并；文件头（--- 到 ...）请勿修改。";
 pub const DRAFT: &str =
     "# 清风输入法 · 造词草稿：自动组出、尚未选用的词。由程序自动维护，请勿手动修改。";
-pub const FREQ: &str =
-    "# 清风输入法 · 词频：候选被选用的次数与时间。由程序自动维护，请勿手动修改。";
+pub const FREQ: &str = "# 清风输入法 · 词频：候选被选用的次数与时间。可在设置里用「编辑文件」修改，编辑期间新学到的内容会在完成后合并；文件头（--- 到 ...）请勿修改。";
 pub const ASSOC: &str = "# 清风输入法 · 联想历史。由程序自动维护，请勿手动修改。";
 pub const PHRASES: &str =
     "# 清风输入法 · 短语：用户短语与对系统短语的修改。可手动编辑；文件头（--- 到 ...）请勿修改。";
@@ -82,6 +80,9 @@ mod tests {
         PHRASE_SYS_HASH,
     ];
 
+    /// 程序也在高频写、只经「编辑文件」入口改的文件（临时词 / 词频）的统一后缀。
+    const EDIT_VIA_SESSION: &str = "可在设置里用「编辑文件」修改，编辑期间新学到的内容会在完成后合并；文件头（--- 到 ...）请勿修改。";
+
     #[test]
     fn every_line_follows_the_format() {
         for s in ALL {
@@ -91,13 +92,20 @@ mod tests {
                 [
                     "可手动编辑；文件头（--- 到 ...）请勿修改。",
                     "可手动编辑。",
-                    "由程序自动维护，请勿手动修改。"
+                    "由程序自动维护，请勿手动修改。",
+                    EDIT_VIA_SESSION,
                 ]
                 .iter()
                 .any(|t| s.ends_with(&format!("。{t}"))),
                 "{s}"
             );
         }
+    }
+
+    #[test]
+    fn editable_learned_lines_point_at_the_edit_entry() {
+        assert!(TEMP.ends_with(EDIT_VIA_SESSION));
+        assert!(FREQ.ends_with(EDIT_VIA_SESSION));
     }
 
     #[test]

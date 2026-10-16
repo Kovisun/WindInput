@@ -25,6 +25,10 @@ pub enum EditKind {
     Common,
     Charsets,
     UserDicts,
+    /// 临时词（`<数据方案>/temp.dict.yaml`）。
+    Temp,
+    /// 词频（`<数据方案>/freq.table.yaml`）。
+    Freq,
 }
 
 impl EditKind {
@@ -37,6 +41,8 @@ impl EditKind {
             EditKind::Common => "common_chars",
             EditKind::Charsets => "charsets",
             EditKind::UserDicts => "user_dicts",
+            EditKind::Temp => "temp",
+            EditKind::Freq => "freq",
         }
     }
 
@@ -49,6 +55,8 @@ impl EditKind {
             TextPath::Common => Some(EditKind::Common),
             TextPath::Charsets(_) => Some(EditKind::Charsets),
             TextPath::UserDicts(_) => Some(EditKind::UserDicts),
+            TextPath::Learned(Target::Temp, _) => Some(EditKind::Temp),
+            TextPath::Learned(Target::Freq, _) => Some(EditKind::Freq),
             TextPath::Learned(..) | TextPath::Completion | TextPath::Stats => None,
         }
     }
@@ -63,6 +71,8 @@ pub(crate) struct EditEntry {
     generation: u64,
     /// 分库 / 开关文件：开始时的内容指纹，end 据此判断变没变。
     fp: Option<String>,
+    /// 开始时解析出的类别：租约到期时 end 失败，凭它恢复写回。
+    tp: TextPath,
 }
 
 static NEXT_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -82,6 +92,8 @@ pub struct EditSession {
 
 #[derive(Debug)]
 pub struct EditResult {
+    /// 该文件的绝对路径。
+    pub path: PathBuf,
     /// 文件内容与上次载入的不同。
     pub changed: bool,
     /// 同 `dict.reload` 的返回：变了的项（调用方据此重建内存镜像）。
@@ -142,6 +154,10 @@ impl Store {
                     _ => crate::user_dicts::meta_path(root, s),
                 }
             }
+            TextPath::Learned(t @ (Target::Temp | Target::Freq), s) => {
+                wind_userdata::engine::check_schema_id(s)?;
+                self.learned_path(*t, s)
+            }
             TextPath::Learned(..) | TextPath::Completion | TextPath::Stats => {
                 anyhow::bail!("{} 由程序自动维护，不提供编辑", self.data_rel(&abs))
             }
@@ -193,7 +209,7 @@ impl Store {
             }
             TextPath::Charsets(_) => {
                 if !path.is_file() {
-                    anyhow::bail!("{file} 不存在：这个字符类还没有个人调整");
+                    anyhow::bail!("{file} 不存在：这个字符分类还没有个人调整");
                 }
             }
             TextPath::UserDicts(_) => {
@@ -210,7 +226,8 @@ impl Store {
                     anyhow::bail!("{file} 不存在");
                 }
             }
-            TextPath::Learned(..) | TextPath::Completion | TextPath::Stats => {}
+            TextPath::Learned(t, s) => self.prepare_learned_edit(*t, s)?,
+            TextPath::Completion | TextPath::Stats => {}
         }
         sessions.insert(
             path.clone(),
@@ -219,6 +236,7 @@ impl Store {
                 generation: next_generation(),
                 fp: matches!(tp, TextPath::UserDicts(_))
                     .then(|| crate::user_dicts::file_fingerprint(&path)),
+                tp: tp.clone(),
             },
         );
         info!("外部编辑开始：{file}");
@@ -243,6 +261,37 @@ impl Store {
         }
         ud.hold_text(Target::User, schema);
         Ok(())
+    }
+
+    /// 学到的数据（临时词 / 词频）：同用户词——先折回，没有文件就按空表新建，再暂停写回。
+    fn prepare_learned_edit(&self, target: Target, schema: &str) -> anyhow::Result<()> {
+        let ud = self.runtime().data();
+        ud.bind_by_rule(target, schema)?;
+        if ud.pending(target, schema) > 0
+            && let Err(e) = ud.fold_text(target, schema)
+        {
+            warn!("外部编辑前折回 {schema} 的数据失败：{e:#}");
+        }
+        if !self.learned_path(target, schema).is_file() {
+            let mut any = false;
+            ud.scan(target, schema, "", &mut |_| {
+                any = true;
+                false
+            });
+            if any {
+                anyhow::bail!("数据还没写成文件，请稍后再试");
+            }
+            ud.replace_text_entries(target, schema, Vec::new())?;
+        }
+        ud.hold_text(target, schema);
+        Ok(())
+    }
+
+    /// 临时词 / 词频的文件路径。
+    fn learned_path(&self, target: Target, schema: &str) -> PathBuf {
+        crate::learned_text::learned_binding(self.user_text_dir(), target, schema)
+            .map(|b| b.path)
+            .unwrap_or_else(|| self.user_text_dir().join(schema))
     }
 
     /// 结束外部编辑：按文件同步（同 `dict.reload` 带路径）→ 同步成功才删会话、恢复写回 →
@@ -272,8 +321,15 @@ impl Store {
             return;
         }
         sessions.remove(path);
-        if let TextPath::Words(s) = tp {
-            self.runtime().data().release_text(Target::User, s);
+        self.release_hold(tp);
+    }
+
+    /// 恢复该类文件的写回（用户词 / 临时词 / 词频；别的没有暂停）。
+    fn release_hold(&self, tp: &TextPath) {
+        match tp {
+            TextPath::Words(s) => self.runtime().data().release_text(Target::User, s),
+            TextPath::Learned(t, s) => self.runtime().data().release_text(*t, s),
+            _ => {}
         }
     }
 
@@ -312,6 +368,7 @@ impl Store {
             issues.len()
         );
         Ok(EditResult {
+            path: path.to_path_buf(),
             changed: !reloaded.is_empty(),
             reloaded,
             issues,
@@ -328,14 +385,18 @@ impl Store {
             .collect()
     }
 
-    /// 暂停写回中的用户词文件（`dict.flush` 据此报哪些没写回）。
+    /// 暂停写回中的文件（用户词 / 临时词 / 词频；`dict.flush` 据此报哪些没写回）。
     pub fn held_edit_files(&self) -> Vec<String> {
         self.runtime()
             .data()
             .held_texts()
             .into_iter()
-            .filter(|(t, _)| *t == Target::User)
-            .map(|(_, s)| self.data_rel(&self.user_text_path(&s)))
+            .filter_map(|(t, s)| match t {
+                Target::User => Some(self.user_text_path(&s)),
+                Target::Temp | Target::Freq => Some(self.learned_path(t, &s)),
+                _ => None,
+            })
+            .map(|p| self.data_rel(&p))
             .collect()
     }
 
@@ -371,6 +432,21 @@ impl Store {
         Ok(())
     }
 
+    /// 临时词 / 词频正在外部编辑（暂停写回）⇒ Err：界面的删除 / 清空 / 转正 / 导入先挡住。
+    pub(crate) fn check_learned_not_held(
+        &self,
+        target: Target,
+        schema: &str,
+    ) -> anyhow::Result<()> {
+        if self.runtime().data().is_held(target, schema) {
+            anyhow::bail!(
+                "正在外部编辑 {}，完成后再改",
+                self.data_rel(&self.learned_path(target, schema))
+            );
+        }
+        Ok(())
+    }
+
     pub fn set_edit_expired_hook(&self, hook: ChangedHook) {
         *self
             .edit_expired_hook
@@ -381,24 +457,24 @@ impl Store {
     /// 结束最后活动（开始 / 重复 begin、文件 mtime 取晚者）早于 `lease` 的会话（按 end 处理），
     /// 有变化就交给回调。返回结束的会话数。
     pub fn expire_edit_sessions(&self, lease: Duration) -> usize {
-        let sessions: Vec<(PathBuf, SystemTime)> = self
+        let sessions: Vec<(PathBuf, SystemTime, u64)> = self
             .edit_sessions
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .iter()
-            .map(|(p, e)| (p.clone(), e.active))
+            .map(|(p, e)| (p.clone(), e.active, e.generation))
             .collect();
-        let expired: Vec<PathBuf> = sessions
+        let expired: Vec<(PathBuf, u64)> = sessions
             .into_iter()
-            .filter(|(p, active)| {
+            .filter(|(p, active, _)| {
                 let saved = std::fs::metadata(p).and_then(|m| m.modified()).ok();
                 let last = saved.map_or(*active, |m| m.max(*active));
                 last.elapsed().unwrap_or_default() >= lease
             })
-            .map(|(p, _)| p)
+            .map(|(p, _, g)| (p, g))
             .collect();
         let mut changed: Vec<String> = Vec::new();
-        for p in &expired {
+        for (p, generation) in &expired {
             info!("外部编辑超过租约，自动结束：{}", self.data_rel(p));
             match self.end_edit(&p.to_string_lossy()) {
                 Ok(r) => {
@@ -408,7 +484,17 @@ impl Store {
                         }
                     }
                 }
-                Err(e) => warn!("自动结束外部编辑失败：{e:#}"),
+                Err(e) => {
+                    // 照样删会话、恢复写回：暂停不能比租约活得久（文件之后走隔离 / 退避）
+                    warn!("自动结束外部编辑失败，仍恢复写回：{e:#}");
+                    // 期间有人重新 begin（代次变了）⇒ 新会话继续，不动它
+                    let mut sessions = self.edit_sessions.lock().unwrap_or_else(|e| e.into_inner());
+                    if sessions.get(p).is_some_and(|e| e.generation == *generation)
+                        && let Some(e) = sessions.remove(p)
+                    {
+                        self.release_hold(&e.tp);
+                    }
+                }
             }
         }
         if !changed.is_empty() {
@@ -605,6 +691,132 @@ mod tests {
         assert!(after.contains("你好\tni hao\t9"), "{after}");
     }
 
+    /// 临时词 / 词频也能编辑：开始前折回、编辑期间暂停写回；界面的删除 / 清空 / 转正 / 导入挡住，
+    /// 学习照常、结束后合并进用户改过的文件；外部删掉的行不复活。
+    #[test]
+    fn temp_and_freq_sessions_hold_writes_and_merge_on_end() {
+        let s = open("learned");
+        s.learn_temp_word("pinyin", "nihao", "你好", 10, 0b101)
+            .unwrap();
+        s.learn_temp_word("pinyin", "shijie", "世界", 10, 0b1001)
+            .unwrap();
+        let sess = s.begin_edit("pinyin/temp.dict.yaml").unwrap();
+        assert_eq!(sess.kind.as_str(), "temp");
+        let text = std::fs::read_to_string(&sess.path).unwrap();
+        assert!(
+            text.contains("你好") && text.contains("世界"),
+            "begin 先折回：{text}"
+        );
+        let edited: String = text
+            .lines()
+            .filter(|l| !l.starts_with("世界"))
+            .map(|l| format!("{l}\n"))
+            .collect();
+        std::fs::write(&sess.path, &edited).unwrap();
+        s.learn_temp_word("pinyin", "ceshi", "测试", 1, 0b101)
+            .unwrap();
+        let ud = s.runtime().data();
+        ud.maintain_text_idle(std::time::Duration::ZERO).unwrap();
+        ud.compact().unwrap();
+        assert_eq!(std::fs::read_to_string(&sess.path).unwrap(), edited);
+        assert!(
+            s.held_edit_files()
+                .contains(&"pinyin/temp.dict.yaml".to_string())
+        );
+        for e in [
+            s.clear_temp_words("pinyin").map(|_| ()),
+            s.remove_temp_word("pinyin", "nihao", "你好"),
+            s.promote_temp_word("pinyin", "nihao", "你好").map(|_| ()),
+            s.import_temp_word_rows("pinyin", &[]).map(|_| ()),
+            s.import_temp_words_wdict("pinyin", "").map(|_| ()),
+        ] {
+            let e = e.unwrap_err().to_string();
+            assert!(e.contains("正在外部编辑 pinyin/temp.dict.yaml"), "{e}");
+        }
+        assert!(
+            s.remove_temp_word("wubi86", "a", "工").is_ok(),
+            "别的方案不受影响"
+        );
+        let r = s.end_edit("pinyin/temp.dict.yaml").unwrap();
+        assert!(r.changed);
+        let after = std::fs::read_to_string(&sess.path).unwrap();
+        assert!(after.contains("你好") && after.contains("测试"), "{after}");
+        assert!(!after.contains("世界"), "删掉的行不复活：{after}");
+        assert!(s.held_edit_files().is_empty());
+        s.remove_temp_word("pinyin", "nihao", "你好").unwrap();
+
+        s.record_freq("pinyin", "nihao", "你好").unwrap();
+        let sess = s.begin_edit("pinyin/freq.table.yaml").unwrap();
+        assert_eq!(sess.kind.as_str(), "freq");
+        assert!(
+            std::fs::read_to_string(&sess.path)
+                .unwrap()
+                .contains("你好")
+        );
+        s.record_freq("pinyin", "ceshi", "测试").unwrap();
+        for e in [
+            s.delete_freq("pinyin", "nihao", "你好"),
+            s.clear_freq("pinyin").map(|_| ()),
+            s.import_freq_rows("pinyin", &[]).map(|_| ()),
+            s.import_freq_jsonl("pinyin", "").map(|_| ()),
+        ] {
+            assert!(e.unwrap_err().to_string().contains("正在外部编辑"));
+        }
+        s.end_edit("pinyin/freq.table.yaml").unwrap();
+        assert!(
+            std::fs::read_to_string(&sess.path)
+                .unwrap()
+                .contains("测试")
+        );
+        s.delete_freq("pinyin", "nihao", "你好").unwrap();
+    }
+
+    /// 临时词 / 词频改坏了（整份解析不了）：结束时把问题带回，写回不往坏文件里写。
+    #[test]
+    fn learned_end_reports_broken_file() {
+        let s = open("learned_broken");
+        s.learn_temp_word("pinyin", "nihao", "你好", 10, 0b101)
+            .unwrap();
+        s.record_freq("pinyin", "nihao", "你好").unwrap();
+        for (f, bad) in [
+            ("pinyin/temp.dict.yaml", &b"\xff\xfe"[..]),
+            ("pinyin/freq.table.yaml", b"---\nbad: [\n...\n"),
+            ("pinyin/temp.dict.yaml", b"---\ncolumns: [a]\n...\nx\n"),
+        ] {
+            let sess = s.begin_edit(f).unwrap();
+            std::fs::write(&sess.path, bad).unwrap();
+            let r = s.end_edit(f).unwrap();
+            assert!(!r.issues.is_empty(), "{f}");
+            assert_eq!(std::fs::read(&sess.path).unwrap(), bad);
+        }
+        // 读不了（这里让它变成目录）：同样要报
+        s.record_freq("wubi86", "a", "工").unwrap();
+        let sess = s.begin_edit("wubi86/freq.table.yaml").unwrap();
+        std::fs::remove_file(&sess.path).unwrap();
+        std::fs::create_dir(&sess.path).unwrap();
+        let r = s.end_edit("wubi86/freq.table.yaml").unwrap();
+        assert!(!r.changed);
+        assert!(!r.issues.is_empty(), "{:?}", r.issues);
+        std::fs::remove_dir(&sess.path).unwrap();
+        let r = s.end_edit("wubi86/freq.table.yaml").unwrap();
+        assert!(r.issues.is_empty(), "又读得了就清掉：{:?}", r.issues);
+    }
+
+    /// 没用过的方案：临时词 / 词频 begin 按空表新建（带说明行）。
+    #[test]
+    fn learned_begin_creates_missing_file() {
+        let s = open("learned_new");
+        for (f, b) in [
+            ("wubi86/temp.dict.yaml", wind_userdata::text::banner::TEMP),
+            ("wubi86/freq.table.yaml", wind_userdata::text::banner::FREQ),
+        ] {
+            let sess = s.begin_edit(f).unwrap();
+            let text = std::fs::read_to_string(&sess.path).unwrap();
+            assert!(text.starts_with(b), "{text}");
+            s.end_edit(f).unwrap();
+        }
+    }
+
     /// 没有文件的方案：begin 按空表新建（带说明行）。
     #[test]
     fn words_begin_creates_missing_file() {
@@ -615,13 +827,13 @@ mod tests {
         s.end_edit("wubi86/user.dict.yaml").unwrap();
     }
 
-    /// 学到的数据、补全、统计由程序维护，不提供编辑；越界路径拒绝。
+    /// 草稿、联想历史、补全、统计由程序维护，不提供编辑；越界路径拒绝。
     #[test]
     fn machine_files_and_outside_paths_are_rejected() {
         let s = open("reject");
         for p in [
-            "pinyin/temp.dict.yaml",
-            "pinyin/freq.table.yaml",
+            "pinyin/draft.dict.yaml",
+            "pinyin/assoc.table.yaml",
             "completion.table.yaml",
             "stats/2026-10.toml",
         ] {
@@ -724,6 +936,26 @@ mod tests {
         assert!(s.held_edit_files().is_empty());
         assert!(fired.lock().unwrap().contains(&"phrases".to_string()));
         s.add_phrase("dz", "地址", 0, 1).unwrap();
+    }
+
+    /// 租约到期时结束失败（这里让会话的路径解析不了来模拟）也要删会话、恢复写回：否则暂停永远
+    /// 不放，delta 越积越多、压实被挡住。文件之后照常走隔离 / 退避。
+    #[test]
+    fn lease_expiry_releases_hold_even_if_end_fails() {
+        let s = open("lease_fail");
+        s.add_user_word("pinyin", "nihao", "你好", 9, 0b101)
+            .unwrap();
+        let sess = s.begin_edit("pinyin/user.dict.yaml").unwrap();
+        {
+            let mut m = s.edit_sessions.lock().unwrap();
+            let e = m.remove(&sess.path).unwrap();
+            m.insert(s.user_text_dir().join("../outside.yaml"), e);
+        }
+        assert!(s.user_words_held("pinyin"));
+        assert_eq!(s.expire_edit_sessions(std::time::Duration::ZERO), 1);
+        assert!(s.edit_sessions().is_empty());
+        assert!(!s.user_words_held("pinyin"));
+        assert!(s.held_edit_files().is_empty());
     }
 
     /// 租约从最后活动算：开始 / 重复 begin 的时刻与文件 mtime 取晚者。开始很久但刚保存过 ⇒ 不到期；
