@@ -1132,16 +1132,6 @@ mod tests {
             m.flags & SharedRenderHeader::FLAG_VISIBLE != 0
         }
 
-        fn no_text_frames(cap: &Arc<Mutex<Vec<Vec<u8>>>>) {
-            let v = cap.lock().unwrap();
-            for c in [CMD_STATUS_SHOW, CMD_TOAST_SHOW, CMD_TOOLTIP_SHOW] {
-                assert!(
-                    !v.iter().any(|f| cmd_of(f) == c),
-                    "Linux 不该发 macOS 文本帧 0x{c:04X}"
-                );
-            }
-        }
-
         fn status(f: &mut Forwarder, placement: StatusTipPlacement) {
             f.handle(UiCommand::ShowStatusTip {
                 text: "中".into(),
@@ -1165,7 +1155,6 @@ mod tests {
                     offset_y: 4,
                 },
             );
-            no_text_frames(&cap);
             let m = overlays(&cap, OVERLAY_KIND_STATUS);
             assert_eq!(m.len(), 1);
             let m = &m[0];
@@ -1231,7 +1220,6 @@ mod tests {
                 duration_ms: 2000,
                 accent: None,
             });
-            no_text_frames(&cap);
             let m = overlays(&cap, OVERLAY_KIND_TOAST);
             assert_eq!(m.len(), 1);
             assert!(visible(&m[0]));
@@ -1303,7 +1291,6 @@ mod tests {
                 "无悬停不发"
             );
             update(&mut f, 0);
-            no_text_frames(&cap);
             let (sx, sy, _) = last_render_frame(&cap).unwrap();
             let m = overlays(&cap, OVERLAY_KIND_TOOLTIP);
             assert_eq!(m.len(), 1);

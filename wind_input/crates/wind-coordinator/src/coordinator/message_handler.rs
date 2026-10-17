@@ -336,57 +336,6 @@ fn host_render_placed_log(body: &[u8]) -> Option<(bool, String)> {
     Some((band_was_wrong, line))
 }
 
-/// `shot.result` → Toast 文案。
-///
-/// 抽成纯函数是为了可测：这里全是措辞分支，而措辞正是**必须与 Windows 侧
-/// `manager.rs` 逐字一致**的东西——两平台同一操作得到不同说法是最没必要的分叉，
-/// 而这种分叉不会有任何编译或运行期信号。
-fn shot_result_message(v: &serde_json::Value) -> (String, ToastKind) {
-    let results = v.get("results").and_then(|r| r.as_array());
-    let ok = |r: &serde_json::Value| r.get("ok").and_then(|b| b.as_bool()) == Some(true);
-    if v.get("mode").and_then(|m| m.as_str()) == Some("all") {
-        // 「截图所有窗口」：本进程截的候选窗数量由请求原样带回，与 `.app` 这边的成功数
-        // 相加，合成**一条** Toast（各弹各的会连弹三四条）。
-        let n = v.get("already").and_then(|n| n.as_u64()).unwrap_or(0) as usize
-            + results.map_or(0, |a| a.iter().filter(|r| ok(r)).count());
-        let dir = v.get("dir").and_then(|d| d.as_str()).unwrap_or("");
-        if n == 0 {
-            return ("没有可见窗口可截图".to_string(), ToastKind::Info);
-        }
-        return if v.get("already_clipboard").and_then(|b| b.as_bool()) == Some(true) {
-            (
-                format!("已保存 {n} 张截图（候选已复制到剪贴板）\n{dir}"),
-                ToastKind::Success,
-            )
-        } else {
-            (format!("已保存 {n} 张截图\n{dir}"), ToastKind::Success)
-        };
-    }
-    // 单窗截图（气泡/提示自身右键菜单里的「截图此窗口」）。
-    let Some(r) = results.and_then(|a| a.first()) else {
-        return ("截图失败：无结果".to_string(), ToastKind::Error);
-    };
-    let label = match r.get("target").and_then(|t| t.as_str()) {
-        Some("tooltip") => "悬停提示",
-        _ => "状态提示气泡",
-    };
-    if ok(r) {
-        let path = r.get("path").and_then(|p| p.as_str()).unwrap_or("");
-        let suffix = if r.get("clipboard").and_then(|b| b.as_bool()) == Some(true) {
-            "（已复制到剪贴板）"
-        } else {
-            ""
-        };
-        (format!("{label}已截图{suffix}\n{path}"), ToastKind::Success)
-    } else {
-        match r.get("reason").and_then(|x| x.as_str()) {
-            // 不可见不是错误：用户在气泡消失之后才点的菜单，如实告知即可。
-            Some("not_visible") | None => (format!("{label}未显示，无法截图"), ToastKind::Info),
-            Some(e) => (format!("截图失败：{e}"), ToastKind::Error),
-        }
-    }
-}
-
 impl MessageHandler for Coordinator {
     /// 见 trait 文档：DLL/宿主新连接建立时的兜底刷新。真机复现（2026-08-17）：服务重启时
     /// alacritty.exe 早已在前台，管道重连只续发 `caret_update`，从没有新的 `FOCUS_GAINED`
@@ -629,13 +578,6 @@ impl MessageHandler for Coordinator {
                 Some((false, line)) => tracing::info!("{line}"),
                 None => tracing::warn!("diag.host_render_placed 载荷无法解析，忽略"),
             },
-            ext_kind::SHOT_RESULT => match serde_json::from_slice(body) {
-                Ok(v) => {
-                    let (msg, kind) = shot_result_message(&v);
-                    self.show_toast(&msg, ToastPosition::BottomRight, kind);
-                }
-                Err(e) => tracing::warn!("shot.result 载荷无法解析：{e}"),
-            },
             // Linux addon：右键候选 / 候选窗空白处 / Fcitx5 状态区入口请求打开自绘菜单。
             #[cfg(ext_presenter)]
             ext_kind::MENU_OPEN => match decode_menu_open(body) {
@@ -653,45 +595,6 @@ impl MessageHandler for Coordinator {
             }
             _ => tracing::debug!("未处理的扩展消息 kind={kind}"),
         }
-    }
-
-    /// macOS `.app` 候选右键动作：动作串 → 词条操作/复制，作用于页内下标候选。
-    fn handle_candidate_context_menu(&self, page_local_index: i32, action: &str) {
-        use wind_ui_types::{CandidateOp, UiCommand};
-        if page_local_index < 0 {
-            return;
-        }
-        let page_local = page_local_index as usize;
-        let op = match action {
-            "move_top" => CandidateOp::MoveTop,
-            "move_up" => CandidateOp::MoveUp,
-            "move_down" => CandidateOp::MoveDown,
-            "delete" => CandidateOp::Delete,
-            "reset_default" => CandidateOp::Reset,
-            "copy" => {
-                // 解析页内下标对应候选文本，交 UI 侧写剪贴板（macOS 走 popup_menu::set_clipboard_text）。
-                let text = {
-                    let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-                    let (start, end) = self.page_range(&state);
-                    let idx = start + page_local;
-                    if idx < end && idx < state.candidates.len() {
-                        state.candidates[idx].text.clone()
-                    } else {
-                        String::new()
-                    }
-                };
-                if !text.is_empty() {
-                    let _ = self.ui_tx.send(UiCommand::CopyToClipboard(text));
-                }
-                return;
-            }
-            other => {
-                tracing::debug!("handle_candidate_context_menu: 未知动作 {}", other);
-                return;
-            }
-        };
-        // 与 Windows / Linux 右键同一条分发：格式候选走格式调整、历史候选走删除历史，其余走词库。
-        self.candidate_or_quick_format_op(op, page_local);
     }
 
     /// Linux addon 报来的菜单指针事件（按键号：1 左 / 2 中 / 3 右）。菜单已关还收到事件 =
@@ -4848,66 +4751,6 @@ mod ext_envelope_tests {
         let c = coord();
         c.handle_candidate_scroll(-120);
         assert_eq!(c.state.lock().unwrap().selected_index, 0);
-    }
-
-    /// 「截图所有窗口」：两侧数量相加，合成一条 Toast。
-    ///
-    /// 分开弹是最容易写出来的实现，也是最烦人的——候选窗 + 气泡 + 提示 + Toast 全可见时
-    /// 会连弹四条通知。`already` 由服务端放进请求、`.app` 原样带回，就是为了不为这一次
-    /// 往返在任何一边留状态。
-    #[test]
-    fn shot_all_sums_both_sides_into_one_message() {
-        let v = serde_json::json!({
-            "mode": "all",
-            "dir": "/tmp/shots",
-            "already": 1,                    // 候选窗（服务进程截的）
-            "already_clipboard": true,
-            "results": [
-                {"target": "status_tip", "ok": true},
-                {"target": "tooltip", "ok": false, "reason": "not_visible"},
-                {"target": "toast", "ok": true},
-            ],
-        });
-        let (msg, kind) = super::shot_result_message(&v);
-        assert_eq!(msg, "已保存 3 张截图（候选已复制到剪贴板）\n/tmp/shots");
-        assert!(matches!(kind, ToastKind::Success));
-    }
-
-    /// 一个都没截到不是错误：用户可能就是在没有任何浮窗时点的菜单。
-    #[test]
-    fn shot_all_with_nothing_visible_is_info() {
-        let v = serde_json::json!({
-            "mode": "all", "already": 0, "dir": "/tmp",
-            "results": [{"target": "status_tip", "ok": false, "reason": "not_visible"}],
-        });
-        let (msg, kind) = super::shot_result_message(&v);
-        assert_eq!(msg, "没有可见窗口可截图");
-        assert!(matches!(kind, ToastKind::Info));
-    }
-
-    /// 单窗截图的三种结局：成功带路径、不可见（Info 不是 Error）、真失败。
-    #[test]
-    fn shot_single_wording_by_outcome() {
-        let mk = |r: serde_json::Value| {
-            super::shot_result_message(&serde_json::json!({ "results": [r] }))
-        };
-        let (msg, kind) = mk(serde_json::json!({
-            "target": "tooltip", "ok": true, "clipboard": true, "path": "/tmp/t.png"
-        }));
-        assert_eq!(msg, "悬停提示已截图（已复制到剪贴板）\n/tmp/t.png");
-        assert!(matches!(kind, ToastKind::Success));
-
-        let (msg, kind) = mk(serde_json::json!({
-            "target": "status_tip", "ok": false, "reason": "not_visible"
-        }));
-        assert_eq!(msg, "状态提示气泡未显示，无法截图");
-        assert!(matches!(kind, ToastKind::Info), "不可见不该报成错误");
-
-        let (msg, kind) = mk(serde_json::json!({
-            "target": "status_tip", "ok": false, "reason": "render_failed"
-        }));
-        assert_eq!(msg, "截图失败：render_failed");
-        assert!(matches!(kind, ToastKind::Error));
     }
 
     /// 缺字段 / 非整数 / 越界 / 不是 JSON —— 一律 None。

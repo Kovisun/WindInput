@@ -184,7 +184,7 @@ struct HostRenderFramePayload {
 std::optional<HostRenderFramePayload> decodeHostRenderFrame(const Bytes& p);
 
 /// CMD_OVERLAY_FRAME（push，仅 Linux）：一层浮层（状态气泡 / Toast / tooltip）有新帧或该隐藏。
-/// 像素在该层自己的 SHM 段（`overlayShmName(kind)`）。68 字节，逐字段对位 Rust
+/// 像素在该层自己的 SHM 段（`overlayShmName(kind)`）。68 字节基础布局（macOS 版末尾多一个 f32 scale，addon 不读），逐字段对位 Rust
 /// `codec.rs::encode_overlay_frame`：kind seq w h flags place（u32）、x y altX altY（i32）、
 /// anchor（u32）、margin contentX contentY（i32）、contentW contentH（u32）、durationMs（i32）。
 /// 坐标一律是**内容盒**左上（不含软阴影扩边）。

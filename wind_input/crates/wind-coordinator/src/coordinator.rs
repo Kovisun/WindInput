@@ -7447,12 +7447,6 @@ impl Coordinator {
             .candidate_shown
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = true;
-        // macOS：把当前页候选右键菜单的禁用位随候选更新一并推给 `.app`，供其右键即时灰显。
-        // Windows 的右键菜单在进程内 `show_candidate_menu` 实时算 enabled，不走此推送；
-        // Linux 的自绘菜单同样由服务端 `show_candidate_menu` 现算，addon 不认这一帧——
-        // 每次刷新候选都推一帧是白费（还要在持锁时逐候选查 shadow 规则）。
-        #[cfg(target_os = "macos")]
-        self.push_candidate_menu_flags(state, start, end);
         tracing::debug!(
             "notify_ui_update: build+send {:?} (n={n_items}) pos=({caret_x},{caret_y}) h={caret_height} \
              valid={caret_valid} anchor={anchor_source} raw=({cx},{cy}) hold={hold_anchor} \
@@ -7466,68 +7460,6 @@ impl Coordinator {
             anchor.1,
             anchor.2,
         );
-    }
-
-    /// macOS：计算当前页每候选的右键菜单禁用位并经 push 通道下发（CmdCandidateMenuFlags 0x0505）。
-    /// 位定义与 Swift CandidatePanel 对齐：0x01 上移 / 0x02 下移 / 0x04 置顶 / 0x08 删除 / 0x10 恢复默认。
-    /// 语义对齐进程内 `show_candidate_menu`（共用 candidate_delete_menu / candidate_op_scope 判定）：
-    /// 首项禁上移/置顶、末项禁下移；拼音普通候选禁全部调位；删除按候选来源判定；
-    /// 无 shadow 规则禁恢复默认；无词库落点整页全禁。
-    /// 注：macOS 端「删除」文案固定，来源动态文案（禁用短语/删除用户词…）待协议扩展后接入。
-    #[cfg(target_os = "macos")]
-    pub(crate) fn push_candidate_menu_flags(&self, state: &State, start: usize, end: usize) {
-        if !self.push_server.has_clients() || start >= end {
-            return;
-        }
-        let total = state.candidates.len();
-        // 无词库落点（无独立归属的 overlay / 空码浏览态）：整页全禁，只留复制——与 Windows 侧
-        // `show_candidate_menu` 的「仅复制」分支同一判据（见 `candidate_op_scope`）。
-        let Some(scope) = self.candidate_op_scope(state) else {
-            // 快捷输入历史候选例外：只放开「删除」（0x08），与 Windows 右键「删除此历史」同源。
-            let flags: Vec<u8> = state.candidates[start..end.min(total)]
-                .iter()
-                .map(|c| {
-                    if c.id == crate::quick_history::QUICK_HISTORY_ID {
-                        0x1F & !0x08
-                    } else {
-                        0x1F
-                    }
-                })
-                .collect();
-            self.push_server
-                .push_to_active(&wind_ipc::codec::encode_candidate_menu_flags(&flags));
-            return;
-        };
-        let schema = scope.schema;
-        let code = scope.code;
-        let is_pinyin = matches!(scope.engine_type, Some(wind_engine::EngineType::Pinyin));
-        let mut flags = Vec::with_capacity(end - start);
-        for idx in start..end.min(total) {
-            let cand = &state.candidates[idx];
-            let word = &cand.text;
-            let mut f = 0u8;
-            if idx == 0 {
-                f |= 0x01 | 0x04; // 首项：禁上移 + 禁置顶（已在首位，置顶是冗余规则）
-            }
-            if idx + 1 >= total {
-                f |= 0x02; // 末项：禁下移
-            }
-            // 拼音普通候选：禁全部调位（无稳定位置语义）；命令候选例外。
-            if is_pinyin && !cand.is_command {
-                f |= 0x01 | 0x02 | 0x04;
-            }
-            let (_, deletable) = crate::handle_menu::candidate_delete_menu(cand);
-            if !deletable {
-                f |= 0x08;
-            }
-            let cand_id = (!cand.id.is_empty()).then_some(cand.id.as_str());
-            if !self.shadow_has_rule(&schema, &code, word, cand_id) {
-                f |= 0x10; // 无 shadow 规则：禁恢复默认
-            }
-            flags.push(f);
-        }
-        self.push_server
-            .push_to_active(&wind_ipc::codec::encode_candidate_menu_flags(&flags));
     }
 
     pub(crate) fn notify_ui_hide(&self) {
