@@ -266,7 +266,7 @@ void ResponseRouter::flushPendingPrefix(TextSink* sink)
 
 void ResponseRouter::clearPreeditIfAny(TextSink* sink)
 {
-    // 上屏之后再调：先清空预编辑再 CommitString 的顺序见 applyCommitText。
+    // 上屏之后再调；为什么不能反过来见 applyCommitText。
     if (!compositionText_.empty() && sink) {
         sink->setPreedit("", 0);
     }
