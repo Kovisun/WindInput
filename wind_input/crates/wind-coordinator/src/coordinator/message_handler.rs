@@ -1650,6 +1650,15 @@ impl MessageHandler for Coordinator {
             // Escape：取消整个组合（含已转换前缀），不上屏。实现收口在 `cancel_session`
             // ——`keys.session_actions` 里绑 `cancel` 的键走的是同一个函数，两条通路
             // 行为必然一致。
+            //
+            // 没有会话（也没挂着待定标点）时交还宿主：Linux / macOS 没有 TSF 那道前置闸门，
+            // 每个键都会到这里，空闲 Esc 若照样回 ClearComposition 就被吞掉（GH#209：
+            // 浏览器 Vimium 收不到 Esc）。
+            keymap::VK_ESCAPE
+                if !Self::has_input_session(&state) && self.live_held_text().is_none() =>
+            {
+                KeyAction::PassThrough
+            }
             keymap::VK_ESCAPE => self.cancel_session(&mut state),
             keymap::VK_BACK => {
                 // 联想态：收掉候选并结束占位组合。**必须先于下面的既有分支**——那些分支
