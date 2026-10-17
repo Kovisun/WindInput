@@ -1093,9 +1093,15 @@ impl PinyinEngine {
     /// 同时把「错音串」注册进切分层：模糊变体是在切分**之后**逐音节展开的，`tin`
     /// （想打 `ting`）这类本身不成音节的串若在图上没有边，`tinzhi` 最远只能切到 `ti`，
     /// 整条模糊链路一次都不会被执行。见 [`fuzzy::fuzzy_spellings`]。
-    pub fn with_fuzzy(mut self, fuzzy: FuzzyConfig) -> Self {
+    ///
+    /// 双拼同键音节（[`FuzzyConfig::shared_key`]）属于布局、由 [`Self::with_shuangpin`] 注入，
+    /// 用户模糊配置里没有这项：传入的为空时沿用已注入的那份，两个 builder 谁先调都不丢。
+    pub fn with_fuzzy(mut self, mut fuzzy: FuzzyConfig) -> Self {
         self.trie
             .load_fuzzy_spellings(&fuzzy::fuzzy_spellings(&fuzzy));
+        if fuzzy.shared_key.is_empty() {
+            fuzzy.shared_key = std::mem::take(&mut self.fuzzy_config.shared_key);
+        }
         self.fuzzy_config = fuzzy;
         self
     }
@@ -1113,8 +1119,12 @@ impl PinyinEngine {
     ///
     /// 码元字符集在此一并算定（见 [`Layout::code_char_set`]）：布局是引擎的构造参数，
     /// 换布局＝重建引擎，故字段与引擎同生命周期，不会像按方案 id 缓存那样有失效时机问题。
+    ///
+    /// 同键韵母的等价音节也在此推出（见 [`ShuangpinConverter::shared_key_syllables`]），
+    /// 并进模糊音展开、零罚分。全拼方案不走这里，故不产生这些对。
     pub fn with_shuangpin(mut self, conv: ShuangpinConverter) -> Self {
         self.input_chars = conv.layout().code_char_set();
+        self.fuzzy_config.shared_key = conv.shared_key_syllables();
         self.shuangpin = Some(conv);
         self
     }
@@ -2190,7 +2200,7 @@ impl PinyinEngine {
     ///
     /// fuzzy 全 false 时 fuzzy_variants 返回空 → 天然退化为纯 `dict.search`（无需 enabled 判断）。
     /// 返回 `(text, weight, order, is_fuzzy)`：原 code 精确命中 is_fuzzy=false；
-    /// 模糊变体命中 is_fuzzy=true（供排序时整体降到精确候选之后）。
+    /// 模糊变体命中 is_fuzzy=true、按处数打折扣；双拼同键音节（0 处）命中不罚也不标。
     fn lookup_with_fuzzy(&self, code: &str, syllables: &[String]) -> Vec<LookupHit> {
         // 精确匹配：候选码即查询码 `code`，故词典 boundary 与之同域，可直接采信。
         // 注意此处必须用 search_with_boundary——拼音引擎直接持有 CachedDict、不经
@@ -2226,7 +2236,8 @@ impl PinyinEngine {
                         // （`sen`→`sheng` 计 2 处），多音节按各音节处数累加。
                         weight: fuzzy_penalized(h.weight, edits),
                         order: h.order,
-                        is_fuzzy: true,
+                        // 双拼同键音节计 0 处：不罚、也不标模糊（各处「非模糊」准入照常放行）。
+                        is_fuzzy: edits > 0,
                         boundary: 0,
                         dict: Some((variant.clone(), h.boundary)),
                     });
@@ -2285,7 +2296,7 @@ impl PinyinEngine {
                 c.code = code.to_string();
                 c.boundary = 0;
                 c.weight = fuzzy_penalized(c.weight, edits);
-                c.is_fuzzy = true;
+                c.is_fuzzy = edits > 0;
                 out.push(c);
             }
         }
@@ -5236,6 +5247,49 @@ mod tests {
         );
     }
 
+    /// 双拼同键音节对用户词同样零罚：step 6 的 store 召回与整句词图的用户词模糊节点。
+    #[test]
+    fn shuangpin_shared_key_recalls_user_words_without_penalty() {
+        let layout = r#"
+[meta]
+id = "shared"
+name = "同键测试"
+[finals]
+q = ["iu", "ui"]
+m = ["ian"]
+i = ["i"]
+"#;
+        let conv = ShuangpinConverter::new(Layout::from_toml_str(layout).unwrap());
+        let mut eng = engine_with_user_words_fuzzy(
+            "sp_shared_user",
+            // 边界：dui|lian = 位 0、3；ni = 位 0。整句节点要求有真值边界。
+            &[("duilian", "对联", 0b1001), ("ni", "你", 0b1)],
+            FuzzyConfig::default(),
+        )
+        .with_shuangpin(conv);
+        // 先关整句：否则整句词图那条会先产出同文候选、盖住 step 6 召回的标记。
+        eng.config.use_smart_compose = false;
+        let r = eng.convert("dqlm", 20).unwrap();
+        let c = r
+            .candidates
+            .iter()
+            .find(|c| c.text == "对联")
+            .unwrap_or_else(|| {
+                panic!(
+                    "dqlm 应召回用户词「对联」: {:?}",
+                    r.candidates.iter().map(|c| &c.text).collect::<Vec<_>>()
+                )
+            });
+        assert!(!c.is_fuzzy && c.weight >= 500, "零罚不标模糊: {c:?}");
+        eng.config.use_smart_compose = true;
+        let r = eng.convert("dqlmni", 20).unwrap();
+        assert!(
+            r.candidates.iter().any(|c| c.text == "对联你"),
+            "整句须用上用户词的对端读音: {:?}",
+            r.candidates.iter().map(|c| &c.text).collect::<Vec<_>>()
+        );
+    }
+
     /// 手动分隔符、单音节、双音节、仅部分音节模糊，都应召回。
     #[test]
     fn fuzzy_user_word_recall_covers_separator_and_short_words() {
@@ -6108,6 +6162,61 @@ mod tests {
         };
         let eng = PinyinEngine::new(Config::default(), dict).with_fuzzy(fz);
         assert!(eng.fuzzy_zh_z(), "with_fuzzy 注入的 zh_z=true 应被引擎持有");
+    }
+
+    /// 同键韵母（`q = ["iu", "ui"]`）：`dq` 两个读音的字都出、都不罚不标模糊，
+    /// 用户一个模糊组都没开也生效；多音节里对端读音同样召回。全拼方案不产生这些对。
+    #[test]
+    fn shuangpin_shared_key_finals_recall_both_readings() {
+        let layout_toml = r#"
+[meta]
+id = "shared"
+name = "同键测试"
+[finals]
+q = ["iu", "ui"]
+m = ["ian"]
+i = ["i"]
+"#;
+        let dict = || {
+            let mut raw = CodetableDict::empty();
+            raw.merge_single("ni".to_string(), "你".to_string(), 300, 3);
+            raw.merge_single("diu".to_string(), "丢".to_string(), 100, 0);
+            raw.merge_single("dui".to_string(), "对".to_string(), 300, 1);
+            raw.merge_single("duilian".to_string(), "对联".to_string(), 200, 2);
+            CachedDict::Memory(raw)
+        };
+        let conv = ShuangpinConverter::new(Layout::from_toml_str(layout_toml).unwrap());
+        // 先挂双拼再挂模糊音（与 manager 相反的顺序），同键音节不得被冲掉。
+        let eng = PinyinEngine::new(Config::default(), dict())
+            .with_shuangpin(conv)
+            .with_fuzzy(FuzzyConfig::default());
+        let r = eng.convert("dq", 10).unwrap();
+        let find = |t: &str| r.candidates.iter().find(|c| c.text == t);
+        let dui = find("对").expect("dq 应出 dui 的字");
+        assert_eq!(dui.weight, 300, "同键对端零罚");
+        assert!(!dui.is_fuzzy, "同键对端不标模糊");
+        assert!(find("丢").is_some(), "首个读音照出");
+        assert_eq!(r.candidates[0].text, "对", "两种读音按词频平等竞争");
+
+        let r = eng.convert("dqlm", 10).unwrap();
+        let dl = r.candidates.iter().find(|c| c.text == "对联");
+        assert!(
+            dl.is_some_and(|c| !c.is_fuzzy && c.consumed_length == 4),
+            "多音节里对端读音也要召回: {:?}",
+            r.candidates.iter().map(|c| &c.text).collect::<Vec<_>>()
+        );
+        // 整句词图的模糊节点路径（`any_enabled` 把关）：没有整词，只能由「对」+「你」组句。
+        let r = eng.convert("dqni", 10).unwrap();
+        assert!(
+            r.candidates.iter().any(|c| c.text == "对你"),
+            "整句须用上对端读音: {:?}",
+            r.candidates.iter().map(|c| &c.text).collect::<Vec<_>>()
+        );
+
+        let full = PinyinEngine::new(Config::default(), dict());
+        assert!(full.fuzzy_config.shared_key.is_empty(), "全拼不产生同键对");
+        let r = full.convert("diu", 10).unwrap();
+        assert!(!r.candidates.iter().any(|c| c.text == "对"));
     }
 
     /// Task 4.1 TDD Step 2：多音节双拼——consumed_length 必须回算为双拼键数，

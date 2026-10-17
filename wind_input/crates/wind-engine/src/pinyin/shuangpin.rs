@@ -443,6 +443,44 @@ impl ShuangpinConverter {
         results
     }
 
+    /// 同键韵母推出的等价音节（喂给 [`FuzzyConfig::shared_key`]，零罚分展开）。
+    ///
+    /// `convert` 对一个键对只交出 `syllables[0]` 一条全拼：自定义布局把两个韵母放在同一个
+    /// 韵母键上（`q = ["iu", "ui"]`）时，`dq` 算得出 `diu`、`dui` 两个合法音节，后者却被
+    /// 丢掉。这里把「同一声母键 + 同一韵母键得到的全部合法音节」两两配对，交给拼音引擎
+    /// 按模糊音那套机制展开回来。
+    ///
+    /// 只看常规「声母 + 韵母」那一路（[`Self::convert_pair_inner`] 第 2 步、不带模糊对偶
+    /// 声母）：零声母路径与 `zero_pairs` 不造对。按**音节**而非韵母字面配对，ü 归一化
+    /// （`jv` → `ju`）后的拼写因此与引擎侧一致。
+    pub fn shared_key_syllables(&self) -> HashMap<String, Vec<String>> {
+        let mut out: HashMap<String, Vec<String>> = HashMap::new();
+        for initial in self.layout.initials.values() {
+            for finals in self.layout.finals.values() {
+                let mut syls: Vec<String> = Vec::new();
+                for f in finals {
+                    let syl = normalize_pinyin(&format!("{initial}{f}"));
+                    if self.is_valid(&syl) && !syls.contains(&syl) {
+                        syls.push(syl);
+                    }
+                }
+                for a in &syls {
+                    for b in syls.iter().filter(|b| *b != a) {
+                        let partners = out.entry(a.clone()).or_default();
+                        if !partners.contains(b) {
+                            partners.push(b.clone());
+                        }
+                    }
+                }
+            }
+        }
+        // 键表是 HashMap，排一次序让展开顺序（进而组合上限的截断）不随哈希漂移。
+        for partners in out.values_mut() {
+            partners.sort();
+        }
+        out
+    }
+
     /// 检查一个完整音节是否匹配给定的韵母键（对齐 Go matchesFinal）。
     fn matches_final(&self, syllable: &str, final_key: u8) -> bool {
         let finals = self.layout.finals_of(final_key);
@@ -1359,6 +1397,68 @@ mod converter_tests {
         assert!(results.is_empty(), "fuzzy 关时 s+l 应为空: {results:?}");
     }
 
+    /// 同键韵母：`q = ["iu", "ui"]` 时 `dq` 两个读音互为对端；`w` 上 `ia`/`o` 同键时
+    /// `lw` 得 `lia`/`lo`。零声母引导键不造对（`o` 不会和 `ia` 配上）。
+    const SHARED_KEY: &str = r#"
+[meta]
+id = "shared"
+name = "同键测试"
+[finals]
+q = ["iu", "ui"]
+w = ["ia", "ua", "o"]
+f = ["en"]
+[zero_initials]
+o = ["o", "ou"]
+"#;
+
+    #[test]
+    fn shared_key_syllables_pairs_same_key_finals() {
+        let c = ShuangpinConverter::new(Layout::from_toml_str(SHARED_KEY).unwrap());
+        let m = c.shared_key_syllables();
+        assert_eq!(m.get("diu"), Some(&vec!["dui".to_string()]));
+        assert_eq!(m.get("dui"), Some(&vec!["diu".to_string()]));
+        assert_eq!(m.get("lia"), Some(&vec!["lo".to_string()]));
+        assert_eq!(m.get("lo"), Some(&vec!["lia".to_string()]));
+        assert!(!m.contains_key("o"), "零声母路径不造对: {:?}", m.get("o"));
+        // 只有一个合法音节的键对不进表（`gua` 的 g+w：gia/go 都不成音节）。
+        assert!(!m.contains_key("gua"), "{:?}", m.get("gua"));
+        assert!(!m.contains_key("den"));
+        // 转换器本身行为不变：仍只交出首个读音，其余靠引擎展开。
+        assert_eq!(c.convert("dq").full_pinyin, "diu");
+    }
+
+    /// 每个韵母键只放一个韵母的布局不产生任何对（出厂布局的情形见下一个用例）。
+    #[test]
+    fn shared_key_syllables_empty_for_single_final_keys() {
+        let single = r#"
+[meta]
+id = "single"
+name = "单韵母键"
+[finals]
+q = ["iu"]
+v = ["ui"]
+"#;
+        let c = ShuangpinConverter::new(Layout::from_toml_str(single).unwrap());
+        assert!(c.shared_key_syllables().is_empty());
+    }
+
+    /// 出厂布局的同键情形全集（改布局时看这里知道影响面）：各布局 `lo` 键对的 luo/lo，
+    /// 首道 `dk` 的 den/dia。新增一处就是多出一组零罚分读音，须评估排序。
+    #[test]
+    fn builtin_layouts_shared_key_inventory() {
+        for id in all_builtin_ids() {
+            let m = conv(&id).shared_key_syllables();
+            let mut keys: Vec<&str> = m.keys().map(String::as_str).collect();
+            keys.sort_unstable();
+            let want: &[&str] = if id == "shoudao" {
+                &["den", "dia", "lo", "luo"]
+            } else {
+                &["lo", "luo"]
+            };
+            assert_eq!(keys, want, "{id}: {m:?}");
+        }
+    }
+
     fn initials_fuzzy() -> FuzzyConfig {
         FuzzyConfig {
             zh_z: true,
@@ -1383,6 +1483,7 @@ mod converter_tests {
             uan_uang: true,
             un_ong: true,
             eng_ong: true,
+            ..Default::default()
         }
     }
 

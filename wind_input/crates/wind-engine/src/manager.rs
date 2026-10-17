@@ -6716,6 +6716,8 @@ impl EngineManager {
                 uan_uang: pg.fuzzy.enabled && pg.fuzzy.uan_uang,
                 un_ong: pg.fuzzy.enabled && pg.fuzzy.un_ong,
                 eng_ong: pg.fuzzy.enabled && pg.fuzzy.eng_ong,
+                // 双拼同键音节不来自用户配置，由 `with_shuangpin` 从布局推出。
+                ..Default::default()
             };
             let pcfg = PinyinConfig {
                 use_smart_compose: pg.use_smart_compose,
