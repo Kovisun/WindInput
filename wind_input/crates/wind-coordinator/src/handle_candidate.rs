@@ -1918,13 +1918,16 @@ impl Coordinator {
         if !ct.auto_commit_at_full {
             return None;
         }
-        // 无「满码」概念的引擎（拼音 / 双拼，`max_code_length` 为 0）**整体不参与**（论坛 t308）。
+        // 无「满码」概念的引擎（拼音 / 双拼）**整体不参与**（论坛 t308）。
         //
         // 开关读的是 `schema.codetable`，拼音方案照样继承全局那一份；而下面的最短码长闸在码长
         // 为 0 时恒放行 ⇒ 只剩「唯一候选」一道闸。双拼关掉简拼后，`ofa` 这类码没有任何拼音
         // 候选，直通命令 `$CC(…ime.schema…)` 成了唯一一条，打完第三码当场执行。简拼开着时
         // 不触发只是碰巧多了一条简拼候选，换个无拼音解的码照样中招。
-        if self.engine_mgr.active_max_code_length() == 0 {
+        //
+        // ⚠️ 必须问满码长而不是 `active_max_code_length`：后者对混输刻意为 0，用它会把混输
+        // 一并拦下（v0.126.0 的回归）。
+        if self.engine_mgr.active_full_code_length() == 0 {
             return None;
         }
         // 最短码长闸：与引擎 decide_auto_commit 的 `input.chars().count() < min_len` 同构。
@@ -2051,7 +2054,7 @@ impl Coordinator {
     fn phrase_auto_commit_min_len(&self, ct: &wind_config::CodetableGlobal) -> usize {
         resolve_auto_commit_min_len(
             ct.auto_commit_min_len,
-            self.engine_mgr.active_max_code_length(),
+            self.engine_mgr.active_full_code_length(),
         )
     }
 

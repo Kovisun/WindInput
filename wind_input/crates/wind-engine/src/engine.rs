@@ -448,8 +448,9 @@ pub trait Engine: Send + Sync {
     /// 通配用的码长（spec §10）：协调器据此判「满码后通配键按字面」与混输「超码长整串字面」。
     /// 默认即 [`Self::max_code_length`]；混输返回主码表的码长。
     ///
-    /// ⚠️ 与 `max_code_length` 分开是有意的：混输的 `max_code_length` 刻意为 0，它还决定
-    /// 协调器的短语自动上屏门槛（`phrase_auto_commit_min_len`），代理过去会连带改变那条行为。
+    /// ⚠️ 与 `max_code_length` 分开是有意的：混输的 `max_code_length` 刻意为 0，代理过去会
+    /// 连带改变依赖它的那些判据。协调器要「混输按主码表算」时走
+    /// `EngineManager::active_full_code_length`（即本值）。
     fn wildcard_code_length(&self) -> usize {
         self.max_code_length()
     }

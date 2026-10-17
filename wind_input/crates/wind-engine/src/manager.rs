@@ -3334,6 +3334,14 @@ impl EngineManager {
             .convert_reverse(input, pattern, max_candidates)
     }
 
+    /// 活跃方案的满码长：码表取其码长，混输取主码表的，拼音 / 双拼为 0（无「满码」）。
+    ///
+    /// 与 [`Self::active_max_code_length`] 只差在混输：那个值对混输刻意为 0。短语自动上屏
+    /// 的「是否参与」与最短码长都按本值判，混输才和它的主码表同口径。
+    pub fn active_full_code_length(&self) -> usize {
+        self.active_wildcard_code_length()
+    }
+
     /// 活跃方案的通配码长（[`Engine::wildcard_code_length`]；混输取主码表的）。
     /// 协调器判「满码后通配键按字面」只从这里取，**不**用 [`Self::active_max_code_length`]
     /// ——混输那个值刻意为 0。
