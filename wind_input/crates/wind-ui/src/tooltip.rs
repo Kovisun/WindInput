@@ -1041,7 +1041,15 @@ impl Tooltip {
             content_w: cw,
             content_h: ch,
             software_shadow: has_shadow,
-            place: ol::tooltip_place(row, (cw, ch), beside),
+            place: ol::tooltip_place(
+                row,
+                (
+                    ol::to_host(cw as f32, self.scale) as u32,
+                    ol::to_host(ch as f32, self.scale) as u32,
+                ),
+                beside,
+            ),
+            scale: self.scale,
         })
     }
 

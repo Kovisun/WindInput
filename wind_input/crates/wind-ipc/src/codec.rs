@@ -1786,7 +1786,7 @@ pub fn encode_toast_hide() -> Vec<u8> {
 }
 
 /// [`CMD_OVERLAY_FRAME`] 的元数据（像素在该层的 SHM 段里）。枚举值见 [`crate::protocol::overlay`]。
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct OverlayFrameMeta {
     pub kind: u32,
     /// 该层 SHM 段写帧后的序号；隐藏帧同样写段（`write_hidden`）后取号。
@@ -1813,12 +1813,19 @@ pub struct OverlayFrameMeta {
     pub content_h: u32,
     /// 自动隐藏时长；`0` = 常驻，直到下一帧或隐藏帧。计时归宿主（同 macOS `.app`）。
     pub duration_ms: i32,
+    /// 位图像素 / 宿主坐标单位。Linux 宿主坐标就是像素（恒 1.0，addon 不读这个字段）；macOS 坐标是点、
+    /// 位图是 `scale` 倍的像素，`.app` 据此把位图尺寸与内容盒折回点。`0.0` = 未设，按 1 处理。
+    pub scale: f32,
 }
 
-/// CmdOverlayFrame (0x0513, 68B)：kind seq w h flags place（u32）+ x y alt_x alt_y（i32）+ anchor（u32）
-/// + margin content_x content_y（i32）+ content_w content_h（u32）+ duration_ms（i32），均小端。
+/// CmdOverlayFrame (0x0513, 72B)，均小端：
+///
+/// kind seq w h flags place（u32）+ x y alt_x alt_y（i32）+ anchor（u32）+ margin content_x content_y
+/// （i32）+ content_w content_h（u32）+ duration_ms（i32）+ scale（f32）。
+///
+/// 前 68 字节是 Linux addon 认的基础布局（它只要求 ≥ 68），末尾 `scale` 供 macOS `.app` 读。
 pub fn encode_overlay_frame(m: &OverlayFrameMeta) -> Vec<u8> {
-    let mut p = Vec::with_capacity(68);
+    let mut p = Vec::with_capacity(72);
     for v in [m.kind, m.seq, m.width, m.height, m.flags, m.place] {
         p.extend_from_slice(&v.to_le_bytes());
     }
@@ -1833,6 +1840,7 @@ pub fn encode_overlay_frame(m: &OverlayFrameMeta) -> Vec<u8> {
         p.extend_from_slice(&v.to_le_bytes());
     }
     p.extend_from_slice(&m.duration_ms.to_le_bytes());
+    p.extend_from_slice(&m.scale.to_le_bytes());
     frame(CMD_OVERLAY_FRAME, p)
 }
 
@@ -1979,7 +1987,7 @@ mod darwin_push_tests {
     }
 
     #[test]
-    fn overlay_frame_layout_is_68_bytes_le() {
+    fn overlay_frame_layout_is_72_bytes_le() {
         let f = encode_overlay_frame(&OverlayFrameMeta {
             kind: 2,
             seq: 9,
@@ -1998,8 +2006,9 @@ mod darwin_push_tests {
             content_w: 110,
             content_h: 30,
             duration_ms: 1500,
+            scale: 2.0,
         });
-        assert_eq!(f.len(), 8 + 68);
+        assert_eq!(f.len(), 8 + 72);
         assert_eq!(cmd_of(&f), CMD_OVERLAY_FRAME);
         let p = &f[8..];
         let u = |o: usize| u32::from_le_bytes(p[o..o + 4].try_into().unwrap());
@@ -2013,6 +2022,7 @@ mod darwin_push_tests {
         assert_eq!((i(44), i(48), i(52)), (16, 3, 4));
         assert_eq!((u(56), u(60)), (110, 30));
         assert_eq!(i(64), 1500);
+        assert_eq!(f32::from_le_bytes(p[68..72].try_into().unwrap()), 2.0);
     }
 
     #[test]

@@ -707,15 +707,15 @@ impl StatusTip {
                 caret_bottom,
                 caret_h,
                 (offset_x, offset_y),
-                ch,
-                (4.0 * s).round() as i32,
+                ol::to_host(ch as f32, s) as u32,
+                ol::to_host(4.0 * s, s),
             ),
             StatusTipPlacement::Fixed { x: fx, y: fy } => {
                 ol::status_fixed_place(fx, fy, x, caret_bottom)
             }
             StatusTipPlacement::Anchor(a) => ol::Place::Anchor {
                 anchor: ol::status_anchor_code(a),
-                margin: (ANCHOR_MARGIN_DP * s).round() as i32,
+                margin: ol::to_host(ANCHOR_MARGIN_DP * s, s),
             },
         };
         Some(ol::Overlay {
@@ -728,6 +728,7 @@ impl StatusTip {
             content_h: ch,
             software_shadow: has_shadow,
             place,
+            scale: s,
         })
     }
 }

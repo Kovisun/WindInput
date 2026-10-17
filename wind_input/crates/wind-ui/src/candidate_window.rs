@@ -2103,11 +2103,13 @@ impl CandidateWindow {
     ) -> Option<crate::overlay_host::Overlay> {
         let (code, r, hover) = self.tooltip_target()?;
         let beside = self.vertical || self.rotated;
+        // 命中矩形是位图像素，`(wx, wy)` 是宿主坐标单位（macOS 为点），先折成同一单位。
+        let u = |px: f32| crate::overlay_host::to_host(px, self.scale);
         let row = (
-            wx + r.x as i32,
-            wy + r.y as i32,
-            wx + (r.x + r.w) as i32,
-            wy + (r.y + r.h) as i32,
+            wx + u(r.x),
+            wy + u(r.y),
+            wx + u(r.x + r.w),
+            wy + u(r.y + r.h),
         );
         self.tooltip
             .as_mut()?

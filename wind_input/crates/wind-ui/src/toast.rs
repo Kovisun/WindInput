@@ -166,8 +166,9 @@ impl Toast {
             software_shadow: has_shadow,
             place: ol::Place::Anchor {
                 anchor: ol::toast_anchor_code(pos),
-                margin: (12.0 * self.scale).round() as i32,
+                margin: ol::to_host(12.0 * self.scale, self.scale),
             },
+            scale: self.scale,
         })
     }
 

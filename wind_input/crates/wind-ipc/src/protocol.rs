@@ -259,9 +259,9 @@ pub const CMD_KEY_SEQ: u16 = 0x050F; // comboCount u32 + comboCount×combo
 pub const CMD_KEY_HOLD: u16 = 0x0510; // 单个 combo（按下保持）
 pub const CMD_KEY_RELEASE: u16 = 0x0511; // 单个 combo（抬起）
 pub const CMD_KEY_TYPE: u16 = 0x0512; // 整段 UTF-8 文本（无长度前缀），.app 走 insertText 上屏
-/// 光栅浮层帧（**仅 Linux** Fcitx5 addon）：状态气泡 / Toast / 悬停提示由服务进程光栅化进
-/// 各自的 SHM 段（`endpoint::overlay_shm_name`），本帧通知「某一层有新帧 / 该隐藏」并带上
-/// 落位规则。macOS `.app` 原生渲染这三者、仍收文本帧（`CMD_STATUS_SHOW` 等），从不收本帧。
+/// 光栅浮层帧（外部宿主：macOS `.app` / Linux Fcitx5 addon）：状态气泡 / Toast / 悬停提示 /
+/// 自绘菜单由服务进程光栅化进各自的 SHM 段（`endpoint::overlay_shm_name`），本帧通知「某一层
+/// 有新帧 / 该隐藏」并带上落位规则。
 /// 布局见 [`crate::codec::encode_overlay_frame`]，常量见 [`overlay`]。
 pub const CMD_OVERLAY_FRAME: u16 = 0x0513;
 
