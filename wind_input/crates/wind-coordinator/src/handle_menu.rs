@@ -1655,12 +1655,6 @@ impl Coordinator {
         // 高级子菜单：截图等不常用功能 + 打开各数据目录（分隔线独立成组）
         #[allow(unused_mut)]
         let mut advanced_children = vec![
-            // Linux 摘掉：这一项除了存候选窗，还要宿主截状态气泡 / 悬停提示 / Toast 并回报
-            // （`shot.panel` → `shot.result`），结果 Toast 由那条回报触发。addon 不接
-            // `shot.panel`（浮层像素其实在服务进程，但截图流程是按 macOS「像素在宿主」写的），
-            // 于是点了只悄悄存一张候选图、永远等不到反馈——比没有这一项更糟。
-            // 下面「截图候选窗口到剪贴板」在 Linux 是完整可用的，保留。
-            #[cfg(not(all(target_os = "linux", ext_presenter)))]
             M::leaf(
                 "截图所有窗口到文件",
                 cmd(MenuCmd::TakeScreenshot),
@@ -4450,7 +4444,7 @@ mod compat_reload_tests {
 }
 
 /// Linux 自绘菜单的协调器一侧：入口、按平台摘除的菜单项、各条关闭路径与 `menu_open` 的对齐。
-/// 渲染 / 命中 / 像素推帧在 wind-ui 的 `menu_linux` 里测，addon 与真 X 的整条链在 e2e。
+/// 渲染 / 命中 / 像素推帧在 wind-ui 的 `menu_host` 里测，addon 与真 X 的整条链在 e2e。
 #[cfg(all(test, ext_presenter))]
 mod linux_menu_tests {
     use super::*;
@@ -4489,12 +4483,7 @@ mod linux_menu_tests {
     fn main_menu_drops_items_without_a_linux_landing() {
         let (c, _rx) = coord();
         let all = labels(&c.build_main_menu_items());
-        for gone in [
-            TOOLBAR_MENU_LABEL,
-            "软键盘",
-            "截图所有窗口到文件",
-            "输入诊断 HUD",
-        ] {
+        for gone in [TOOLBAR_MENU_LABEL, "软键盘", "输入诊断 HUD"] {
             assert!(
                 !all.iter().any(|l| l == gone),
                 "Linux 主菜单不该有「{gone}」"
@@ -4505,6 +4494,7 @@ mod linux_menu_tests {
             "输入方案",
             "全角",
             "主题",
+            "截图所有窗口到文件",
             "截图候选窗口到剪贴板",
             "打开日志目录",
             "应用独立配置",
@@ -4755,7 +4745,7 @@ mod linux_menu_tests {
             drain(&rx).iter().any(|m| matches!(m, UiCommand::HideMenu)),
             "候选收起：候选菜单失去对象，让 UI 收掉"
         );
-        // UI 收掉可见菜单后回送 MenuClose（menu_linux::MenuHost::hide），协调器据此复位。
+        // UI 收掉可见菜单后回送 MenuClose（menu_host::MenuHost::hide），协调器据此复位。
         c.handle_ui_event(wind_ui_types::UiEvent::MenuClose);
         assert!(!c.is_menu_open());
 

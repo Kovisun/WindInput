@@ -2089,7 +2089,7 @@ pub struct Coordinator {
     ///
     /// 只给 `notify_ui_hide` 用：它的不少调用点正持着 `state` 锁，在里面再取锁就是自锁死
     /// （实测：服务端卡死、每个键 2s 超时）。所以这里只读原子量、只发命令不碰 `state`，
-    /// 复位 `menu_open` 交给 UI 回送的 `MenuClose`（见 `menu_linux::MenuHost::hide`）。
+    /// 复位 `menu_open` 交给 UI 回送的 `MenuClose`（见 `menu_host::MenuHost::hide`）。
     #[cfg(ext_presenter)]
     pub(crate) candidate_menu_open: std::sync::atomic::AtomicBool,
     /// 密码框抑制策略开关，`input.password_force_english` 的运行时镜像（构造与热重载时回灌，
