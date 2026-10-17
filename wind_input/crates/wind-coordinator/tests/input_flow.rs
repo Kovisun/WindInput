@@ -8433,6 +8433,89 @@ fn test_shuangpin_fuzzy_final_ziranma() {
     );
 }
 
+/// 造一份带自定义双拼布局的数据目录：其余内容逐项软链到 `data_dir()`，只在
+/// `schemas/shuangpin/` 下多放一份 `{layout}.toml`（布局 = 自然码改 `[finals]` 一行）。
+/// 返回 `(数据目录, 方案 override 目录)`。
+#[cfg(unix)]
+fn shuangpin_custom_layout_data(tag: &str, layout: &str, edit: (&str, &str)) -> (PathBuf, PathBuf) {
+    use std::os::unix::fs::symlink;
+    let src = data_dir().canonicalize().unwrap();
+    let root = std::env::temp_dir().join(format!("wind_sp_custom_{tag}"));
+    let _ = std::fs::remove_dir_all(&root);
+    let farm = |from: &std::path::Path, to: &std::path::Path, skip: &str| {
+        std::fs::create_dir_all(to).unwrap();
+        for e in std::fs::read_dir(from).unwrap() {
+            let e = e.unwrap();
+            if e.file_name() != skip {
+                symlink(e.path(), to.join(e.file_name())).unwrap();
+            }
+        }
+    };
+    let data = root.join("data");
+    farm(&src, &data, "schemas");
+    farm(&src.join("schemas"), &data.join("schemas"), "shuangpin");
+    let sp = data.join("schemas/shuangpin");
+    farm(&src.join("schemas/shuangpin"), &sp, "");
+    let base = std::fs::read_to_string(src.join("schemas/shuangpin/ziranma.toml")).unwrap();
+    assert!(base.contains(edit.0), "自然码布局里找不到 {:?}", edit.0);
+    let text = base
+        .replace(edit.0, edit.1)
+        .replace("id = \"ziranma\"", &format!("id = \"{layout}\""));
+    std::fs::write(sp.join(format!("{layout}.toml")), text).unwrap();
+    let ov = root.join("overrides");
+    std::fs::create_dir_all(&ov).unwrap();
+    std::fs::write(
+        ov.join("shuangpin.toml"),
+        format!("[engine.pinyin.shuangpin]\nlayout = \"{layout}\"\n"),
+    )
+    .unwrap();
+    (data, ov)
+}
+
+/// 同键韵母两种读音都出候选：自定义布局把两个韵母放在同一个韵母键上，转换器对键对只交
+/// 一条全拼，另一读音由拼音引擎按零罚分模糊对展开。未开任何模糊音。
+#[cfg(unix)]
+#[test]
+fn test_shuangpin_shared_key_finals_both_readings() {
+    let d = data_dir();
+    if !d.join("schemas/shuangpin.schema.toml").exists() {
+        eprintln!("跳过：缺 shuangpin.schema.toml");
+        return;
+    }
+    // (标签, 布局改动, 击键, 两个读音各一个字)
+    let cases = [
+        (
+            "iu_ui",
+            ("q = [\"iu\"]", "q = [\"iu\", \"ui\"]"),
+            "dq",
+            ["丢", "对"],
+        ),
+        (
+            "ia_o",
+            ("w = [\"ia\", \"ua\"]", "w = [\"ia\", \"ua\", \"o\"]"),
+            "lw",
+            ["俩", "咯"],
+        ),
+    ];
+    for (tag, edit, keys, want) in cases {
+        let (data, ov) = shuangpin_custom_layout_data(tag, &format!("zrm_{tag}"), edit);
+        let mut cfg = shuangpin_cfg();
+        cfg.schema.pinyin.fuzzy.enabled = false;
+        let coord = Coordinator::new_headless_with_override(cfg, Some(&data), Some(ov));
+        for c in keys.chars() {
+            press_letter(&coord, c);
+        }
+        let cands = coord.debug_all_candidate_texts();
+        let _ = std::fs::remove_dir_all(data.parent().unwrap());
+        for w in want {
+            assert!(
+                cands.iter().any(|t| t == w),
+                "{tag}: {keys} 应出「{w}」，实际 {cands:?}"
+            );
+        }
+    }
+}
+
 /// 组码中的 `;` 必须作 **ing 韵母**进缓冲，而不是被次选键 / quick_mix 引导键 / 标点吃掉。
 ///
 /// 这三条通路会**依次**拦这个键，缺一条没接就仍旧打不出——曾经的
