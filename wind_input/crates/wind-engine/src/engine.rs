@@ -77,7 +77,8 @@ pub struct ConvertResult {
     pub commit_text: String,
     /// 是否为空码（有输入但无候选）
     pub is_empty: bool,
-    /// 满码空码时是否应清空缓冲（码表 clear_on_empty_max）
+    /// 满码空码清空的资格（码表 clear_on_empty_max：满码 + 无更长后继）。**不含**「无候选」——
+    /// 候选要经协调器过滤后才是用户所见，由协调器按最终列表裁决是否真清空。
     pub should_clear: bool,
     /// 精确匹配空码补全的**备选池**（码表 `single_code_input` + `single_code_complete`）：
     /// 从更长编码取的候选，按引擎序排好，**尚未**计入 `candidates`。

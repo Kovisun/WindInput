@@ -257,10 +257,11 @@ pub(crate) fn cycle_sentence_window(
 /// 满码空码清空的**最终复核**：候选列表里是否存在「拦得住清空」的候选。
 ///
 /// 清空要穿过三道门，缺一不可：
-/// 1. 码表 `clear_on_empty_max`（`CodeTableEngine`：满码 + 无候选 + 无更长后继）；
+/// 1. 码表 `clear_on_empty_max`（`CodeTableEngine`：满码 + 无更长后继，**不看**有无候选）；
 /// 2. 混输 `should_clear`（`MixedEngine`：两道拼音守护，受 `auto_commit_block_on_pinyin` 支配）；
-/// 3. **本复核** —— 引擎在追加短语**之前**就算好了 `should_clear`，看不见协调器随后并入的短语
-///    候选（`zzbd` 这类码表无字但短语命中），故须以最终列表复查。
+/// 3. **本复核** —— 「空不空」只在这里判。引擎看不见协调器随后并入的短语候选（`zzbd` 这类
+///    码表无字但短语命中），也看不见随后的过滤（常用字档滤掉 `lynn` 的「甿」「軶」、单字输入
+///    滤掉词组），故须以用户所见的最终列表裁决。
 ///
 /// 判据**不是**「列表非空」：**拼音的部分匹配不算匹配**。`nunl` 的「嫩」只解释了前 3 码 `nun`
 /// （`consumed_length=3 < 4`），拿它当「有候选」等于让一个没解释完输入的候选替整串挡下清空，
@@ -1875,8 +1876,8 @@ impl Coordinator {
                     _ => InputOutcome::Normal,
                 }
             }
-            // 满码空码清空：`should_clear` 由引擎在追加短语**之前**计算，故此处须以叠加短语后的
-            // 最终候选复查（判据见 `clear_blocked_by_candidates`——不是简单的「列表非空」）。
+            // 满码空码清空：引擎只给资格，空不空按叠加短语、过滤之后的最终候选裁决
+            // （判据见 `clear_blocked_by_candidates`——不是简单的「列表非空」）。
             // 通配组码不清空（spec §3.2）：`convert_wildcard` 本就不给清空意向，这里是双保险。
             None if should_clear
                 && wildcard_pattern.is_none()
