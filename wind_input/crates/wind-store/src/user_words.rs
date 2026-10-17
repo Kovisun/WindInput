@@ -13,7 +13,7 @@ use crate::wdict;
 use serde::{Deserialize, Serialize};
 use wind_userdata::runtime::UserWord;
 
-/// 遍历期的**借用视图**：`code` / `text` 直接指向 redb 页里的字节，不分配。
+/// 遍历期的**借用视图**：`code` / `text` 直接借引擎条目里的字符串，不分配。
 ///
 /// 只在 [`Store::for_each_user_word`] 的回调里活着；要留下来就 [`Self::to_record`]。
 #[derive(Debug, Clone, Copy)]
@@ -455,9 +455,9 @@ impl Store {
         changed
     }
 
-    /// `dict.reload` 带路径：只认 `<text_dir>/phrases.dict.yaml`、`<text_dir>/<schema>/user.dict.yaml`
-    /// 与 `<text_dir>/<schema>/shadow.dict.yaml`（按路径分量比对，不碰文件系统；`..` 是 `ParentDir`
-    /// 分量，必然比对失败）。任一路径不合规 ⇒ 整体 Err、一个都不同步。返回值同 [`Self::sync_user_texts`]。
+    /// `dict.reload` 带路径：只认 `classify_text_path` 列出的那几种——短语、快捷格式、常用字、补全、
+    /// `charsets/*.yaml`、`stats/*.toml`，以及 `<schema>/` 下的用户词、Shadow、学到的数据、用户分库与
+    /// `dicts.toml`（按路径分量比对，不碰文件系统；`..` 是 `ParentDir` 分量，必然比对失败）。任一路径不合规 ⇒ 整体 Err、一个都不同步。返回值同 [`Self::sync_user_texts`]。
     pub fn reload_user_text_paths(&self, paths: &[String]) -> anyhow::Result<Vec<String>> {
         let targets = paths
             .iter()
