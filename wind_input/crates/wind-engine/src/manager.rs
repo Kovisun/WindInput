@@ -6818,7 +6818,7 @@ impl EngineManager {
                 match crate::pinyin::shuangpin::Layout::from_toml(&lp) {
                     Ok(layout) => {
                         let mut conv = crate::pinyin::shuangpin::ShuangpinConverter::new(layout);
-                        conv.set_fuzzy(fuzzy.zh_z, fuzzy.ch_c, fuzzy.sh_s);
+                        conv.set_fuzzy(&fuzzy);
                         engine = engine.with_shuangpin(conv);
                     }
                     Err(e) => {

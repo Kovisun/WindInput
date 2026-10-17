@@ -200,7 +200,9 @@ fn charset_spec(extra: &[u8]) -> String {
 // 合法音节判定复用 SyllableTrie（与 Go validPinyinSyllables 对齐）。
 // ============================================================================
 
+use crate::pinyin::fuzzy::{FuzzyConfig, fuzzy_spellings};
 use crate::pinyin::syllable::SyllableTrie;
+use std::collections::HashSet;
 
 /// 一个转换后的音节。
 ///
@@ -276,6 +278,11 @@ pub struct ShuangpinConverter {
     fuzzy_zh_z: bool,
     fuzzy_ch_c: bool,
     fuzzy_sh_s: bool,
+    /// 开着的模糊组推出的错音串（`din`、`tin`…，见 [`fuzzy_spellings`]）。
+    ///
+    /// 键对拼出它们时照收、原样交给拼音引擎，由那边按模糊组展开（全拼打 `din` 同路）。
+    /// 单独存一份而不并进 `trie`：严格音节表还管反向表建表等，那里不能认错音串。
+    fuzzy_spellings: HashSet<String>,
 }
 
 impl ShuangpinConverter {
@@ -286,14 +293,16 @@ impl ShuangpinConverter {
             fuzzy_zh_z: false,
             fuzzy_ch_c: false,
             fuzzy_sh_s: false,
+            fuzzy_spellings: HashSet::new(),
         }
     }
 
-    /// 配置声母模糊音开关（对齐 Go SetFuzzyInitials）。
-    pub fn set_fuzzy(&mut self, zh_z: bool, ch_c: bool, sh_s: bool) {
-        self.fuzzy_zh_z = zh_z;
-        self.fuzzy_ch_c = ch_c;
-        self.fuzzy_sh_s = sh_s;
+    /// 配置模糊音：声母三组走对偶声母（对齐 Go SetFuzzyInitials），其余组经错音串生效。
+    pub fn set_fuzzy(&mut self, fuzzy: &FuzzyConfig) {
+        self.fuzzy_zh_z = fuzzy.zh_z;
+        self.fuzzy_ch_c = fuzzy.ch_c;
+        self.fuzzy_sh_s = fuzzy.sh_s;
+        self.fuzzy_spellings = fuzzy_spellings(fuzzy).into_iter().collect();
     }
 
     pub fn layout(&self) -> &Layout {
@@ -397,6 +406,15 @@ impl ShuangpinConverter {
                 for f in self.layout.finals_of(key2) {
                     let syllable = normalize_pinyin(&format!("{}{}", init, f));
                     if self.is_valid(&syllable) && !results.contains(&syllable) {
+                        results.push(syllable);
+                    }
+                }
+            }
+            // 错音串垫底：只在本对键没有真音节时才用得上（自然码 `dn` = din，开 in↔ing）。
+            if use_fuzzy && results.is_empty() {
+                for f in self.layout.finals_of(key2) {
+                    let syllable = normalize_pinyin(&format!("{initial}{f}"));
+                    if self.fuzzy_spellings.contains(&syllable) {
                         results.push(syllable);
                     }
                 }
@@ -1298,7 +1316,10 @@ mod converter_tests {
         // fuzzy 关：s+l 无合法 → fallback "sl"
         assert_eq!(c.convert("sl").full_pinyin(), "sl");
         // fuzzy s↔sh 开启：s+l 应被 sh+l 模糊补救 → "shuang"
-        c.set_fuzzy(false, false, true);
+        c.set_fuzzy(&FuzzyConfig {
+            sh_s: true,
+            ..Default::default()
+        });
         assert_eq!(c.convert("sl").full_pinyin(), "shuang");
         // 整段 slpb → shuangpin
         assert_eq!(c.convert("slpb").full_pinyin(), "shuangpin");
@@ -1308,7 +1329,7 @@ mod converter_tests {
     #[test]
     fn xiaohe_fuzzy_original_legal_not_shadowed() {
         let mut c = conv("xiaohe");
-        c.set_fuzzy(true, true, true);
+        c.set_fuzzy(&initials_fuzzy());
         assert_eq!(c.convert("zi").full_pinyin(), "zi");
         assert_eq!(c.convert("zisi").full_pinyin(), "zisi");
     }
@@ -1317,7 +1338,10 @@ mod converter_tests {
     #[test]
     fn xiaohe_fuzzy_bidirectional() {
         let mut c = conv("xiaohe");
-        c.set_fuzzy(true, false, false);
+        c.set_fuzzy(&FuzzyConfig {
+            zh_z: true,
+            ..Default::default()
+        });
         let results = c.convert_pair(b'v', b'd');
         assert!(results.iter().any(|s| s == "zhai"), "缺 zhai: {results:?}");
         assert!(
@@ -1333,6 +1357,50 @@ mod converter_tests {
         let c = conv("xiaohe");
         let results = c.convert_pair(b's', b'l');
         assert!(results.is_empty(), "fuzzy 关时 s+l 应为空: {results:?}");
+    }
+
+    fn initials_fuzzy() -> FuzzyConfig {
+        FuzzyConfig {
+            zh_z: true,
+            ch_c: true,
+            sh_s: true,
+            ..Default::default()
+        }
+    }
+
+    fn all_fuzzy() -> FuzzyConfig {
+        FuzzyConfig {
+            zh_z: true,
+            ch_c: true,
+            sh_s: true,
+            n_l: true,
+            f_h: true,
+            r_l: true,
+            an_ang: true,
+            en_eng: true,
+            in_ing: true,
+            ian_iang: true,
+            uan_uang: true,
+            un_ong: true,
+            eng_ong: true,
+        }
+    }
+
+    /// 韵母模糊音：自然码 `n` = in，`dn` 解出 `din`——它不是音节，但开着 in↔ing 时
+    /// 是登记过的错音串，交给拼音引擎按 `ding` 展开（与全拼打 `din` 同路）。
+    #[test]
+    fn ziranma_fuzzy_final_keeps_misspelling() {
+        let mut c = conv("ziranma");
+        assert_eq!(c.convert("dn").full_pinyin(), "dn", "模糊音关：dn 无解");
+        c.set_fuzzy(&FuzzyConfig {
+            in_ing: true,
+            ..Default::default()
+        });
+        assert_eq!(c.convert("dn").full_pinyin(), "din");
+        assert_eq!(c.convert("tn").full_pinyin(), "tin");
+        assert_eq!(c.convert("dnyi").full_pinyin(), "dinyi");
+        // 本身合法的不受影响。
+        assert_eq!(c.convert("bn").full_pinyin(), "bin");
     }
 
     // --- 边界测试 6.1-4：符号键 `;` e2e 转换（mspy 布局，;=ing）---
@@ -1617,7 +1685,7 @@ mod converter_tests {
         let plain = conv("xiaohe").build_reverse();
 
         let mut fuzzy_conv = conv("xiaohe");
-        fuzzy_conv.set_fuzzy(true, true, true);
+        fuzzy_conv.set_fuzzy(&all_fuzzy());
         let fuzzy = fuzzy_conv.build_reverse();
 
         for syl in [

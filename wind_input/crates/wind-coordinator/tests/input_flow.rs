@@ -8410,6 +8410,29 @@ fn shuangpin_cfg() -> Config {
     cfg
 }
 
+/// 韵母模糊音在双拼下同样生效：自然码 `dn` = din，开 in↔ing 后应出 ding 的字。
+#[test]
+fn test_shuangpin_fuzzy_final_ziranma() {
+    let d = data_dir();
+    if !d.join("schemas/shuangpin.schema.toml").exists() {
+        eprintln!("跳过：缺 shuangpin.schema.toml");
+        return;
+    }
+    let ov = shuangpin_layout_override("zrm_fuzzy", "ziranma");
+    let mut cfg = shuangpin_cfg();
+    cfg.schema.pinyin.fuzzy.enabled = true;
+    cfg.schema.pinyin.fuzzy.in_ing = true;
+    let coord = Coordinator::new_headless_with_override(cfg, Some(&d), Some(ov.clone()));
+    press_letter(&coord, 'd');
+    press_letter(&coord, 'n');
+    let cands = coord.debug_all_candidate_texts();
+    let _ = std::fs::remove_dir_all(&ov);
+    assert!(
+        cands.iter().any(|t| t == "定") && cands.iter().any(|t| t == "顶"),
+        "dn 应按 ding 出字，实际 {cands:?}"
+    );
+}
+
 /// 组码中的 `;` 必须作 **ing 韵母**进缓冲，而不是被次选键 / quick_mix 引导键 / 标点吃掉。
 ///
 /// 这三条通路会**依次**拦这个键，缺一条没接就仍旧打不出——曾经的
