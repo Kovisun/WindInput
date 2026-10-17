@@ -485,6 +485,8 @@ pub struct Tooltip {
     window: LayeredWindow,
     renderer: TextRenderer,
     scale: f32,
+    /// 基准字号（逻辑像素）：`FONT_PX` + 主题 tooltip 节点的 `font_size` 偏移。
+    base_logical: f32,
     /// 窗口是否显示中（与 `TooltipMouse` 共享：离开隐藏在那边执行）。
     visible: Rc<Cell<bool>>,
     bg: [u8; 4],
@@ -541,6 +543,7 @@ impl Tooltip {
             window,
             renderer,
             scale,
+            base_logical: FONT_PX,
             visible,
             bg: BG,
             fg: FG,
@@ -564,7 +567,7 @@ impl Tooltip {
         let sc = crate::dpi::scale_for_point(x, y);
         if (sc - self.scale).abs() > 0.01 {
             self.scale = sc;
-            self.renderer.set_base_size(FONT_PX * sc);
+            self.renderer.set_base_size(self.base_logical * sc);
             if let Some(t) = self.theme.clone() {
                 self.set_theme(&t);
             }
@@ -581,6 +584,10 @@ impl Tooltip {
     /// 应用主题（tooltip 底色/文字色 + 位图背景/层）。
     pub fn set_theme(&mut self, theme: &wind_theme::Resolved) {
         self.theme = Some(theme.clone());
+        // 字号：基准 13 + 节点偏移（与主题编辑器预览同语义，不跟全局候选字号走）。
+        let node_off = theme.views.tooltip.as_ref().map_or(0.0, |n| n.font_size);
+        self.base_logical = (FONT_PX + node_off).max(8.0);
+        self.renderer.set_base_size(self.base_logical * self.scale);
         // palette 兜底 → tooltip 节点覆盖（节点色已在 resolve 阶段合成 palette 默认）。
         self.bg = theme.color("tooltip_bg", BG);
         self.fg = theme.color("tooltip_text", FG);
@@ -1795,6 +1802,23 @@ mod tests {
         t.set_menu_open(false);
         assert!(!t.mouse.borrow().tracking, "重复关闭不重挂");
         assert!(t.shown());
+    }
+
+    /// 主题 `[tooltip] font_size` 是相对基准 13 的有符号偏移（与主题编辑器预览同语义）。
+    #[test]
+    fn theme_font_size_offset_applies_to_tooltip() {
+        let mut t = tooltip();
+        let base = t.renderer.base_size();
+        let mut theme = wind_theme::Resolved::default();
+        theme.views.tooltip = Some(wind_theme::RvNode {
+            font_size: 4.0,
+            ..Default::default()
+        });
+        t.set_theme(&theme);
+        assert_eq!(t.renderer.base_size(), base + 4.0 * t.scale);
+        // 换回无偏移的主题要回到基准，不能把上一份主题的字号粘住。
+        t.set_theme(&wind_theme::Resolved::default());
+        assert_eq!(t.renderer.base_size(), base);
     }
 
     #[test]
