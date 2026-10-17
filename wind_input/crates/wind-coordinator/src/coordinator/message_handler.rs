@@ -213,10 +213,10 @@ impl Coordinator {
 
 /// 宿主报来的屏幕坐标的钳制范围。±2^24 远超任何真实屏幕，又给菜单定位里的「坐标 + 宽高」
 /// 留足 i32 余量：任意 i32 原样进去，`popup_menu` 的定位加法在 dev 构建溢出 panic、release 回绕。
-#[cfg(all(target_os = "linux", ext_presenter))]
+#[cfg(ext_presenter)]
 const HOST_COORD_LIMIT: i32 = 1 << 24;
 
-#[cfg(all(target_os = "linux", ext_presenter))]
+#[cfg(ext_presenter)]
 fn clamp_host_coord(v: i32) -> i32 {
     v.clamp(-HOST_COORD_LIMIT, HOST_COORD_LIMIT)
 }
@@ -226,7 +226,7 @@ fn clamp_host_coord(v: i32) -> i32 {
 /// 工作区」（全 0）处理——菜单仍能弹，只是不做翻转，越界交给 addon 那边看得见的溢出。
 /// `lx`/`ly`（右键点在悬停提示位图内的坐标）只有悬停提示菜单带，缺了按 `None`。
 /// 坐标一律钳到 [`HOST_COORD_LIMIT`] 以内。
-#[cfg(all(target_os = "linux", ext_presenter))]
+#[cfg(ext_presenter)]
 fn decode_menu_open(body: &[u8]) -> Option<crate::handle_menu::MenuOpenRequest> {
     use crate::handle_menu::MenuOpenRequest;
     let v: serde_json::Value = serde_json::from_slice(body).ok()?;
@@ -637,13 +637,13 @@ impl MessageHandler for Coordinator {
                 Err(e) => tracing::warn!("shot.result 载荷无法解析：{e}"),
             },
             // Linux addon：右键候选 / 候选窗空白处 / Fcitx5 状态区入口请求打开自绘菜单。
-            #[cfg(all(target_os = "linux", ext_presenter))]
+            #[cfg(ext_presenter)]
             ext_kind::MENU_OPEN => match decode_menu_open(body) {
                 Some(req) => self.open_menu_from_host(req),
                 None => tracing::warn!("menu.open 载荷无法解析，忽略"),
             },
             // Linux addon：菜单被 addon 自己收掉了（超时 / 失焦 / 服务重启 / 抓不住指针…）。
-            #[cfg(all(target_os = "linux", ext_presenter))]
+            #[cfg(ext_presenter)]
             ext_kind::MENU_DISMISS => {
                 let why = serde_json::from_slice::<serde_json::Value>(body)
                     .ok()
@@ -697,7 +697,7 @@ impl MessageHandler for Coordinator {
     /// Linux addon 报来的菜单指针事件（按键号：1 左 / 2 中 / 3 右）。菜单已关还收到事件 =
     /// 两端认识错开（addon 还挂着上一帧），让 UI 收菜单、补推隐藏帧。
     fn handle_menu_pointer(&self, event: u32, button: u32, x: i32, y: i32) {
-        #[cfg(all(target_os = "linux", ext_presenter))]
+        #[cfg(ext_presenter)]
         {
             use wind_ipc::protocol::menu_pointer::*;
             use wind_ui_types::{MenuPointerEvent as E, UiCommand};
@@ -720,14 +720,14 @@ impl MessageHandler for Coordinator {
                 y: clamp_host_coord(y),
             });
         }
-        #[cfg(not(all(target_os = "linux", ext_presenter)))]
+        #[cfg(not(ext_presenter))]
         let _ = (event, button, x, y);
     }
 
     /// Linux：addon 的请求连接断了。菜单若开着，没人会再报关闭——就地复位，免得下一个
     /// addon 实例（fcitx5 重启）送来的方向键 / 回车 / Esc 被一个不存在的菜单吞掉。
     fn handle_client_disconnected(&self) {
-        #[cfg(all(target_os = "linux", ext_presenter))]
+        #[cfg(ext_presenter)]
         if self.is_menu_open() {
             self.menu_dismissed_by_host("addon 连接断开");
         }
@@ -1219,11 +1219,9 @@ impl MessageHandler for Coordinator {
         }
 
         // ── 右键菜单打开时：方向键/回车/ESC 由菜单消费（优先于一切）──
-        // 菜单由服务自绘的两种形态：Windows 进程内窗口、Linux 光栅帧交 addon 贴图（二者同一份
-        // `popup_menu`）。macOS 用 IMK 原生菜单自行消费键，协调器不应吞键 (否则 menu_open 一旦
-        // 被置真会永久卡死输入，见 handle_show_context_menu)。Linux 的各条关闭路径见
-        // docs/design/linux-port.md §7。
-        #[cfg(any(not(ext_presenter), target_os = "linux"))]
+        // 菜单由服务自绘的两种形态：Windows 进程内窗口、光栅帧交宿主（macOS `.app` / Linux
+        // addon）贴图（同一份 `popup_menu`）。宿主形态下 menu_open 一旦被置真而窗口没了，输入会被
+        // 永久吞键卡死，各条关闭路径与自愈见 docs/design/linux-port.md §7。
         if self.is_menu_open() && self.forward_menu_key(data.key_code) {
             return KeyAction::Consumed;
         }
@@ -2903,7 +2901,7 @@ impl MessageHandler for Coordinator {
                 // HideCandidates 无条件隐藏菜单窗口，此时若把 menu_open 留成 true，就成了
                 // 「窗口没了、键还被吞」的状态不一致——比守卫失效更糟。
                 s.menu_open = false;
-                #[cfg(all(target_os = "linux", ext_presenter))]
+                #[cfg(ext_presenter)]
                 self.hide_menu_ui_unlocked();
                 s.menu_opened_at = None;
                 self.reset_exclusive_modes(&mut s); // 失焦丢弃临时英文/拼音/快捷输入残留
@@ -3135,7 +3133,7 @@ impl MessageHandler for Coordinator {
             s.preedit.clear();
             s.candidates.clear();
             s.menu_open = false;
-            #[cfg(all(target_os = "linux", ext_presenter))]
+            #[cfg(ext_presenter)]
             self.hide_menu_ui_unlocked();
             s.menu_opened_at = None;
             self.reset_exclusive_modes(&mut s); // 切走本输入法时丢弃独占模式残留
@@ -3350,7 +3348,7 @@ impl MessageHandler for Coordinator {
         // 复位菜单状态：点击别处会终止 composition 并经 notify_ui_hide 隐藏菜单窗口，
         // 但若不清 menu_open，下一个键会被 forward_menu_key 当作菜单键吞掉（首字符失效）。
         state.menu_open = false;
-        #[cfg(all(target_os = "linux", ext_presenter))]
+        #[cfg(ext_presenter)]
         self.hide_menu_ui_unlocked();
         drop(state);
         self.clear_pair_tracker(); // 组合意外终止：配对上下文失效，清栈防跳出键误判
@@ -5270,7 +5268,7 @@ mod commit_newline_action_tests {
     }
 }
 
-#[cfg(all(test, target_os = "linux", ext_presenter))]
+#[cfg(all(test, ext_presenter))]
 mod menu_open_decode_tests {
     use super::*;
     use crate::handle_menu::MenuOpenRequest;

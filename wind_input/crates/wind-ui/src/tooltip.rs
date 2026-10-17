@@ -1017,15 +1017,15 @@ impl Tooltip {
     /// Linux 外部宿主：渲染位图 + 落位规则（首选 / 备选点，addon 按工作区选定）。
     /// `row` 为悬停候选行的屏幕 `(left, top, right, bottom)`；`beside` 对应竖排 / 旋转的
     /// [`Self::render_frame_beside`]，否则对应横排的 [`Self::render_frame`]。
-    #[cfg(all(target_os = "linux", ext_presenter))]
+    #[cfg(ext_presenter)]
     pub(crate) fn render_overlay(
         &mut self,
         doc: &Arc<TooltipDoc>,
         candidate: i32,
         row: (i32, i32, i32, i32),
         beside: bool,
-    ) -> Option<crate::overlay_linux::Overlay> {
-        use crate::overlay_linux as ol;
+    ) -> Option<crate::overlay_host::Overlay> {
+        use crate::overlay_host as ol;
         let text = self.set_doc(doc, candidate);
         if text.is_empty() {
             return None;
@@ -1048,7 +1048,7 @@ impl Tooltip {
     /// Linux 外部宿主：addon 报来「右键点在提示位图内 `(cx, cy)`」，按最近一次渲染换算成
     /// `RequestTooltipMenu` 要带的 `(候选页内下标, 命中, 指纹)`——与 Windows 气泡自己收到
     /// `WM_RBUTTONDOWN` 时（`TooltipMouse::request_menu`）同一套命中。
-    #[cfg(all(target_os = "linux", ext_presenter))]
+    #[cfg(ext_presenter)]
     pub(crate) fn menu_request_at(&self, cx: i32, cy: i32) -> (i32, Option<TooltipHit>, u64) {
         let hits = self.hits.borrow();
         (hits.candidate, hits.hit_at(cx, cy), hits.doc.fingerprint())

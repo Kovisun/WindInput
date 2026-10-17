@@ -683,9 +683,9 @@ impl StatusTip {
     }
 
     /// Linux 外部宿主：渲染位图 + 落位规则，落位由 addon 按工作区做（服务端拿不到屏幕几何）。
-    /// 三种定位与 [`Self::show_placed`] 一一对应，公式同源（见 `overlay_linux` 的纯函数）。
+    /// 三种定位与 [`Self::show_placed`] 一一对应，公式同源（见 `overlay_host` 的纯函数）。
     /// `(x, caret_bottom, caret_h)` 为光标；text 为空返回 None。
-    #[cfg(all(target_os = "linux", ext_presenter))]
+    #[cfg(ext_presenter)]
     pub(crate) fn render_overlay(
         &mut self,
         text: &str,
@@ -693,8 +693,8 @@ impl StatusTip {
         caret_bottom: i32,
         caret_h: i32,
         placement: StatusTipPlacement,
-    ) -> Option<crate::overlay_linux::Overlay> {
-        use crate::overlay_linux as ol;
+    ) -> Option<crate::overlay_host::Overlay> {
+        use crate::overlay_host as ol;
         if text.is_empty() {
             return None;
         }

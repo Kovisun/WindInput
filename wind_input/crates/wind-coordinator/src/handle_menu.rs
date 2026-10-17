@@ -30,11 +30,11 @@ pub(crate) const MENU_FOCUS_GUARD: std::time::Duration = std::time::Duration::fr
 /// 报 `menu.dismiss`），这里防的是 addon 那条报告丢了——`menu_open` 一旦卡在 true，方向键 /
 /// 回车 / Esc 永远被吞（macOS 早期踩过的坑，见 `docs/design/linux-port.md` §7）。所以判据放在
 /// 「下一个按键到来时」：超时后的第一个键照常处理，不被吞。
-#[cfg(all(target_os = "linux", ext_presenter))]
+#[cfg(ext_presenter)]
 pub(crate) const MENU_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// [`MENU_IDLE_TIMEOUT`] 的判据（纯函数，便于单测）。没有记录时不算超时——打开菜单必然会记。
-#[cfg(all(target_os = "linux", ext_presenter))]
+#[cfg(ext_presenter)]
 pub(crate) fn menu_idle_expired(
     touched_at: Option<std::time::Instant>,
     now: std::time::Instant,
@@ -45,7 +45,7 @@ pub(crate) fn menu_idle_expired(
 
 /// 解好的扩展信封 `menu.open`（Linux addon 请求打开自绘菜单），见
 /// [`Coordinator::open_menu_from_host`]。
-#[cfg(all(target_os = "linux", ext_presenter))]
+#[cfg(ext_presenter)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct MenuOpenRequest {
     /// ≥ 0：候选页内下标；负值见 `wind_ipc::protocol::menu_target`。
@@ -2135,8 +2135,6 @@ impl Coordinator {
             .collect()
     }
 
-    // macOS 用 IMK 原生菜单, 不走协调器弹出菜单键转发 (见 coordinator handle_key_event 门控)。
-    #[cfg_attr(all(ext_presenter, not(target_os = "linux")), allow(dead_code))]
     pub(crate) fn is_menu_open(&self) -> bool {
         self.state
             .lock()
@@ -2149,7 +2147,7 @@ impl Coordinator {
     /// 非 tooltip 菜单关闭时清除是无操作（tooltip 菜单未打开则标志本就是 false）。
     pub(crate) fn menu_close(&self) {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        #[cfg(all(target_os = "linux", ext_presenter))]
+        #[cfg(ext_presenter)]
         self.candidate_menu_open
             .store(false, std::sync::atomic::Ordering::Release);
         if state.menu_open {
@@ -2169,12 +2167,12 @@ impl Coordinator {
         let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
         s.menu_open = true;
         s.menu_opened_at = Some(std::time::Instant::now());
-        #[cfg(all(target_os = "linux", ext_presenter))]
+        #[cfg(ext_presenter)]
         {
             s.menu_touched_at = s.menu_opened_at;
         }
         s.menu_target_page_local = page_local;
-        #[cfg(all(target_os = "linux", ext_presenter))]
+        #[cfg(ext_presenter)]
         self.candidate_menu_open
             .store(!text.is_empty(), std::sync::atomic::Ordering::Release);
         s.menu_target_text = text;
@@ -2240,7 +2238,7 @@ impl Coordinator {
     }
 
     /// 记一次菜单操作（空闲超时从这里重新起算，见 [`MENU_IDLE_TIMEOUT`]）。
-    #[cfg(all(target_os = "linux", ext_presenter))]
+    #[cfg(ext_presenter)]
     pub(crate) fn touch_menu(&self) {
         let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if s.menu_open {
@@ -2251,7 +2249,7 @@ impl Coordinator {
     /// 直接写 `menu_open = false` 的清理路径（失焦清输入 / 切走输入法 / 组合被终止）调它让 UI
     /// 也收菜单：Windows 那边靠随后的 `HideCandidates` 连带收掉，Linux 的 forwarder 不连带
     /// （见 `notify_ui_hide`）。**不取 `state` 锁**——这几处调用时正持着它。
-    #[cfg(all(target_os = "linux", ext_presenter))]
+    #[cfg(ext_presenter)]
     pub(crate) fn hide_menu_ui_unlocked(&self) {
         self.candidate_menu_open
             .store(false, std::sync::atomic::Ordering::Release);
@@ -2262,7 +2260,7 @@ impl Coordinator {
     ///
     /// 不走 `menu_close` 的「开着才发 HideMenu」：两端认识错开时（协调器以为关了、UI 还挂着），
     /// 正是这条要对齐的情形。
-    #[cfg(all(target_os = "linux", ext_presenter))]
+    #[cfg(ext_presenter)]
     pub(crate) fn menu_dismissed_by_host(&self, why: &str) {
         let was_open = {
             let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -2278,7 +2276,7 @@ impl Coordinator {
     /// addon 请求打开菜单（`menu.open`：右键候选 / 候选窗空白处 / 状态气泡 / 悬停提示，或
     /// Fcitx5 状态区入口）。`target` ≥ 0 为候选右键菜单（页内下标），负值见
     /// [`wind_ipc::protocol::menu_target`]，未知负值按主菜单；`work` = (左, 上, 右, 下)。
-    #[cfg(all(target_os = "linux", ext_presenter))]
+    #[cfg(ext_presenter)]
     pub(crate) fn open_menu_from_host(&self, req: MenuOpenRequest) {
         use wind_ipc::protocol::menu_target::*;
         let [left, top, right, bottom] = req.work;
@@ -2310,13 +2308,12 @@ impl Coordinator {
     }
 
     /// 菜单打开时转发导航键给菜单窗口；返回 true 表示已消费。
-    #[cfg_attr(all(ext_presenter, not(target_os = "linux")), allow(dead_code))]
     pub(crate) fn forward_menu_key(&self, key_code: u32) -> bool {
         if !self.is_menu_open() {
             return false;
         }
         // Linux：空闲超时兜底——菜单多半已不在屏上（addon 的关闭报告丢了），本键照常处理。
-        #[cfg(all(target_os = "linux", ext_presenter))]
+        #[cfg(ext_presenter)]
         {
             let touched = self
                 .state
@@ -4454,7 +4451,7 @@ mod compat_reload_tests {
 
 /// Linux 自绘菜单的协调器一侧：入口、按平台摘除的菜单项、各条关闭路径与 `menu_open` 的对齐。
 /// 渲染 / 命中 / 像素推帧在 wind-ui 的 `menu_linux` 里测，addon 与真 X 的整条链在 e2e。
-#[cfg(all(test, target_os = "linux", ext_presenter))]
+#[cfg(all(test, ext_presenter))]
 mod linux_menu_tests {
     use super::*;
     use crate::coordinator::Coordinator;
