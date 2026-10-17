@@ -21,7 +21,7 @@ use wind_ipc::protocol::overlay::{OVERLAY_KIND_MENU, OVERLAY_MENU_LEVELS, OVERLA
 use wind_ipc::protocol::{MAX_SHARED_RENDER_SIZE, SharedRenderHeader};
 
 use crate::manager::{MenuAnchor, MenuItemSpec, MenuPointerEvent, UiEvent};
-use crate::popup_menu::{LevelKey, PopupMenu, set_host_work_area};
+use crate::popup_menu::{LevelKey, PopupMenu, set_host_menu_scale, set_host_work_area};
 
 const LEVELS: usize = OVERLAY_MENU_LEVELS as usize;
 
@@ -39,6 +39,9 @@ pub(crate) struct MenuHost {
     /// 对位 Windows 的 `GetCursorPos`。
     last_pointer: Option<(i32, i32)>,
     create_shm: CreateShm,
+    /// 宿主坐标单位对应多少菜单像素（见 [`crate::overlay_host::px_per_unit`]）：Linux 恒 1.0；
+    /// macOS 是目标屏的缩放。宿主进出的坐标（锚点、工作区、指针、落位）都按它与菜单内部的像素换算。
+    ppu: f32,
 }
 
 impl MenuHost {
@@ -54,6 +57,7 @@ impl MenuHost {
             pushed: vec![None; LEVELS],
             last_pointer: None,
             create_shm: PosixSharedMemory::create,
+            ppu: 1.0,
         }
     }
 
@@ -65,9 +69,39 @@ impl MenuHost {
         self.sync(sink);
     }
 
+    /// 宿主坐标 → 菜单像素。
+    fn px(&self, v: i32) -> i32 {
+        (v as f32 * self.ppu).round() as i32
+    }
+
+    /// 宿主报来的工作区（宿主坐标）。**同时定下本次菜单的缩放**：取工作区中心点所在屏。
     pub(crate) fn set_work_area(&mut self, left: i32, top: i32, right: i32, bottom: i32) {
         let valid = right > left && bottom > top;
-        set_host_work_area(valid.then_some((left, top, right, bottom)));
+        let scale = if valid {
+            crate::dpi::scale_for_point((left + right) / 2, (top + bottom) / 2)
+        } else {
+            1.0
+        };
+        self.set_work_area_scaled(
+            (left, top, right, bottom),
+            scale,
+            crate::overlay_host::px_per_unit(scale),
+        );
+    }
+
+    /// [`Self::set_work_area`] 的内核：`ppu` 由调用方按平台给出，便于在 Linux 上测点坐标的宿主。
+    fn set_work_area_scaled(&mut self, wa: (i32, i32, i32, i32), scale: f32, ppu: f32) {
+        let (left, top, right, bottom) = wa;
+        self.ppu = ppu;
+        // 只有宿主坐标是点的平台才需要覆盖渲染缩放：其余照旧按坐标查。
+        set_host_menu_scale((ppu != 1.0).then_some(scale));
+        let valid = right > left && bottom > top;
+        set_host_work_area(valid.then_some((
+            self.px(left),
+            self.px(top),
+            self.px(right),
+            self.px(bottom),
+        )));
     }
 
     pub(crate) fn show(
@@ -80,9 +114,15 @@ impl MenuHost {
             // 宿主从没报过指针位置（键盘选的「更多…」且此前没动过鼠标）：落到工作区左上，
             // 总比 mock 的 GetCursorPos 给的 (0,0) 可控——两者此时其实同一个点。
             let (x, y) = self.last_pointer.unwrap_or((0, 0));
-            MenuAnchor::at_point(x, y)
+            MenuAnchor::at_point(self.px(x), self.px(y))
         } else {
-            anchor
+            MenuAnchor {
+                x: self.px(anchor.x),
+                y: self.px(anchor.y),
+                right: self.px(anchor.right),
+                bottom: self.px(anchor.bottom),
+                placement: anchor.placement,
+            }
         };
         let Some(m) = &mut self.menu else {
             // 画不出来就当场关掉，否则协调器的 menu_open 一直为真、方向键回车全被吞。
@@ -118,8 +158,9 @@ impl MenuHost {
         y: i32,
     ) {
         self.last_pointer = Some((x, y));
+        let (px, py) = (self.px(x), self.px(y));
         match &mut self.menu {
-            Some(m) if m.is_visible() => m.on_pointer(event, x, y),
+            Some(m) if m.is_visible() => m.on_pointer(event, px, py),
             _ => {
                 let _ = self.events.send(UiEvent::MenuClose);
                 // 宿主那边可能还挂着上一帧：再补推一遍隐藏帧。
@@ -164,6 +205,7 @@ impl MenuHost {
 
     /// [`Self::sync`] 的推帧部分。返回 false = 第 0 级有内容却没推出去。
     fn push_levels(&mut self, sink: &dyn HostRenderSink) -> bool {
+        let ppu = self.ppu;
         let mut top_ok = true;
         let frames = self
             .menu
@@ -178,6 +220,7 @@ impl MenuHost {
                         continue;
                     }
                     let (x, y, w, h) = f.geom;
+                    let (hx, hy) = (host_of(x, ppu), host_of(y, ppu));
                     let bytes = (w * h * 4) as usize;
                     if f.buf.len() < bytes
                         || bytes > MAX_SHARED_RENDER_SIZE - SharedRenderHeader::SIZE
@@ -205,12 +248,13 @@ impl MenuHost {
                         height: h,
                         flags,
                         place: OVERLAY_PLACE_EXACT,
-                        x,
-                        y,
-                        alt_x: x,
-                        alt_y: y,
+                        x: hx,
+                        y: hy,
+                        alt_x: hx,
+                        alt_y: hy,
                         content_w: w,
                         content_h: h,
+                        scale: ppu,
                         ..Default::default()
                     }));
                     self.pushed[k] = Some(f.key.clone());
@@ -230,6 +274,11 @@ impl MenuHost {
         }
         top_ok
     }
+}
+
+/// 菜单像素 → 宿主坐标（不借 `&self`，推帧循环里 `shms` 正被可变借用）。
+fn host_of(v: i32, ppu: f32) -> i32 {
+    (v as f32 / ppu).round() as i32
 }
 
 fn ensure_shm<'a>(
@@ -322,6 +371,27 @@ mod tests {
 
     fn events(rx: &Receiver<UiEvent>) -> Vec<String> {
         rx.try_iter().map(|e| format!("{e:?}")).collect()
+    }
+
+    /// 宿主坐标是点（macOS）：锚点 / 工作区 / 指针乘 scale 进菜单，落位除回来，位图尺寸仍是像素。
+    #[test]
+    fn point_host_converts_anchor_work_area_and_pointer() {
+        let (mut h, _rx, cap) = host();
+        h.set_work_area_scaled((0, 0, 640, 400), 2.0, 2.0);
+        h.show(&cap, items(), MenuAnchor::at_point(50, 100));
+        let f = cap.take();
+        assert_eq!(f.len(), 1);
+        let (_, visible, x, y, w, _h) = f[0];
+        assert!(visible);
+        assert_eq!((x, y), (50, 100), "落位折回宿主坐标：锚点原样");
+        let (host_w, _) = (w, 0);
+        // 同一菜单在 1x 宿主下的位图宽 = 2x 宿主下的位图宽 / 2（字号随 scale 放大）。
+        let (mut h1, _rx1, cap1) = host();
+        h1.set_work_area_scaled((0, 0, 640, 400), 1.0, 1.0);
+        h1.show(&cap1, items(), MenuAnchor::at_point(50, 100));
+        let w1 = cap1.take()[0].4;
+        assert!(host_w > w1, "2x 的位图应更宽：{host_w} vs {w1}");
+        set_host_menu_scale(None);
     }
 
     #[test]

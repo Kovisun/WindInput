@@ -540,6 +540,11 @@ impl PopupMenu {
 
     /// DPI 动态化：按显示点所在显示器实时取缩放，变化则更新字号并按新缩放重解析主题几何。
     fn ensure_scale(&mut self, x: i32, y: i32) {
+        #[cfg(ext_presenter)]
+        let sc = HOST_MENU_SCALE
+            .with(|c| c.get())
+            .unwrap_or_else(|| crate::dpi::scale_for_point(x, y));
+        #[cfg(not(ext_presenter))]
         let sc = crate::dpi::scale_for_point(x, y);
         if (sc - self.scale).abs() > 0.01 {
             self.scale = sc;
@@ -1212,6 +1217,15 @@ thread_local! {
     /// 宿主报来的工作区（左, 上, 右, 下）。菜单与它的渲染线程同在 forwarder 线程。
     static HOST_WORK_AREA: std::cell::Cell<Option<(i32, i32, i32, i32)>> =
         const { std::cell::Cell::new(None) };
+    /// 本次菜单的渲染缩放。macOS 的宿主坐标是点、菜单几何是像素，`scale_for_point` 拿像素坐标
+    /// 去查显示器会查错屏，故由 `menu_host` 按宿主点坐标定好后塞进来；`None` = 照常按点查。
+    static HOST_MENU_SCALE: std::cell::Cell<Option<f32>> = const { std::cell::Cell::new(None) };
+}
+
+/// 记下本次菜单的渲染缩放（外部宿主形态），见 `HOST_MENU_SCALE`。
+#[cfg(ext_presenter)]
+pub(crate) fn set_host_menu_scale(scale: Option<f32>) {
+    HOST_MENU_SCALE.with(|c| c.set(scale));
 }
 
 /// 记下宿主报来的工作区，供 [`work_area_of`] 用（Linux 外部宿主形态）。
