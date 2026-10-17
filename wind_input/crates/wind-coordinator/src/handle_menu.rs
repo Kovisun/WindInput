@@ -234,7 +234,7 @@ impl Coordinator {
                 self.notify_toolbar();
             }
             MenuCmd::ToggleSoftKeyboard => {
-                self.toggle_softkeyboard(None);
+                self.softkeyboard_menu_toggle(None);
                 self.after_softkeyboard_change();
             }
             // 分格快捷菜单末尾的「更多…」：弹完整主菜单。锚点取光标位（`i32::MIN` 由 UI
@@ -246,7 +246,7 @@ impl Coordinator {
             MenuCmd::SoftKeyboardPage(i) => {
                 // 菜单选面：面板没开就顺带开出来，否则「选了个面却什么都没发生」。
                 if !self.softkeyboard_is_open() {
-                    self.open_softkeyboard(None);
+                    self.softkeyboard_menu_toggle(None);
                     // ⚠️ **开面板这一步自己负责收口，不能指望下面那句**：
                     // `ui_softkeyboard_page` 在下标越界时只 `warn!` 就返回，走不到收口。
                     // 而菜单是照**构建时**的面表列的，配置一重载就可能少一面——那时面板
@@ -4479,6 +4479,8 @@ mod linux_menu_tests {
         st.input_buffer = "ce".into();
     }
 
+    // 摘除的是 Linux 没有落点的项；macOS 同走外部宿主形态，但主菜单里这些项都有落点。
+    #[cfg(target_os = "linux")]
     #[test]
     fn main_menu_drops_items_without_a_linux_landing() {
         let (c, _rx) = coord();
