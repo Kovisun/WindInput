@@ -365,7 +365,10 @@ mod tests {
         .replace(['(', ')', ' '], "")
         .replace("ThreadId", "");
         let mut h = MenuHost::new(tx, suffix);
-        h.set_work_area(0, 0, 1280, 800);
+        // 钉死 1x：`set_work_area` 会按本机真实屏幕取缩放，Retina 上跑会得到 2x，
+        // 而下面的用例都按「宿主单位 = 像素」断言。
+        h.set_work_area_scaled((0, 0, 1280, 800), 1.0, 1.0);
+        set_host_menu_scale(Some(1.0));
         (h, rx, Cap::new())
     }
 
@@ -388,6 +391,7 @@ mod tests {
         // 同一菜单在 1x 宿主下的位图宽 = 2x 宿主下的位图宽 / 2（字号随 scale 放大）。
         let (mut h1, _rx1, cap1) = host();
         h1.set_work_area_scaled((0, 0, 640, 400), 1.0, 1.0);
+        set_host_menu_scale(Some(1.0));
         h1.show(&cap1, items(), MenuAnchor::at_point(50, 100));
         let w1 = cap1.take()[0].4;
         assert!(host_w > w1, "2x 的位图应更宽：{host_w} vs {w1}");
