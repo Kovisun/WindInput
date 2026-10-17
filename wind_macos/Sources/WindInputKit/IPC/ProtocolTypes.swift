@@ -110,6 +110,10 @@ public enum ExtKind {
     public static let posCandidateQuery = "pos.candidate.query"
     /// 下行：问 `.app` 状态气泡此刻在哪，答案走上行 `posStatusTip`。body 空。
     public static let posStatusTipQuery = "pos.status_tip.query"
+    //
+    // 这两个「位置」要一问一答而不是由服务进程记账：浮窗落位在 `.app` 侧，服务端发下来的只是
+    // **建议落点**，这边还会按所在屏可见区钳制、在下方放不下时翻到光标上方、以及沿用用户本次
+    // 组合内拖出来的落位。用户点「固定位置」要以当前看到的位置落盘。
     /// 上行：请求打开自绘菜单。body = `{"target":<页内下标>|-1 主菜单|-2 状态气泡|-3 悬停提示,
     /// "x":..,"y":..,"work":[左,上,右,下]}`，坐标为 wire 点；悬停提示另带 `"lx","ly"`（右键点在提示
     /// 位图内的像素坐标，含软阴影扩边）。
@@ -117,10 +121,6 @@ public enum ExtKind {
     /// 上行：`.app` 自己把菜单收掉了（空闲超时 / 服务重启 / 断线…），服务端据此复位。
     /// body = `{"reason":"…"}`，只进日志。
     public static let menuDismiss = "menu.dismiss"
-    //
-    // 这两个「位置」要一问一答而不是由服务进程记账：浮窗是 `.app` 侧的原生 NSPanel，
-    // 服务端发下来的只是**建议落点**，这边还会按所在屏可见区钳制、在下方放不下时翻到光标
-    // 上方、以及沿用用户本次组合内拖出来的落位。用户点「固定位置」要以当前看到的位置落盘。
 }
 
 /// 按键组合 (CmdKeyTap/Hold/Release 解码结果, 及 KeySeq 内单项)。

@@ -540,7 +540,7 @@ mod tests {
         r.per_char.insert(0, false);
     }
 
-    // 只被 changed_candidate_still_copies_but_refuses_commit 用，门与它一致（macOS 目标上会 dead_code）
+    // 只被 changed_candidate_still_copies_but_refuses_commit 用，门与它一致
     fn copied(rx: &Receiver<UiCommand>) -> Vec<String> {
         drain(rx)
             .into_iter()
@@ -620,9 +620,7 @@ mod tests {
 
     /// 候选已变：复制照常（取快照），上屏放弃并 Toast。
     ///
-    /// 仅自绘菜单的形态（Windows / Linux `linux-host`）：用例靠「菜单开着时 Esc 被菜单消费」
-    /// 来关菜单。macOS 刻意不转发菜单键（见 message_handler 的 `forward_menu_key` 门控——
-    /// 菜单是 `.app` 的原生 NSMenu，吞键会让 `menu_open` 永不复位、输入卡死），Esc 会落到别处。
+    /// 用例靠「菜单开着时 Esc 被菜单消费」来关菜单。
     #[test]
     fn changed_candidate_still_copies_but_refuses_commit() {
         let Some((c, rx, _u)) = typed("stale") else {

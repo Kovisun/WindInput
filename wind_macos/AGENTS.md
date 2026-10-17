@@ -151,8 +151,9 @@ macOS 侧的通例是「服务进程只光栅化，窗口一律归 `.app`」—�
   收不到事件）；菜单各级窗口比它高一级且 `ignoresMouseEvents`，指针事件一律落到捕获窗，原样以
   `CMD_MENU_POINTER`（异步、不等 ack）报给服务端，命中测试在服务端做。键盘仍走 IMK `handle(_:)` →
   服务端 `forward_menu_key`。**协调器因此不再区分 macOS 不转发菜单键**——一旦吞键而 `menu_open` 没复位
-  就会卡死输入，所以 Linux 那套关闭路径与自愈都平移过来了：空闲 60s（只认按下，移动不续）、
-  抓取上限 120s、服务重启 / push 断线本端就地收并发 `menu.dismiss`、服务端 `FocusLost` 收菜单。
+  就会卡死输入，所以 Linux 那套关闭路径与自愈都平移过来了：空闲 60s（按下与服务端每推一帧都续，
+  所以晃鼠标也会续，兜底靠不续的抓取上限 120s）、请求后 2s 等不到第 0 级帧、屏幕布局变化、服务重启 /
+  push 断线本端就地收并发 `menu.dismiss`、服务端 `FocusLost` 收菜单。
 - **仍是原生 NSMenu 的**：菜单栏状态项（`ModeStatusController`）与系统输入源菜单（`InputController.menu`，
   由 IMK 在别的进程里绘制，无法自绘），继续用 `UnifiedMenuBuilder` 与精简菜单树。
 - **候选右键菜单不再抢键盘焦点**：此前 `NSMenu.popUp` 会让 Spotlight 这类宿主连发 Deactivate/Activate，

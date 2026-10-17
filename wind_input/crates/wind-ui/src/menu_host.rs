@@ -1,4 +1,4 @@
-//! Linux 外部宿主（Fcitx5 addon）的自绘菜单：主菜单 / 候选右键菜单。
+//! 外部宿主（Linux Fcitx5 addon / macOS `.app`）的自绘菜单：主菜单 / 候选右键菜单。
 //!
 //! **复用 Windows 的 [`PopupMenu`] 整套**（级联状态机、视图树、主题、定位、命中测试、增量重绘），
 //! 只换掉两头：
@@ -77,10 +77,12 @@ impl MenuHost {
     /// 宿主报来的工作区（宿主坐标）。**同时定下本次菜单的缩放**：取工作区中心点所在屏。
     pub(crate) fn set_work_area(&mut self, left: i32, top: i32, right: i32, bottom: i32) {
         let valid = right > left && bottom > top;
+        // 宿主没报出有效工作区（指针落在屏边缘判不中屏等）：缩放退回主屏，不能硬写 1.0——
+        // 否则 Retina 上 `ppu` 为 1 而渲染缩放仍按坐标查到 2，位图按 2 倍画、帧里却带 scale=1。
         let scale = if valid {
             crate::dpi::scale_for_point((left + right) / 2, (top + bottom) / 2)
         } else {
-            1.0
+            crate::dpi::scale_for_point(0, 0)
         };
         self.set_work_area_scaled(
             (left, top, right, bottom),

@@ -103,7 +103,7 @@ impl FocusLostReason {
 
 // 上行（darwin .app / Windows host-render DLL）：鼠标候选交互。方向与下行 0x020D/0x020E 由 dispatch 上下文区分。
 pub const CMD_CANDIDATE_SELECT: u16 = 0x020D; // payload: pageLocalIndex i32 LE；<0 为翻页按钮（-1 上页 / -2 下页，与 SHM 命中矩形约定一致）
-pub const CMD_CANDIDATE_HOVER: u16 = 0x020E; // payload: pageLocalIndex i32 LE (-1=无；Windows 另带 anchorX/belowY/aboveY 三个 i32，当前仅取 index)
+pub const CMD_CANDIDATE_HOVER: u16 = 0x020E; // payload: pageLocalIndex i32 LE（≥0 候选；Windows：-1=无、-2/-3=翻页；非 Windows：-1/-2=翻页、其余负值 INT32_MIN=无；Windows 另带 anchorX/belowY/aboveY 三个 i32，当前仅取 index）
 pub const CMD_MENU_ACTION: u16 = 0x0210; // 上行：统一菜单项被选中 (payload: 菜单 id i32 LE)
 pub const CMD_CANDIDATE_SCROLL: u16 = 0x0211; // 上行：host 候选框滚轮 (payload: delta i32，WHEEL_DELTA 倍数，正=上滚)；服务端解释成「上下键调整高亮项」（到页边界翻到相邻页），见 Coordinator::handle_candidate_scroll
 /// 上报前台上下文（命令直通车 `app()`/`title()`/`sel()` 取值，目前仅 darwin `.app` 发）：

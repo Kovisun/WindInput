@@ -138,6 +138,9 @@ public final class CandidatePanelHost {
     /// 候选悬停变化 (主线程)。悬停提示显示着时, 变化被延后上报: 一离开候选就报的话, 提示当场被
     /// 收掉, 用户永远够不着它 (Windows `candidate_window::hover_move` 同一规则)。
     private func handleRawHover(_ raw: Int) {
+        // 菜单开着时指针归捕获窗：候选视图补发的 mouseExited 不是用户真的移开了，别据此收提示。
+        // 菜单收起时 `onMenuClosed` 会按指针真实位置重定一次。
+        guard !overlays.isMenuOpen else { return }
         let norm = raw < 0 ? -1 : raw
         // 已有待报项: 回到已报的目标 = 撤销待报; 否则只换目标, 计时不顺延 (一路擦过多个候选
         // 不该把宽限无限拖长)。对位 Linux addon 的 candidateHover。
@@ -538,6 +541,8 @@ public final class CandidatePanelHost {
     /// BGRA device 像素 → NSImage, size 设为 logical (像素/scale)。Retina 上高分辨率
     /// 位图贴 logical 框 = 1 device px : 1 image px, 清晰。
     static func makeNSImage(from f: SharedFrame, scale: CGFloat) -> NSImage? {
+        // 头与像素不是原子写入：读到半新半旧的头时 stride×height 会超出像素缓冲，CGImage 会越界读。
+        guard f.stride >= f.width * 4, f.bgra.count >= f.stride * f.height else { return nil }
         guard let provider = CGDataProvider(data: f.bgra as CFData) else { return nil }
         let bitmapInfo: CGBitmapInfo = [
             CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedFirst.rawValue),

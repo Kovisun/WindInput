@@ -407,7 +407,7 @@ impl Forwarder {
             // 协调器把定位方式切到 fixed 时问「你现在在哪」，好把当前位置落盘成 custom_x/y
             // ——否则窗口会跳到上次保存（往往是 0,0）的坐标。
             //
-            // 两者都转成一次**下行询问**而不是在本进程记账：浮窗是 `.app` 侧的原生 NSPanel，
+            // 两者都转成一次**下行询问**而不是在本进程记账：浮窗的落位在 `.app` 侧，
             // 服务进程推下去的只是建议落点，实际位置还会被那边的屏幕钳制 / 下方放不下时上翻 /
             // 用户本次组合内的拖动落位改掉。答案经上行 `pos.*` 回来（见 `handle_ext`）。
             UiCommand::ReportCandidatePos => {
@@ -548,8 +548,8 @@ impl Forwarder {
     /// 取候选窗当前帧的像素（BGRA + 尺寸）。窗口未显示时返回 `None`。
     ///
     /// macOS 的候选窗像素本来就在服务进程里（我们光栅化后经 SHM 推给 `.app`），故截图
-    /// 无需 `.app` 参与——直接把同一份 buffer 编码存盘即可。这也是为什么状态气泡 / 悬停
-    /// 提示的截图**做不了**：那两者是 `.app` 侧原生 NSPanel，像素不在本进程。
+    /// 无需 `.app` 参与——直接把同一份 buffer 编码存盘即可。状态气泡 / 悬停
+    /// 提示 / Toast / 菜单的像素同样在本进程（各层 SHM），见 `shoot_overlay`。
     fn capture_candidate(&mut self) -> Option<(Vec<u8>, u32, u32)> {
         if !self.visible {
             return None;

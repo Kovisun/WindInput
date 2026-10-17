@@ -571,7 +571,6 @@ impl MessageHandler for Coordinator {
                 }
                 None => tracing::warn!("host.display 载荷无法解析，忽略"),
             },
-            // 原生浮窗截图的结果（`.app` 动手，服务端只管文案）。
             // Windows TSF：host render 候选窗落位诊断（SearchHost 写不了 tsf_log，只能看这条）。
             ext_kind::DIAG_HOST_RENDER_PLACED => match host_render_placed_log(body) {
                 Some((true, line)) => tracing::warn!("{line}"),
@@ -637,11 +636,11 @@ impl MessageHandler for Coordinator {
     }
 
     fn handle_show_context_menu(&self, x: i32, y: i32) {
-        // 弹出菜单窗口 (popup_menu.rs / ShowCandidateMenu·MenuKey·HideMenu UiCommand) 是
-        // Windows 专有；macOS 由 IMK 原生 NSMenu 渲染菜单 (InputController.menu())。
-        // macOS 上 IMK 频繁调 menu() → Swift 发 CMD_SHOW_CONTEXT_MENU 仅为「查询菜单项」，
-        // 若在此调 show_main_menu 会把协调器置 menu_open=true 并经 forward_menu_key 吞掉后续
-        // 所有按键，而 macOS 无弹窗、永不回 MenuClose → 输入被永久卡死 (打字无响应)。
+        // 自绘菜单（popup_menu.rs / ShowCandidateMenu·MenuKey·HideMenu UiCommand）在 Windows 由本
+        // 命令弹出；外部宿主（Linux addon / macOS `.app`）走 `menu.open` 扩展信封。macOS 上 IMK
+        // 频繁调 `menu()` → Swift 发 CMD_SHOW_CONTEXT_MENU 仅为「查询菜单项」（系统输入源菜单是原生
+        // NSMenu），若在此调 show_main_menu 会把协调器置 menu_open=true 并经 forward_menu_key 吞掉
+        // 后续按键，而此时没有任何自绘菜单窗口、永不回 MenuClose → 输入被卡死 (打字无响应)。
         #[cfg(not(ext_presenter))]
         self.show_main_menu(wind_ui_types::MenuAnchor::at_point(x, y));
         #[cfg(ext_presenter)]

@@ -63,7 +63,12 @@ final class OverlayHost: OverlayPanelDelegate {
     private var menuLevels: Set<UInt32> = []
     private var menuIdleTimer: Timer?
     private var menuCapTimer: Timer?
-    /// 菜单空闲（没有按下）超过这么久自收；移动不续。对位 Linux addon 的 60s。
+    /// 请求打开菜单后等第 0 级帧的计时：帧迟迟不来（解码失败 / 没开成），就地收口并通知服务端复位。
+    private var menuWaitTimer: Timer?
+    private var screenObserver: NSObjectProtocol?
+    /// 请求菜单后最多等这么久，帧还没到就当没开成。服务端只要一个往返。
+    private static let menuWait: TimeInterval = 2
+    /// 菜单空闲（既没有按下、服务端也没推新帧）超过这么久自收。对位 Linux addon 的 60s。
     private static let menuIdle: TimeInterval = 60
     /// 从打开算起的上限，不续。对位 Linux addon 的 120s。
     private static let menuCap: TimeInterval = 120
@@ -359,6 +364,7 @@ final class OverlayHost: OverlayPanelDelegate {
         for (k, v) in extra { body[k] = v }
         onMenuRequested?()
         sendExt?(ExtKind.menuOpen, body)
+        armMenuWait()
     }
 
     // MARK: - 菜单生命周期
@@ -367,6 +373,12 @@ final class OverlayHost: OverlayPanelDelegate {
         let first = menuLevels.isEmpty
         menuLevels.insert(kind)
         if first {
+            menuWaitTimer?.invalidate(); menuWaitTimer = nil
+            // 菜单开着时屏幕布局变了（插拔 / 分辨率 / 缩放）：捕获窗没盖到新屏，参照屏高度也变了，
+            // 之后上报的指针坐标与已摆好的菜单不再同一参照——直接收掉最稳。
+            screenObserver = NotificationCenter.default.addObserver(
+                forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main
+            ) { [weak self] _ in self?.dismissMenu(reason: "screen_change") }
             // 每块屏一个捕获窗；屏幕布局可能在两次菜单之间变过，所以每次都按当前屏幕重建。
             menuCatchers.forEach { $0.uncover() }
             menuCatchers = NSScreen.screens.map { screen in
@@ -378,8 +390,8 @@ final class OverlayHost: OverlayPanelDelegate {
                 return c
             }
             // 菜单一开，悬停提示 / 状态气泡的自动隐藏暂停。
-            hideTimers[OverlayKind.tooltip]?.invalidate()
-            hideTimers[OverlayKind.status]?.invalidate()
+            hideTimers[OverlayKind.tooltip]?.invalidate(); hideTimers[OverlayKind.tooltip] = nil
+            hideTimers[OverlayKind.status]?.invalidate(); hideTimers[OverlayKind.status] = nil
             menuCapTimer?.invalidate()
             menuCapTimer = Timer.scheduledTimer(withTimeInterval: Self.menuCap, repeats: false) {
                 [weak self] _ in self?.dismissMenu(reason: "grab_cap")
@@ -402,6 +414,8 @@ final class OverlayHost: OverlayPanelDelegate {
         menuCatchers.removeAll()
         menuIdleTimer?.invalidate(); menuIdleTimer = nil
         menuCapTimer?.invalidate(); menuCapTimer = nil
+        menuWaitTimer?.invalidate(); menuWaitTimer = nil
+        if let o = screenObserver { NotificationCenter.default.removeObserver(o); screenObserver = nil }
         pendingMotion = nil
         menuHoldUntil.removeAll()
         // 菜单开着期间气泡可能没收到 mouseExited：以指针此刻的位置为准重设悬停，
@@ -417,10 +431,26 @@ final class OverlayHost: OverlayPanelDelegate {
             gates[k] = Self.newGate()
             armHide(k)
         }
-        armHide(OverlayKind.status)
     }
 
-    /// 记一次菜单操作：空闲超时从这里重新起算。移动不算——光是晃鼠标不能让菜单永远开着。
+    /// 请求菜单后起的等待计时（见 `menuWaitTimer`）。到期仍没有菜单：撤掉「右键后保持」、
+    /// 让气泡 / 提示恢复自动隐藏，并通知服务端复位 `menu_open`（它此刻可能已置位并在吞键）。
+    private func armMenuWait() {
+        menuWaitTimer?.invalidate()
+        menuWaitTimer = Timer.scheduledTimer(withTimeInterval: Self.menuWait, repeats: false) {
+            [weak self] _ in
+            guard let self = self else { return }
+            self.menuWaitTimer = nil
+            guard !self.isMenuOpen else { return }
+            self.menuHoldUntil.removeAll()
+            self.armHide(OverlayKind.status)
+            self.armHide(OverlayKind.tooltip)
+            self.sendExt?(ExtKind.menuDismiss, ["reason": "no_frame"])
+        }
+    }
+
+    /// 记一次菜单操作：空闲超时从这里重新起算。按下与服务端每推一帧（含悬停高亮、键盘导航的重绘）
+    /// 都算，所以光晃鼠标也会续；兜底的是不续的抓取上限（`menuCap`）。
     private func touchMenu() {
         menuIdleTimer?.invalidate()
         menuIdleTimer = Timer.scheduledTimer(withTimeInterval: Self.menuIdle, repeats: false) {

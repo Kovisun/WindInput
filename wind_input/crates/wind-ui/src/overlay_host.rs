@@ -1,14 +1,14 @@
-//! Linux 外部宿主（Fcitx5 addon）的光栅浮层：状态气泡 / Toast / 悬停提示。
+//! 外部宿主（Linux Fcitx5 addon / macOS `.app`）的光栅浮层：状态气泡 / Toast / 悬停提示。
 //!
-//! 与 macOS 分道：`.app` 用原生 NSPanel 排字，服务端只发文本 + 配色（`CMD_STATUS_SHOW` 等）；
-//! Linux addon 不排字，这三者与候选窗同构——在服务进程按主题光栅化（真实字形走
-//! `text/linux`），像素写进各层自己的 SHM 段，再推一帧 `CMD_OVERLAY_FRAME` 通知。
+//! 宿主不排字，这三者与候选窗同构——在服务进程按主题光栅化（Linux 走 `text/linux`，macOS 走
+//! CoreText），像素写进各层自己的 SHM 段，再推一帧 `CMD_OVERLAY_FRAME` 通知。宿主坐标单位
+//! 在 Linux 是像素、macOS 是点，见 [`px_per_unit`]。
 //!
 //! **落位分工**：服务端拿不到屏幕几何（X11 根窗口 / 工作区只有 addon 知道），故只给出
 //! 「首选点 + 备选点」或「锚点 + 留白」，addon 按工作区选定并夹回（`wind_linux` 的
 //! `placeOverlay`）。几何公式与 Windows 各窗口的本地定位逐项对应，见各 `render_overlay`。
 //!
-//! **计时分工**：自动隐藏时长随帧下发、由 addon 计时（同 macOS `.app`）。服务端的
+//! **计时分工**：自动隐藏时长随帧下发、由宿主（addon / `.app`）计时。服务端的
 //! forwarder 线程阻塞在命令通道上，没有到期唤醒机制，不在这边计时。
 
 use std::sync::{Arc, Mutex};
