@@ -17,6 +17,7 @@
 //! # 选择器
 //!
 //! - `key:<配置键>`：精确匹配设置项的 key；以 `*` 结尾时按前缀匹配（`key:input.temp_english.*`）。
+//!   `a.b.*` 还命中 `a.b` 本身与它的视图项 `a.b#视图`（`schema.mix_modes` 这类一键多行的设置）。
 //!   用配置键而不是界面上的分区名：分区名是文案，随界面调整改名；配置键有迁移保障。
 //!   一个分区里的项全被隐藏后，设置程序会把那张卡片连同二级导航一并去掉，故不需要单独的
 //!   「隐藏分区」语法。
@@ -89,7 +90,13 @@ impl SettingsSelector {
         match self {
             Self::Key { pattern, prefix } => {
                 if *prefix {
+                    // `a.b.*` 也命中 `a.b` 本身与它的视图项 `a.b#视图`：定制者写 `.*` 想的是
+                    // 「这一整块」，而 `schema.mix_modes` 这类键自己就是一行、其余行是它的视图。
                     key.starts_with(pattern.as_str())
+                        || pattern.strip_suffix('.').is_some_and(|stem| {
+                            key.strip_prefix(stem)
+                                .is_some_and(|rest| rest.is_empty() || rest.starts_with('#'))
+                        })
                 } else {
                     key == pattern
                 }
@@ -164,6 +171,15 @@ mod tests {
         assert!(sel.matches_key("input.temp_english.enabled"));
         assert!(sel.matches_key("input.temp_english.trigger_keys"));
         assert!(!sel.matches_key("input.temp_pinyin.enabled"));
+    }
+
+    #[test]
+    fn dot_star_also_matches_the_stem_and_its_views() {
+        let sel = SettingsSelector::parse("key:schema.mix_modes.*").unwrap();
+        assert!(sel.matches_key("schema.mix_modes"));
+        assert!(sel.matches_key("schema.mix_modes#members"));
+        assert!(!sel.matches_key("schema.mix_modes_x"));
+        assert!(!sel.matches_key("schema.mix"));
     }
 
     #[test]
