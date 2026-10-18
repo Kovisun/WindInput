@@ -4701,6 +4701,26 @@ pub struct EmojiModuleEntry {
     pub default_on: bool,
 }
 
+// 跨 crate 的序列化 / 反序列化一律走下面这几个入口，别在下游直接 `value.try_into::<Config>()`
+// 或 `serde_json::to_value(cfg)`：release 不共享泛型，每个调用的 crate 都会把整棵配置类型树的
+// serde 代码单态化一份（一份 ~0.2 MiB）。`inline(never)` 防 LTO 把它们又内联回各调用方。
+impl Config {
+    #[inline(never)]
+    pub fn from_toml_value(v: toml::Value) -> Result<Self, toml::de::Error> {
+        v.try_into()
+    }
+
+    #[inline(never)]
+    pub fn to_toml_value(&self) -> Result<toml::Value, toml::ser::Error> {
+        toml::Value::try_from(self)
+    }
+
+    #[inline(never)]
+    pub fn to_json_value(&self) -> Result<serde_json::Value, serde_json::Error> {
+        serde_json::to_value(self)
+    }
+}
+
 impl Config {
     /// 全部 emoji 附加模块：内置在前（注册表序），其后是 `emoji/` 目录里用户放置的
     /// OpenCC 表（`*.txt`，按文件名序；id = 文件名去掉 `.txt`，出厂关）。

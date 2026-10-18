@@ -385,13 +385,13 @@ fn collect_into(
             let mut base: toml::Value = toml::from_str(&text)?;
             wind_config::schema::merge_toml(&mut base, ov);
             let folded_text = toml::to_string_pretty(&base)?;
-            let schema = base
-                .try_into()
+            let schema = wind_config::schema::Schema::from_toml_value(base)
                 .map_err(|e| anyhow::anyhow!("方案 {id} 与 override 合并后解析失败: {e}"))?;
             plan.folded.push((schema_rel, folded_text));
             schema
         }
-        None => toml::from_str(&text)?,
+        // 与上一支同走 Value：直接 from_str::<Schema> 会让整族方案类型再单态化一份。
+        None => wind_config::schema::Schema::from_toml_value(toml::from_str(&text)?)?,
     };
     if is_root {
         plan.root_version = schema.schema.version.clone();

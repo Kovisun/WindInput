@@ -2413,7 +2413,7 @@ pub trait WebDataRpc: WebDataHost {
         let cfg = wind_config::Config::load(wind_config::Config::data_dir().as_deref())?;
         // `degradation` 是 `#[serde(skip)]`，转成值树就没了，故先留一份。
         let degradation = cfg.degradation.clone();
-        let current = toml::Value::try_from(cfg)?;
+        let current = cfg.to_toml_value()?;
         let mut entries = wind_config::patch::preview(&fragment, &current);
         // 与 `config.previewPatch` 同判据：本函数只预览，但预览要显示的正是「应用后会
         // 变成什么」，降级时 Map 键的当前表是出厂值 ⇒ 不标出来，用户看到的 diff 是假的，
