@@ -8,7 +8,7 @@ tracing = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 chrono = "0.4"
-regex = "1"
+regex = { version = "1", default-features = false, features = ["std", "unicode"] }
 base64 = "0.22"
 # `uuid()` 函数 / 短语 `$uuid` 变量的随机 UUID 生成
 uuid = { workspace = true }
