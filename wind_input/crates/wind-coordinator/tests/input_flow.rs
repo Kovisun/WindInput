@@ -6343,6 +6343,29 @@ fn test_fullwidth_space_on_empty_buffer() {
     );
 }
 
+/// t337：中文半角空缓冲空格按自定义映射出字；DLL 据列掩码吃下的空格，产物是半角也要出字。
+#[test]
+fn test_custom_mapped_space_on_empty_buffer() {
+    if !has_schemas() {
+        return;
+    }
+    let with_cn_half = |v: &str| {
+        let mut cfg = config_with("pinyin");
+        cfg.input.punct.custom_enabled = true;
+        cfg.input
+            .punct
+            .custom_mappings
+            .insert(" ".into(), vec![v.into(), "".into(), "".into(), "".into()]);
+        Coordinator::new_headless(cfg, Some(&data_dir()))
+    };
+    for (mapped, what) in [("\u{3000}", "全角空格"), (" ", "原样半角空格")] {
+        match with_cn_half(mapped).handle_key_event(&key_event(0x20, EVENT_KEY_DOWN)) {
+            KeyAction::InsertText { text, .. } => assert_eq!(text, mapped, "中半列映射成{what}"),
+            other => panic!("中半列配了{what}，DLL 会吃下空格，透传即丢键；实际: {other:?}"),
+        }
+    }
+}
+
 #[test]
 fn test_select_char_brackets_group() {
     if !has_schemas() {

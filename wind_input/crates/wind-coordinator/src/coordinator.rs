@@ -4976,6 +4976,7 @@ impl Coordinator {
                 self.push_custom_en_punct_config(0); // 英半列自定义标点：DLL 据此吃键转发
                 self.push_cn_passthrough_punct_config(0); // 中文模式该透传的标点：DLL 据此**不**吃
                 self.push_en_passthrough_punct_config(0); // 同上，英文标点态那份（超集）
+                self.push_space_custom_cols_config(0); // 空格行自定义列：DLL 据此吃空缓冲空格
                 self.push_pair_state_ttl_config(0); // 配对状态时效（DLL 侧闸门据此判陈旧）
                 self.push_ctrl_space_toggle_config(0); // Ctrl+空格 切换开关：DLL 据此吃不吃该键（GH#172）
                 // 诊断采集开关本身与配置文件无关（会话级），这里重推纯属幂等保险——

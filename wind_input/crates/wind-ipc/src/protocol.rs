@@ -499,6 +499,11 @@ pub const CONFIG_KEY_CN_PASSTHROUGH_PUNCT: &str = "cn_passthrough_punct";
 ///
 /// TSF 侧按**当下**标点态（`STATUS_CHINESE_PUNCT`）二选一，标点态是运行时状态、进不了配置。
 pub const CONFIG_KEY_EN_PASSTHROUGH_PUNCT: &str = "en_passthrough_punct";
+/// 空格行配了自定义标点映射的列（位掩码，第 i 位 = 列 i：0=中半 1=英全 2=中全 3=英半）。
+/// 格式：`mask(u8)`。中文模式空缓冲时 TSF 默认透传空格、只在全角态吃；按 `OnTestKeyDown`
+/// 结论走的宿主（Notepad++、WPS）因此收不到半角列配的映射（t337）。TSF 据此按当下标点态 /
+/// 全半角多吃，引擎对吃下的空格必须出字。DLL 每次重连从 0（历史行为）起步，握手必推。
+pub const CONFIG_KEY_SPACE_CUSTOM_COLS: &str = "space_custom_cols";
 /// 配对状态时效（秒，0=不过期）同步键名。TSF 端持有吃键闸门（`_pairPendingDepth`），
 /// 必须能本地判定状态是否陈旧：若只有协调器过期而 DLL 仍吃跳出键，协调器回 PassThrough
 /// 已太晚（形成「吃了再吐」丢键）。故 TTL 判据以 DLL 侧为准，此键把阈值推给它。

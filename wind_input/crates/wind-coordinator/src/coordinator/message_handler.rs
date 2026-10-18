@@ -1681,8 +1681,11 @@ impl MessageHandler for Coordinator {
                     // 内建默认仅全角态转全角空格 U+3000，对齐设置端展示基线与微软拼音）。
                     // 流水线原样返回 " " 时（半角态无自定义）维持透传，保留宿主对
                     // 空格键的原生语义（如网页滚动）。
+                    //
+                    // DLL 据 `space_custom_cols` 吃下的空格则必须出字：并集掩码可能比当前方案
+                    // 宽，产物仍是 " " 时透传就成了吃了再吐（t337）。
                     let text = self.convert_punct(&state, ' ', data.prev_char);
-                    if text == " " {
+                    if text == " " && !self.idle_space_eaten(&state) {
                         return KeyAction::PassThrough;
                     }
                     self.record_commit(&text, 0, -1, CommitSource::Punctuation);

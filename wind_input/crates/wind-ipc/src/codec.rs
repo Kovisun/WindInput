@@ -1828,6 +1828,12 @@ pub fn encode_ctrl_space_toggle_value(enabled: bool) -> Vec<u8> {
     vec![enabled as u8]
 }
 
+/// 编码空格行自定义映射的列掩码（对齐 TSF `OnSyncConfig` 的 CONFIG_KEY_SPACE_CUSTOM_COLS）。
+/// 格式：mask(u8)。
+pub fn encode_space_custom_cols_value(mask: u8) -> Vec<u8> {
+    vec![mask]
+}
+
 /// 编码「英半列有自定义映射的源字符集合」（对齐 TSF `OnSyncConfig` CONFIG_KEY_CUSTOM_EN_PUNCT）。
 ///
 /// 格式：count(u8) + [ch:u16(LE)]...  源字符均为 ASCII 标点，一个 UTF-16 单元足够。
