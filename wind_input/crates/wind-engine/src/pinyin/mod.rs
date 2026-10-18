@@ -1658,6 +1658,8 @@ impl PinyinEngine {
     /// 专用的全拼→击键回映射，用在这里等于二次换算，必然错位。
     fn recall_full_pinyin(&self, stroke: &str, syllables: &[String], cands: &mut Vec<Candidate>) {
         let dict = &self.dict;
+        // 双拼同键音节是**键位**的属性，全拼打法没有键位：本支路只吃用户开的模糊组。
+        let fz = self.fuzzy_config.without_shared_key();
         let start = cands.len();
         // 输入自身表达的音节数，口径同主路径的 `started_syllables`：完整音节 + (有残码 ? 1 : 0)。
         //
@@ -1744,7 +1746,7 @@ impl PinyinEngine {
         let completed: String = syllables.concat();
         // 模糊命中带 `learn_code`（词典码 + 边界），同主路径 step 1：本支路的候选码是击键，
         // 而击键在这里就是全拼（同一个域），分步组词时造词侧拼的正是这份规范码。
-        for h in self.lookup_with_fuzzy(&completed, syllables) {
+        for h in self.lookup_with_fuzzy_in(&completed, syllables, &fz) {
             let c = completed.clone();
             let n = c.len();
             let meta = wind_candidate::CandidateMeta {
@@ -1763,7 +1765,7 @@ impl PinyinEngine {
                 // 逐级限流，见 MAX_FULL_PINYIN_SUBPHRASE：单音节前缀的同音单字动辄 20+ 条，
                 // 不限就会吃光整个配额，把 ① 精确整词和 ③ 前缀补全挤出去。
                 for h in self
-                    .lookup_with_fuzzy(&code, &syllables[..end])
+                    .lookup_with_fuzzy_in(&code, &syllables[..end], &fz)
                     .into_iter()
                     .take(MAX_FULL_PINYIN_SUBPHRASE)
                 {
@@ -1835,9 +1837,13 @@ impl PinyinEngine {
             }
             // 模糊音同 ①（t215）：用户词记录的是规范码，模糊打法只能靠变体码撞上。
             // 放在精确那路之后，同文时 `push` 的去重让精确那条占位。
-            for c in
-                self.search_store_fuzzy(store_dm, &completed, syllables, MAX_FULL_PINYIN_RECALL)
-            {
+            for c in self.search_store_fuzzy(
+                store_dm,
+                &completed,
+                syllables,
+                MAX_FULL_PINYIN_RECALL,
+                &fz,
+            ) {
                 let n = completed.len();
                 push(
                     cands,
@@ -1915,13 +1921,9 @@ impl PinyinEngine {
             let trie = &self.trie;
             let seg_graph = SegGraph::from_dag(&Dag::build(&completed, trie));
             // 模糊音同 ①②：与主路径 step 2 一致地把 fuzzy_config 传进词图。
-            let lattice_nodes = self.lattice_builder.build(
-                &completed,
-                &seg_graph,
-                dict,
-                Some(&self.fuzzy_config),
-                true,
-            );
+            let lattice_nodes =
+                self.lattice_builder
+                    .build(&completed, &seg_graph, dict, Some(&fz), true);
             let input_len = completed.len();
             let mut lattice: Vec<Vec<WordNode>> = vec![Vec::new(); input_len + 1];
             for (end_pos, nodes_at_end) in lattice_nodes.iter().enumerate() {
@@ -2202,6 +2204,17 @@ impl PinyinEngine {
     /// 返回 `(text, weight, order, is_fuzzy)`：原 code 精确命中 is_fuzzy=false；
     /// 模糊变体命中 is_fuzzy=true、按处数打折扣；双拼同键音节（0 处）命中不罚也不标。
     fn lookup_with_fuzzy(&self, code: &str, syllables: &[String]) -> Vec<LookupHit> {
+        self.lookup_with_fuzzy_in(code, syllables, &self.fuzzy_config)
+    }
+
+    /// [`Self::lookup_with_fuzzy`] 的本体，模糊配置由调用方给：全拼降级支路传去掉双拼同键
+    /// 音节的那份（[`FuzzyConfig::without_shared_key`]）。
+    fn lookup_with_fuzzy_in(
+        &self,
+        code: &str,
+        syllables: &[String],
+        fz: &FuzzyConfig,
+    ) -> Vec<LookupHit> {
         // 精确匹配：候选码即查询码 `code`，故词典 boundary 与之同域，可直接采信。
         // 注意此处必须用 search_with_boundary——拼音引擎直接持有 CachedDict、不经
         // SystemDictLayer，用 search() 会把边界丢在这里。
@@ -2225,7 +2238,7 @@ impl PinyinEngine {
         // 模糊变体命中一律 boundary=0（不设防）：词典给的是**变体码**（如 zhongguo）的切分，
         // 而候选对外的 code 是用户实际输入的原码（zongguo）——两者不同域，位偏移对不上，
         // 直接采信会错位误杀。模糊音本就是放宽匹配，不校验边界是合理的。
-        for (variant, edits) in self.fuzzy_codes(code, syllables) {
+        for (variant, edits) in self.fuzzy_codes(code, syllables, fz) {
             // 走 `search_with_boundary` 而非 `search`：变体码与它自己的边界同域，
             // 那份真值正是造词要的（候选对外仍报 boundary=0，见上）。
             for h in self.dict.search_with_boundary(&variant) {
@@ -2253,14 +2266,19 @@ impl PinyinEngine {
     /// 系统词库（[`Self::lookup_with_fuzzy`]）与用户/临时造词层（[`Self::search_store_fuzzy`]）
     /// 共用这一份判据 —— 两处各展开一遍的话，迟早一边多认一种变体、一边少认。
     /// 模糊音全关时返回空（单音节 `fuzzy_variants_scored` 为空；多音节只剩原码、被过滤）。
-    fn fuzzy_codes(&self, code: &str, syllables: &[String]) -> Vec<(String, usize)> {
+    fn fuzzy_codes(
+        &self,
+        code: &str,
+        syllables: &[String],
+        fz: &FuzzyConfig,
+    ) -> Vec<(String, usize)> {
         if syllables.len() <= 1 {
             // 单音节：对该音节（无切分时退化为整码）生成变体。
             let syllable: &str = syllables.first().map_or(code, String::as_str);
-            fuzzy::FuzzyMatcher::fuzzy_variants_scored(syllable, &self.fuzzy_config)
+            fuzzy::FuzzyMatcher::fuzzy_variants_scored(syllable, fz)
         } else {
             // 多音节：笛卡尔积展开各音节变体（组合数上限见 `expand_syllables`）。
-            self.expand_code(syllables)
+            Self::expand_code(syllables, fz)
                 .into_iter()
                 .filter(|(alt, _)| alt != code)
                 .collect()
@@ -2284,12 +2302,13 @@ impl PinyinEngine {
         code: &str,
         syllables: &[String],
         limit: usize,
+        fz: &FuzzyConfig,
     ) -> Vec<Candidate> {
-        if !self.fuzzy_config.any_enabled() {
+        if !fz.any_enabled() {
             return Vec::new();
         }
         let mut out = Vec::new();
-        for (variant, edits) in self.fuzzy_codes(code, syllables) {
+        for (variant, edits) in self.fuzzy_codes(code, syllables, fz) {
             for mut c in store_dm.search(&variant, limit) {
                 c.meta.store_code = Some(c.code.as_str().into());
                 c.meta.learn_code = Some((std::mem::take(&mut c.code), c.boundary));
@@ -2309,8 +2328,8 @@ impl PinyinEngine {
     /// **同一份**逐音节展开逻辑——两处曾各写一套，且 lattice 那套对整串求变体，非首音节的
     /// 模糊永远命中不了（见该函数文档）。
     /// 返回 `(变体码, 被模糊的音节数)`——第二项供 [`fuzzy_penalized`] 按音节数累乘折扣。
-    fn expand_code(&self, syllables: &[String]) -> Vec<(String, usize)> {
-        fuzzy::FuzzyMatcher::expand_syllables(syllables, &self.fuzzy_config)
+    fn expand_code(syllables: &[String], fz: &FuzzyConfig) -> Vec<(String, usize)> {
+        fuzzy::FuzzyMatcher::expand_syllables(syllables, fz)
     }
 }
 
@@ -3696,7 +3715,13 @@ impl Engine for PinyinEngine {
             // 关模糊音时整段跳过（`search_store_fuzzy` 本也立即返回，但前缀循环的 join 白分配）。
             let fuzzy_on = self.fuzzy_config.any_enabled();
             if fuzzy_on && completed == query {
-                store_cands.extend(self.search_store_fuzzy(store_dm, query, &syllables, limit));
+                store_cands.extend(self.search_store_fuzzy(
+                    store_dm,
+                    query,
+                    &syllables,
+                    limit,
+                    &self.fuzzy_config,
+                ));
             }
             if fuzzy_on && syllables.len() >= 2 {
                 for end in 1..syllables.len().min(6) {
@@ -3709,6 +3734,7 @@ impl Engine for PinyinEngine {
                         &code,
                         &syllables[..end],
                         limit,
+                        &self.fuzzy_config,
                     ));
                 }
             }
@@ -6314,6 +6340,59 @@ i = ["i"]
 
     fn texts(r: &ConvertResult) -> Vec<&str> {
         r.candidates.iter().map(|c| c.text.as_str()).collect()
+    }
+
+    /// 全拼降级支路不吃双拼同键音节：全拼打 `diushi` 只出「丢失」，双拼 `dqui` 照出「对视」。
+    ///
+    /// 布局让 `diushi` 在双拼流里读作 di|shao|hi，与 diu/dui 无关——「丢失」只能来自全拼
+    /// 支路（支路至少要两个音节），「对视」若出现也只能是支路误吃了同键对。
+    #[test]
+    fn full_pinyin_fallback_ignores_shared_key() {
+        use std::io::Write;
+        let path = std::env::temp_dir().join("wind_fp_fallback_shared_key.dict.yaml");
+        {
+            let mut f = std::fs::File::create(&path).unwrap();
+            writeln!(f, "---\nname: py\n...").unwrap();
+            writeln!(f, "丢失\tdiu shi\t100").unwrap();
+            writeln!(f, "对视\tdui shi\t300").unwrap();
+        }
+        let dict = CachedDict::Memory(CodetableDict::load(&path).unwrap());
+        let _ = std::fs::remove_file(&path);
+        let layout = r#"
+[meta]
+id = "shared"
+name = "同键测试"
+[initials]
+u = "sh"
+[finals]
+q = ["iu", "ui"]
+i = ["i"]
+s = ["ao"]
+"#;
+        let cfg = Config {
+            allow_full_pinyin: true,
+            ..Config::default()
+        };
+        let eng = PinyinEngine::new(cfg, dict).with_shuangpin(ShuangpinConverter::new(
+            Layout::from_toml_str(layout).unwrap(),
+        ));
+        let r = eng.convert("diushi", 20).unwrap();
+        assert!(
+            texts(&r).contains(&"丢失"),
+            "全拼支路应出「丢失」: {:?}",
+            texts(&r)
+        );
+        assert!(
+            !texts(&r).contains(&"对视"),
+            "全拼支路不得吃同键对: {:?}",
+            texts(&r)
+        );
+        let r = eng.convert("dqui", 20).unwrap();
+        assert!(
+            texts(&r).contains(&"对视"),
+            "双拼流照出「对视」: {:?}",
+            texts(&r)
+        );
     }
 
     /// `add_store_abbrev_nodes` 赢下同词同跨度的既有节点时，切分与 `canon` 随胜者换

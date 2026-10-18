@@ -40,6 +40,14 @@ pub struct FuzzyConfig {
 }
 
 impl FuzzyConfig {
+    /// 只留用户开的模糊组、去掉双拼同键音节的副本（双拼方案下的全拼降级支路用）。
+    pub fn without_shared_key(&self) -> FuzzyConfig {
+        FuzzyConfig {
+            shared_key: HashMap::new(),
+            ..self.clone()
+        }
+    }
+
     /// 是否有任一展开来源：用户开的模糊组，或双拼同键音节（[`Self::shared_key`]）。
     /// 供调用方在全关时跳过整段展开逻辑（含其前置的切分求解）。
     ///
