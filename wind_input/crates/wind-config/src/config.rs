@@ -3031,7 +3031,7 @@ pub struct QuickInputConfig {
     ///
     /// 超出时按「次数少、用得旧」裁掉，与网址历史 `input.url.history_max` 同一套裁剪。
     /// 不做按时间过期（维护者 2026-10-05 定）：按「用得旧」淘汰本身就会让过气项目的词
-    /// 慢慢被挤出去。内部字段，设置页不开放。
+    /// 慢慢被挤出去。设置页：输入 → 快捷输入 → 历史条数上限。
     #[serde(default = "default_quick_history_max")]
     pub history_max: u32,
 }
