@@ -1306,6 +1306,14 @@ select_char_keys = []
 number_key = "ignore"
 select_key = "ignore"
 select_char_key = "ignore"
+# 翻页键翻不动时（首页按上翻、末页按下翻）：ignore=吞键 / commit_and_input=上屏高亮候选并
+# 输出该键的符号（与直接按标点同一条通路：中文标点、全角、自动配对照常生效）。
+# 只对能出字的翻页键生效（- = , . [ ]），PageUp/PageDown 不受影响；只在本批候选**从未翻过页**
+# 时生效——翻过页再翻回首页，那一下仍是吞键，免得翻页中途打出符号。末页按下翻若触发了检索
+# 范围放宽（scope_relax.page_end_key），放宽优先、不上屏。
+# ⚠ 与 input.buffer_symbol_chars 的优先级：其中的符号在组码中先进缓冲。出厂它是 "-"，所以首页
+#   按 - 仍是接着打码；想让首页的 - 也顶屏出字，需把 buffer_symbol_chars 清空（= 号不受影响）。
+page_key = "ignore"
 
 [ui.candidate]
 # 候选窗首显策略（全局默认档）：新组合的候选窗「何时」显示，是快与准之间的取舍。

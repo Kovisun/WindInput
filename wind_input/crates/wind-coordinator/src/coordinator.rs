@@ -5543,6 +5543,11 @@ impl Coordinator {
         if action.requires_candidates() && state.candidates.is_empty() {
             return None;
         }
+        // 只认纯翻页动词：`AuxCode(PageNext)` 共键降级的那一下不归 `keys.overflow.page_key`。
+        let is_page_action = matches!(
+            action,
+            wind_config::SessionAction::PagePrev | wind_config::SessionAction::PageNext
+        );
         let nav = match action {
             wind_config::SessionAction::HighlightUp => keymap::NavAction::HighlightUp,
             wind_config::SessionAction::HighlightDown => keymap::NavAction::HighlightDown,
@@ -5687,8 +5692,27 @@ impl Coordinator {
             if let Some(act) = composed {
                 return Some(act);
             }
+        } else if is_page_action && self.page_key_overflow_to_punct(state, data) {
+            // 翻不动（`page_next` 的检索范围放宽已在上面先行裁决，放宽了就是 `changed`）：
+            // 不消费，让键落到兜底标点臂，由它统一顶高亮候选并出符号（中文标点、全角、
+            // 智能符号、自动配对、`punct_commit` 都在那一处）。
+            return None;
         }
         Some(KeyAction::Consumed)
+    }
+
+    /// 翻页键翻不动时是否按 `keys.overflow.page_key = "commit_and_input"` 交给标点臂。
+    ///
+    /// 只在主路（overlay 各有自己的翻页语义）、该键能出符号（PageUp/PageDown/Tab 不算，
+    /// 数字另有选词臂）、且本批候选**从未翻过页**时成立——判据取 `state.paged` 而非
+    /// `current_page == 0`，理由同 [`Self::symbol_buffer_key_free`]：翻回首页的用户仍在
+    /// 翻页，此刻按键突然出字会让人当场打错。
+    fn page_key_overflow_to_punct(&self, state: &State, data: &KeyEventData) -> bool {
+        state.active.is_none()
+            && !state.paged
+            && self.rt().config.keys.overflow.page_key == "commit_and_input"
+            && punct_char(data.key_code, data.modifiers & MOD_SHIFT != 0)
+                .is_some_and(|c| !c.is_ascii_digit())
     }
 
     /// 当前是否有输入会话：正在 overlay 模式里，或普通输入有编码 / 候选 / 已上屏段。

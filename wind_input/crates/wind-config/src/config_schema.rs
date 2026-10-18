@@ -106,6 +106,9 @@ const OVERFLOW_VALUES: &[&str] = &["ignore", "commit", "commit_and_input"];
 const NUMBER_OVERFLOW_VALUES: &[&str] =
     &["ignore", "commit", "commit_and_input", "clear_and_input"];
 
+/// 翻页键翻不动时：只有吞键与「顶高亮候选 + 输出该键符号」两档。
+const PAGE_KEY_OVERFLOW_VALUES: &[&str] = &["ignore", "commit_and_input"];
+
 /// 空码（缓冲非空但无候选）时终结键怎么处置这串废码——**回车/空格两键**。
 /// **只有两态**：`commit` 上屏原码 / `clear` 丢弃。语义与实现见
 /// `docs/design/enter-behavior-clear-semantics.md`。
@@ -591,6 +594,7 @@ static REGISTRY: &[ConfigField] = &[
     f("keys.overflow.number_key", Enum(NUMBER_OVERFLOW_VALUES)),
     f("keys.overflow.select_key", Enum(OVERFLOW_VALUES)),
     f("keys.overflow.select_char_key", Enum(OVERFLOW_VALUES)),
+    f("keys.overflow.page_key", Enum(PAGE_KEY_OVERFLOW_VALUES)),
     // -- ui（外观）--
     f("ui.candidate.per_page", Int),
     f("ui.candidate.per_page_extended", Int),

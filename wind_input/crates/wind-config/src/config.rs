@@ -5623,6 +5623,11 @@ pub struct OverflowConfig {
     /// 以词定字键候选词长度不足时
     #[serde(default = "default_overflow_behavior")]
     pub select_char_key: String,
+    /// 可打印的翻页键（`-` `=` `,` `.` `[` `]`）在主路翻不动、且本批候选从未翻过页时：
+    /// "ignore"（吞键）/ "commit_and_input"（顶高亮候选并输出该键的符号，走标点通路）。
+    /// 只有这两档——「只顶不出字」没有诉求。
+    #[serde(default = "default_overflow_behavior")]
+    pub page_key: String,
 }
 
 fn default_overflow_behavior() -> String {
@@ -5635,6 +5640,7 @@ impl Default for OverflowConfig {
             number_key: default_overflow_behavior(),
             select_key: default_overflow_behavior(),
             select_char_key: default_overflow_behavior(),
+            page_key: default_overflow_behavior(),
         }
     }
 }
