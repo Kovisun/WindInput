@@ -1205,6 +1205,9 @@ mod tests {
         CMD_CANDIDATE_SCROLL, CMD_HOST_RENDER_REQUEST, CMD_HOST_RENDER_SETUP, CMD_KEY_EVENT,
     };
 
+    /// 面板指针事件 (kind, event, button, x, y)。
+    type PanelPointer = (u32, u32, u32, i32, i32);
+
     /// 最小测试 handler：记录 host_render_failed 的 reason 与鼠标 select/scroll 值，
     /// 其余方法返回安全默认值。
     #[derive(Default)]
@@ -1213,7 +1216,7 @@ mod tests {
         last_select: std::sync::atomic::AtomicI32,
         last_scroll: std::sync::atomic::AtomicI32,
         last_uielement: std::sync::Mutex<Vec<String>>,
-        last_panel_pointer: std::sync::Mutex<Vec<(u32, u32, u32, i32, i32)>>,
+        last_panel_pointer: std::sync::Mutex<Vec<PanelPointer>>,
         /// 视为后台客户端的 pid（0 = 无）。
         background_pid: AtomicU32,
         activation_calls: std::sync::Mutex<Vec<String>>,
