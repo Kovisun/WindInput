@@ -227,8 +227,8 @@ mod tests {
     }
 
     /// 文档写明 `\w` `\d` 可用，用户拿它处理中文剪贴板：类按 Unicode 算（汉字是 `\w`、
-    /// 全角数字是 `\d`）。钉的是 regex 的 `unicode` feature——为压体积只关了 `perf`，
-    /// 换 regex-lite 或关 unicode 会让这两类退成 ASCII。
+    /// 全角数字是 `\d`）。钉的是 regex 的 `unicode` feature——换 regex-lite 或关 unicode
+    /// 会让这两类退成 ASCII。
     #[test]
     fn regex_classes_are_unicode_aware() {
         assert_eq!(call(fn_regex, &["清风 input", "\\w+", "W"]), "W W");
