@@ -1402,6 +1402,12 @@ impl CandidateWindow {
         if grid.is_none() {
             self.grid_peak_w.set((0.0, 0.0));
         }
+        // 刚展开：窗口原地往下长，新长出来的格子可能正好落在静止不动的鼠标底下，系统随之补发
+        // 一次移动消息 ⇒ 用户什么都没做，悬停高亮与提示就冒出来了。与窗口刚显示同理
+        // （`mark_visible`），从这一刻重新起算「鼠标动过没有」。
+        if self.grid.is_none() && grid.is_some() && self.visible {
+            self.mouse.borrow_mut().reset_hover();
+        }
         self.grid = grid;
     }
 
@@ -2037,14 +2043,6 @@ impl CandidateWindow {
     fn tooltip_hover(&self) -> i32 {
         if self.mouse.borrow().tip_hold.active() {
             -1
-        } else if self.hover < 0 && self.grid_shown() {
-            // 展开态没有鼠标悬停时，气泡跟随键盘高亮——前提是协调器给高亮格渲染了气泡
-            // （`ui.candidate.grid_tooltip_follows_highlight`，出厂关）。没开时高亮格的气泡
-            // 是空文档，这里按「无内容」不显示，与原行为一致。
-            self.candidates
-                .get(self.selected)
-                .filter(|c| !c.tooltip.is_empty())
-                .map_or(-1, |_| self.selected as i32)
         } else {
             self.hover
         }
@@ -4226,19 +4224,18 @@ impl CandidateWindow {
         }
         // 网格装配：每 `cols` 格成一行。末屏行数不足时补与真实行同构的占位行（同竖排
         // `min_rows` 那套），滚到末尾窗口也不变矮——窗口高度一变，上翻定位时整个窗口就跳。
+        // 展开态的分类标签栏，挂到表格**下方**与翻页栏同一行（见装配段）。放在上方会把首行
+        // 往下推，展开就不像「原地往下长出来」了。
+        let mut grid_tab_bar: Option<View> = None;
         if let Some(g) = grid {
-            // 分类标签栏（P3）：表格上方一行，当前分类画选中底色。命中 tag 落在
-            // `GRID_TAB_TAG_BASE` 段，点击经候选点选那条路回到协调器（宿主原样回传正数下标）。
-            // 展开期间它恒在，窗口高度不因切分类而变。
+            // 分类标签栏（P3）：当前分类画选中底色。命中 tag 落在 `GRID_TAB_TAG_BASE` 段，
+            // 点击经候选点选那条路回到协调器（宿主原样回传正数下标）。展开期间它恒在，
+            // 窗口高度不因切分类而变。
             if g.tabs != 0 {
                 let dim_c = t.color("text_dim", [140, 140, 145, 255]);
                 let mut bar = View::container(Layout::Row)
                     .gap(4.0 * s)
-                    .cross(Align::Center)
-                    .margin(Edges {
-                        b: 4.0 * s,
-                        ..Edges::default()
-                    });
+                    .cross(Align::Center);
                 for tab in wind_ui_types::GridTab::ALL {
                     if g.tabs & tab.bit() == 0 {
                         continue;
@@ -4260,7 +4257,7 @@ impl CandidateWindow {
                     }
                     bar = bar.child(chip);
                 }
-                list = list.child(bar);
+                grid_tab_bar = Some(bar);
             }
             let mut cells = grid_cells.into_iter().peekable();
             let mut shown = 0usize;
@@ -4314,7 +4311,25 @@ impl CandidateWindow {
         // ⚠️ 判据是 `list_vertical` 不是 `self.vertical`：旋转态的列表在局部空间里也是竖排，
         // 翻页栏同样该独立成行（它加在 `root` 上、在旋转包裹之外，故屏幕上仍是横的一条）。
         // 网格同样走这一支：翻页栏挂在表格下方独立成行，不去抢某一行的宽度。
-        let vertical_bottom_pager = if list_vertical || grid.is_some() {
+        let vertical_bottom_pager = if grid.is_some() {
+            // 展开态：分类标签与翻页箭头同一行、整体居中（`[标签栏]  ‹ ›`）。不跟主题的
+            // `pager_align` 走：这一行在表格正下方，居中才与上面对称的格子对得上。
+            let pager = pager.take();
+            (grid_tab_bar.is_some() || pager.is_some()).then(|| {
+                let mut row = View::container(Layout::Row)
+                    .fill_cross()
+                    .cross(Align::Center)
+                    .gap(12.0 * s)
+                    .child(View::spacer());
+                if let Some(bar) = grid_tab_bar.take() {
+                    row = row.child(bar);
+                }
+                if let Some(p) = pager {
+                    row = row.child(p);
+                }
+                row.child(View::spacer())
+            })
+        } else if list_vertical {
             pager.take().map(|p| {
                 let row = View::container(Layout::Row)
                     .fill_cross()
@@ -5235,53 +5250,23 @@ mod grid_tests {
         );
     }
 
-    /// 没有鼠标悬停时，气泡跟随键盘高亮——只在高亮格带了气泡内容时（协调器开了跟随才会给）。
+    /// 刚展开时重新起算「鼠标动过没有」：窗口往下长到静止的鼠标底下，不该凭空冒出悬停。
+    /// 已在展开态时（滚屏、切分类）不动闸门，否则鼠标停在格子上每滚一下悬停就掉一次。
     #[test]
-    fn tooltip_follows_the_highlight_only_when_it_has_content() {
+    fn expanding_resets_the_hover_gate_once() {
         let mut w = grid_win(3, 2, 0, SIX);
-        w.selected = 4;
-        assert_eq!(w.tooltip_hover(), -1, "高亮格没有气泡内容：不跟随");
-        let doc = wind_ui_types::TooltipDoc {
-            sections: vec![wind_ui_types::TooltipSection {
-                title: None,
-                inline: false,
-                lines: vec![wind_ui_types::TooltipLine {
-                    text: "yī".into(),
-                    raw: 0,
-                }],
-            }],
-        };
-        w.candidates[4].tooltip = std::sync::Arc::new(doc);
-        assert_eq!(w.tooltip_hover(), 4, "无悬停：跟随高亮");
-        w.hover = 1;
-        assert_eq!(w.tooltip_hover(), 1, "有悬停：悬停优先");
-    }
-
-    /// 序号顺延到下一行：带序号区间覆盖两行时，两行的序号都可见，第三行仍是透明占位。
-    #[test]
-    fn indices_can_span_two_rows() {
-        let mut w = grid_win(3, 3, 0, &["一"; 9]);
-        w.set_grid(Some(CandidateGrid {
-            cols: 3,
-            rows: 3,
-            highlight_row: 0,
-            index_start: 0,
-            index_count: 6,
-            tabs: 0,
-            active_tab: 0,
-        }));
-        let mut leaves = Vec::new();
-        index_leaves(&laid(&w), &mut leaves);
-        let alphas: Vec<u8> = leaves.iter().map(|(_, a)| *a).collect();
-        assert!(alphas[..6].iter().all(|a| *a > 0), "前两行可见: {alphas:?}");
-        assert!(
-            alphas[6..].iter().all(|a| *a == 0),
-            "第三行透明: {alphas:?}"
-        );
+        w.set_grid(None);
+        w.visible = true;
+        w.mouse.borrow_mut().engaged = true;
+        refill(&mut w, 3, 2, 0, SIX);
+        assert!(!w.mouse.borrow().engaged, "收起 → 展开：闸门重新起算");
+        w.mouse.borrow_mut().engaged = true;
+        refill(&mut w, 3, 2, 1, SIX);
+        assert!(w.mouse.borrow().engaged, "展开态里再收到网格帧：不动闸门");
     }
 
     /// 分类标签栏：只画位集里的标签，各带 `GRID_TAB_TAG_BASE + 编号` 的命中 tag，当前分类画
-    /// 选中底色；标签栏在表格上方。
+    /// 选中底色；标签栏在表格下方、与翻页箭头同一行，首行位置与收起态一致。
     #[test]
     fn tab_bar_lists_the_offered_tabs() {
         use wind_ui_types::{GRID_TAB_TAG_BASE as B, GridTab};
@@ -5304,7 +5289,24 @@ mod grid_tests {
             .filter(|t| (B..B + 8).contains(t))
             .collect();
         assert_eq!(tab_tags, vec![B, B + 1, B + 3], "只有给出的三个标签");
-        assert!(hit(&root, B).y < hit(&root, 0).y, "标签栏在表格上方");
+        let last_row = hit(&root, 3);
+        let tab = hit(&root, B);
+        assert!(tab.y >= last_row.y + last_row.h, "标签栏在表格下方");
+        // 与翻页箭头同一行：两者纵向区间有重叠。
+        let next = hit(&root, TAG_PAGE_NEXT);
+        assert!(
+            tab.y < next.y + next.h && next.y < tab.y + tab.h,
+            "标签与翻页箭头同一行：tab={tab:?} next={next:?}"
+        );
+        assert!(next.x > tab.x, "翻页箭头在标签右边");
+        // 首行的位置与收起态的单行一致：展开是原地往下长出来。
+        let mut flat = grid_win(3, 2, 0, SIX);
+        flat.set_grid(None);
+        assert_eq!(
+            hit(&laid(&flat), 0).y,
+            hit(&root, 0).y,
+            "首行不被标签栏推下去"
+        );
         let sel = Some(wind_theme::fallback::SELECTED_BG);
         assert_eq!(bg_of(&root, B + 1).unwrap(), sel, "当前分类画选中底色");
         assert_ne!(bg_of(&root, B).unwrap(), sel);

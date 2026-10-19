@@ -6611,10 +6611,6 @@ pub struct UiCandidateConfig {
     /// - `"off"`：只编高亮行。
     #[serde(default = "default_grid_index_fill")]
     pub grid_index_fill: String,
-    /// 展开态下悬停气泡跟随键盘高亮（出厂关）：没有鼠标悬停时，高亮格的气泡也显示，
-    /// 贴在窗口外侧。代价是每次移动高亮多渲染一份气泡。
-    #[serde(default)]
-    pub grid_tooltip_follows_highlight: bool,
     /// 展开态的分类标签：`all` 全部 / `single` 单字 / `phrase` 词组 / `rare` 生僻 / `symbol` 符号。
     /// 只决定**有哪些**，顺序固定按上面这个次序（「全部」恒在首位）。少于两个时不显示标签栏。
     /// 未知名字忽略。
@@ -6845,7 +6841,6 @@ impl Default for UiCandidateConfig {
             grid_rows: default_grid_rows(),
             grid_cell_max_chars: default_grid_cell_max_chars(),
             grid_index_fill: default_grid_index_fill(),
-            grid_tooltip_follows_highlight: false,
             grid_categories: default_grid_categories(),
             comment_enabled: true,
             comment_template_vertical: default_comment_template(),
