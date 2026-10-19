@@ -259,6 +259,38 @@ impl Coordinator {
         Some((start, end))
     }
 
+    /// 按序号选词 / 按序号操作（数字键、`;'`、Alt / Ctrl+数字）的下标范围 `[start, end)`。
+    ///
+    /// 收起态就是当页。展开态起点仍是高亮行行首（于是一切 `start + offset` 的写法原样成立），
+    /// 终点往后延到带序号的最后一格——序号顺延到下一行时，数字键要跟着选得到那里。
+    pub(crate) fn select_range(&self, state: &State) -> (usize, usize) {
+        let (start, end) = self.page_range(state);
+        match self.grid_visible_range(state) {
+            Some((_, vis_end)) if Self::grid_active(state) => (
+                start,
+                (start + self.grid_index_span(state)).min(vis_end).max(end),
+            ),
+            _ => (start, end),
+        }
+    }
+
+    /// 展开态下从高亮行行首起有几格带序号（`ui.candidate.grid_index_fill`），不超出可见区。
+    fn grid_index_span(&self, state: &State) -> usize {
+        // 数字键 1–9、0 一共十个。
+        const DIGITS: usize = 10;
+        let pp = self.per_page(state.active);
+        let top = state.grid_top.unwrap_or(state.current_page);
+        let rows_below = (top + self.grid_rows())
+            .saturating_sub(state.current_page)
+            .max(1);
+        match self.rt().config.ui.candidate.grid_index_fill.as_str() {
+            "off" => pp,
+            "cells" => DIGITS.max(pp).min(rows_below * pp),
+            // "rows" 及未知值：只补整行，避免出现半行带号、半行不带号。
+            _ => (DIGITS / pp).max(1).min(rows_below) * pp,
+        }
+    }
+
     /// 平铺下标 → `(页, 页内下标)`。没展开、或下标落在可见区外返回 `None`。
     pub(crate) fn grid_cell(&self, state: &State, flat: usize) -> Option<(usize, usize)> {
         let (start, end) = self.grid_visible_range(state)?;
@@ -393,8 +425,11 @@ mod tests {
             Some(CandidateGrid {
                 cols: PP as u16,
                 rows: ROWS as u16,
-                highlight_row: 0
-            })
+                highlight_row: 0,
+                index_start: 0,
+                index_count: PP as u16,
+            }),
+            "每页 7 个按整行补只编得下高亮行"
         );
     }
 
@@ -621,6 +656,102 @@ mod tests {
         assert_eq!(view(&c), (1, 0, None));
     }
 
+    /// 自定每页数与序号顺延档位的协调器。
+    fn coord_with(per_page: usize, fill: &str) -> (Arc<Coordinator>, Receiver<UiCommand>) {
+        let mut cfg = wind_config::Config::default();
+        cfg.input.default.chinese_mode = true;
+        cfg.ui.candidate.grid_expand = true;
+        cfg.ui.candidate.per_page = per_page;
+        cfg.ui.candidate.grid_index_fill = fill.into();
+        let (c, rx) = Coordinator::new_headless_with_ui(cfg, None);
+        c.debug_mark_coords_ready();
+        (c, rx)
+    }
+
+    /// 最后一帧里带序号的格子：(平铺下标起点, 格数, 各格序号)。
+    fn index_frame(rx: &Receiver<UiCommand>) -> (u16, u16, Vec<String>) {
+        rx.try_iter()
+            .filter_map(|cmd| match cmd {
+                UiCommand::UpdateCandidates {
+                    candidates,
+                    grid: Some(g),
+                    ..
+                } => Some((
+                    g.index_start,
+                    g.index_count,
+                    candidates.into_iter().map(|i| i.label).collect::<Vec<_>>(),
+                )),
+                _ => None,
+            })
+            .last()
+            .expect("应下发展开态的帧")
+    }
+
+    /// 只补整行（出厂）：每页 5 个时高亮行 1–5、下一行 6–10（第 10 个由数字键 0 选，序号沿用
+    /// 普通候选窗的写法），数字键的选择范围跟着延到下一行。
+    #[test]
+    fn indices_continue_onto_whole_rows() {
+        let (c, rx) = coord_with(5, "rows");
+        seed(&c, 5 * 8);
+        c.handle_key_event(&key(keymap::VK_EQUAL));
+        c.handle_key_event(&key(keymap::VK_DOWN));
+        let (from, count, labels) = index_frame(&rx);
+        assert_eq!((from, count), (5, 10), "高亮在第 2 行：第 2、3 行带号");
+        assert_eq!(
+            &labels[5..15],
+            &["1", "2", "3", "4", "5", "6", "7", "8", "9", "10"]
+        );
+        let st = c.state.lock().unwrap();
+        assert_eq!(c.select_range(&st), (5, 15), "数字键的范围跟着序号走");
+    }
+
+    /// 高亮在可见区最后一行：下面没有可见行可补，只编高亮行（不给看不见的格子编号）。
+    #[test]
+    fn indices_stay_in_the_visible_rows() {
+        let (c, rx) = coord_with(5, "rows");
+        seed(&c, 5 * 8);
+        c.handle_key_event(&key(keymap::VK_EQUAL));
+        for _ in 0..(ROWS - 1) {
+            c.handle_key_event(&key(keymap::VK_DOWN));
+        }
+        let (from, count, _) = index_frame(&rx);
+        assert_eq!((from, count), ((ROWS as u16 - 1) * 5, 5));
+    }
+
+    /// 逐格档：每页 7 个时编满 10 个，下一行前 3 格带 8、9、10；off 档只编高亮行。
+    #[test]
+    fn index_fill_cells_and_off() {
+        let (c, rx) = coord_with(7, "cells");
+        seed(&c, 7 * 4);
+        c.handle_key_event(&key(keymap::VK_EQUAL));
+        let (from, count, labels) = index_frame(&rx);
+        assert_eq!((from, count), (0, 10));
+        assert_eq!(&labels[7..10], &["8", "9", "10"]);
+        let (c, rx) = coord_with(5, "off");
+        seed(&c, 5 * 4);
+        c.handle_key_event(&key(keymap::VK_EQUAL));
+        assert_eq!(index_frame(&rx).1, 5);
+    }
+
+    /// 菜单开着时在另一格上右键：高亮与悬停都跟到新的这一格（悬停若停在旧格，旧格的悬停
+    /// 底色会留在原处，看上去像高亮没跟过来）。
+    #[test]
+    fn second_right_click_moves_highlight_and_hover() {
+        let (c, rx) = coord(true);
+        seed(&c, PP * 3);
+        c.handle_key_event(&key(keymap::VK_EQUAL));
+        for idx in [PP + 2, 2 * PP + 4] {
+            c.handle_ui_event(UiEvent::RequestCandidateMenu {
+                page_local: idx,
+                x: 0,
+                y: 0,
+            });
+        }
+        assert_eq!(c.hover_target(), (2 * PP + 4) as i32);
+        let (_, selected, _) = last_frame(&rx).unwrap();
+        assert_eq!(selected, 2 * PP + 4);
+    }
+
     fn data_dir() -> std::path::PathBuf {
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../build_dev/data")
     }
@@ -653,5 +784,30 @@ mod tests {
             other => panic!("按 2 应上屏第 2 页第 2 个，实得 {other:?}"),
         }
         assert_eq!(c.state.lock().unwrap().grid_top, None, "上屏后收起");
+    }
+
+    /// 真实词库、每页 5 个：展开后按 6 上屏的是第二行行首（序号顺延到下一行，数字键跟着走）。
+    #[test]
+    fn number_key_follows_indices_onto_the_next_row() {
+        if !data_dir().join("schemas/pinyin.schema.toml").exists() {
+            return;
+        }
+        let mut cfg = wind_config::Config::default();
+        cfg.schema.available = vec!["pinyin".into()];
+        cfg.schema.active = "pinyin".into();
+        cfg.input.default.chinese_mode = true;
+        cfg.ui.candidate.grid_expand = true;
+        cfg.ui.candidate.per_page = 5;
+        let (c, _rx) = Coordinator::new_headless_with_ui(cfg, Some(&data_dir()));
+        c.debug_mark_coords_ready();
+        for ch in "YI".chars() {
+            c.handle_key_event(&key(ch as u32));
+        }
+        c.handle_key_event(&key(keymap::VK_EQUAL));
+        let want = c.state.lock().unwrap().candidates[5].text.clone();
+        match c.handle_key_event(&key(u32::from(b'6'))) {
+            KeyAction::InsertText { text, .. } => assert_eq!(text, want),
+            other => panic!("按 6 应上屏第二行行首，实得 {other:?}"),
+        }
     }
 }

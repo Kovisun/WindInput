@@ -879,7 +879,7 @@ impl Coordinator {
             }
             keymap::VK_1..=keymap::VK_9 if data.modifiers & MOD_SHIFT == 0 => {
                 // 数字键选当前页第 N 个
-                let (start, end) = self.page_range(state);
+                let (start, end) = self.select_range(state);
                 let idx = start + (data.key_code - 0x31) as usize;
                 if idx < end {
                     let cand = state.candidates[idx].clone();
@@ -1022,7 +1022,7 @@ impl Coordinator {
                 if data.modifiers & MOD_SHIFT == 0
                     && let Some(offset) = self.select_key_offset(data.key_code)
                 {
-                    let (start, end) = self.page_range(state);
+                    let (start, end) = self.select_range(state);
                     let idx = start + offset;
                     if idx < end {
                         let cand = state.candidates[idx].clone();
@@ -1741,7 +1741,7 @@ impl Coordinator {
                 let digits_as_input = self.temp_english_char_allowed(ch)
                     || Self::temp_english_buffer_is_literal(state);
                 // 数字：有词库候选（>1，即除原文外还有匹配）时按页选词；否则作输入（英文含数字 v2）
-                let (start, end) = self.page_range(state);
+                let (start, end) = self.select_range(state);
                 let gi = start + (data.key_code - 0x31) as usize;
                 if !digits_as_input && state.candidates.len() > 1 && gi < end {
                     self.commit_temp_english_selected(state, gi)
@@ -1837,7 +1837,7 @@ impl Coordinator {
                         .is_none_or(|ch| !self.temp_english_char_allowed(ch))
                     && let Some(offset) = self.select_key_offset(data.key_code)
                 {
-                    let (start, end) = self.page_range(state);
+                    let (start, end) = self.select_range(state);
                     let gi = start + offset;
                     if gi < end {
                         return self.commit_temp_english_selected(state, gi);

@@ -2548,7 +2548,7 @@ impl Coordinator {
         state: &mut State,
         offset: usize,
     ) -> Option<KeyAction> {
-        let (start, end) = self.page_range(state);
+        let (start, end) = self.select_range(state);
         let gi = start + offset;
         if gi >= end {
             return None;
@@ -3792,7 +3792,7 @@ impl Coordinator {
     /// 数字键选词统一入口（num 为 1-based：1-9 选页内对应候选，10 表示主键盘 `0` 选第 10 个）。
     /// 命中当前页范围 → 选词上屏；越界 → 走 overflow 策略（对齐 Go handleNumberKey）。
     pub(crate) fn handle_number_key_select(&self, state: &mut State, num: usize) -> KeyAction {
-        let (start, end) = self.page_range(state);
+        let (start, end) = self.select_range(state);
         let idx = start + (num - 1);
         if idx < end {
             let cand = state.candidates[idx].clone();
@@ -4556,7 +4556,7 @@ impl Coordinator {
         if state.candidates.is_empty() {
             return;
         }
-        let (start, end) = self.page_range(&state);
+        let (start, end) = self.select_range(&state);
         let idx = start + page_local;
         if idx >= end || idx >= state.candidates.len() {
             return;
@@ -4963,7 +4963,7 @@ impl Coordinator {
                 .highlighted_global_index(&state)
                 .min(state.candidates.len() - 1),
             Some(n) => {
-                let (start, end) = self.page_range(&state);
+                let (start, end) = self.select_range(&state);
                 if start + n >= end {
                     return Some(KeyAction::Consumed);
                 }

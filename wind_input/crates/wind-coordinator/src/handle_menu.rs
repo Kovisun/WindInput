@@ -2359,11 +2359,24 @@ impl Coordinator {
     /// - 无词库落点者（临拼/临英/混输/网址，以及特殊模式的空码浏览态）：仅提供复制。
     pub(crate) fn show_candidate_menu(&self, page_local: usize, x: i32, y: i32) {
         use wind_ui_types::MenuItemSpec as M;
+        // 悬停落到被右键的这一格：菜单开着时鼠标消息到不了候选窗，悬停停在上一次右键的那格，
+        // 在另一格上再右键（关旧菜单开新菜单）时，旧格的悬停底色就留在原处，看上去像高亮没跟过来。
+        let ui_idx = page_local as i32;
+        let hover_moved = self
+            .hover_index
+            .swap(ui_idx, std::sync::atomic::Ordering::Relaxed)
+            != ui_idx;
         // 展开态下右键的是网格里的某一格：先把高亮切过去（菜单操作的就是高亮那一格），
-        // 再按页内下标走下面的原有逻辑。
-        let Some(page_local) = self.resolve_event_index(page_local, true) else {
+        // 再按页内下标走下面的原有逻辑。悬停变了而高亮没变时，下面单独补一帧。
+        let Some(page_local) = self.resolve_event_index(page_local, !hover_moved) else {
             return;
         };
+        if hover_moved {
+            let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            if !st.candidates.is_empty() {
+                self.notify_ui_update(&st);
+            }
+        }
         let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if state.candidates.is_empty() {
             return;

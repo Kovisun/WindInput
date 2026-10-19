@@ -5699,6 +5699,9 @@ fn default_grid_rows() -> usize {
 fn default_grid_cell_max_chars() -> usize {
     6
 }
+fn default_grid_index_fill() -> String {
+    "rows".to_string()
+}
 /// 展开态可见行数的合法范围（[`UiCandidateConfig::grid_rows`]）。
 pub const GRID_ROWS_RANGE: std::ops::RangeInclusive<usize> = 2..=10;
 fn default_first_show_settle_ratio() -> f32 {
@@ -6596,6 +6599,12 @@ pub struct UiCandidateConfig {
     /// 部分由悬停提示的 `${full_text}` 段补齐。
     #[serde(default = "default_grid_cell_max_chars")]
     pub grid_cell_max_chars: usize,
+    /// 展开态下序号（与数字键）从高亮行起怎么往下顺延（1–0 共 10 个）：
+    /// - `"rows"`（出厂）：只补整行——每页 5 个时高亮行 1–5、下一行 6–0；每页 7 个时只编高亮行。
+    /// - `"cells"`：逐格编到 0 为止，可以停在半行。
+    /// - `"off"`：只编高亮行。
+    #[serde(default = "default_grid_index_fill")]
+    pub grid_index_fill: String,
     /// 候选注释总开关（默认开）。关掉后不渲染注释段（含上方注释条与 `${code_hint}`），
     /// 注释模板也不再计入按需加载的需求（反查索引、用户层编码索引、拆字表随之可卸）。
     ///
@@ -6820,6 +6829,7 @@ impl Default for UiCandidateConfig {
             grid_expand: false,
             grid_rows: default_grid_rows(),
             grid_cell_max_chars: default_grid_cell_max_chars(),
+            grid_index_fill: default_grid_index_fill(),
             comment_enabled: true,
             comment_template_vertical: default_comment_template(),
             comment_template_horizontal: default_comment_template(),

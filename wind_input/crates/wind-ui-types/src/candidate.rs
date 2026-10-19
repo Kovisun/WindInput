@@ -35,8 +35,13 @@ pub struct CandidateGrid {
     pub cols: u16,
     /// 可见行数。末屏行数不足时渲染端补等高占位行，保证滚动期间窗口高度不变。
     pub rows: u16,
-    /// 高亮行在可见区内的行号（0 起）。只有这一行显示序号——数字键选的是它。
+    /// 高亮行在可见区内的行号（0 起）。
     pub highlight_row: u16,
+    /// 显示序号的格子：平铺下标 `index_start..index_start + index_count`（从高亮行行首起，
+    /// 按 `ui.candidate.grid_index_fill` 往下顺延）。数字键选的就是这几格，其余格子的序号
+    /// 渲染端画成透明占位。
+    pub index_start: u16,
+    pub index_count: u16,
 }
 
 /// 结构化的悬停提示：有序段列表。纯文本形态见 [`TooltipDoc::to_plain_text`]。

@@ -1935,7 +1935,7 @@ impl MessageHandler for Coordinator {
                     && !self.assoc_yields_select_key(&state)
                     && let Some(offset) = self.select_key_offset(data.key_code)
                 {
-                    let (start, end) = self.page_range(&state);
+                    let (start, end) = self.select_range(&state);
                     let idx = start + offset;
                     if idx < end {
                         let cand = state.candidates[idx].clone();
@@ -2147,7 +2147,7 @@ impl MessageHandler for Coordinator {
                     if !self.assoc_yields_select_key(&state)
                         && let Some(offset) = self.select_key_offset(data.key_code)
                     {
-                        let (start, end) = self.page_range(&state);
+                        let (start, end) = self.select_range(&state);
                         let idx = start + offset;
                         if idx < end {
                             let cand = state.candidates[idx].clone();

@@ -3904,9 +3904,13 @@ impl CandidateWindow {
                 };
                 let idx_pad = edges_or(&v.index.padding, [0.0; 4]);
                 let idx_margin = edges_or(&v.index.margin, [0.0; 4]);
-                // 展开态只有高亮行显示序号（数字键选的是这一行）。其余行照样摆一个**透明**
-                // 序号占住同样的宽度——直接不画的话，各行文字的起点就对不齐了。
-                let idx_ghost = grid.is_some_and(|g| i / grid_cols != g.highlight_row as usize);
+                // 展开态只有数字键选得到的那几格显示序号（从高亮行起往下顺延，范围由协调器
+                // 给出）。其余格子照样摆一个**透明**序号占住同样的宽度——直接不画的话，各行
+                // 文字的起点就对不齐了。
+                let idx_ghost = grid.is_some_and(|g| {
+                    let s = g.index_start as usize;
+                    !(s..s + g.index_count as usize).contains(&i)
+                });
                 let idx_color = if idx_ghost {
                     [0, 0, 0, 0]
                 } else {
@@ -5054,6 +5058,8 @@ mod grid_tests {
             cols,
             rows,
             highlight_row: hl,
+            index_start: hl * cols,
+            index_count: cols,
         }));
         // 序号与协调器一致：每行都是 1..cols。
         let items = texts
@@ -5124,6 +5130,27 @@ mod grid_tests {
             "非高亮行透明: {alphas:?}"
         );
         assert!(alphas[3..].iter().all(|a| *a > 0), "高亮行可见: {alphas:?}");
+    }
+
+    /// 序号顺延到下一行：带序号区间覆盖两行时，两行的序号都可见，第三行仍是透明占位。
+    #[test]
+    fn indices_can_span_two_rows() {
+        let mut w = grid_win(3, 3, 0, &["一"; 9]);
+        w.set_grid(Some(CandidateGrid {
+            cols: 3,
+            rows: 3,
+            highlight_row: 0,
+            index_start: 0,
+            index_count: 6,
+        }));
+        let mut leaves = Vec::new();
+        index_leaves(&laid(&w), &mut leaves);
+        let alphas: Vec<u8> = leaves.iter().map(|(_, a)| *a).collect();
+        assert!(alphas[..6].iter().all(|a| *a > 0), "前两行可见: {alphas:?}");
+        assert!(
+            alphas[6..].iter().all(|a| *a == 0),
+            "第三行透明: {alphas:?}"
+        );
     }
 
     /// 末屏只有两行时补占位行，窗口与满屏等高；占位行不是命中目标。

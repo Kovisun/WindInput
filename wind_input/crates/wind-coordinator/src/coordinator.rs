@@ -7276,6 +7276,12 @@ impl Coordinator {
         // 持锁热路径上的开销放大成行数倍，而 UI 本来就只显示悬停那一格的气泡（悬停一变，
         // `mouse_hover` 就会重新下发）。
         let hover_now = self.hover_target();
+        // 展开态带序号的格子（平铺下标区间）：从高亮行行首起，按 `grid_index_fill` 往下顺延，
+        // 与数字键的选择范围 `select_range` 同源。
+        let grid_index = grid_range.map(|(vis_start, _)| {
+            let (sel_start, sel_end) = self.select_range(state);
+            (sel_start - vis_start, sel_end - sel_start)
+        });
         // 候选序号标签：
         //  - 数字透镜：数字键正在录表达式 → 选词改用字母标签 a/b/c
         //  - 其余（含自由输入）：正常序号
@@ -7498,9 +7504,14 @@ impl Coordinator {
                     code: c.code.clone(),
                     label: if alpha {
                         ((b'a' + i as u8) as char).to_string()
-                    } else if grid_range.is_some() {
-                        // 每行都按 1..N 编号：数字键选的是高亮行，序号在每一行指向同样的位置。
-                        self.resolve_index_label(cand_cfg, i % per_page)
+                    } else if let Some((from, count)) = grid_index {
+                        // 带序号的格子从高亮行行首起顺延编号；其余格子的序号渲染端画成透明，
+                        // 这里照列号给一个，只为占住同样的宽度。
+                        if (from..from + count).contains(&i) {
+                            self.resolve_index_label(cand_cfg, i - from)
+                        } else {
+                            self.resolve_index_label(cand_cfg, i % per_page)
+                        }
                     } else {
                         self.resolve_index_label(cand_cfg, i)
                     },
@@ -7514,11 +7525,13 @@ impl Coordinator {
         *self.tooltip_page.lock().unwrap_or_else(|e| e.into_inner()) = tip_page;
         // 翻页信息改为结构化字段传给候选窗（窗口内渲染独立的页码指示）
         let total_pages = self.total_pages(state);
-        let grid = state.grid_top.filter(|_| grid_range.is_some()).map(|top| {
+        let grid = state.grid_top.zip(grid_index).map(|(top, (from, count))| {
             wind_ui_types::CandidateGrid {
                 cols: per_page as u16,
                 rows: self.grid_rows() as u16,
                 highlight_row: state.current_page.saturating_sub(top) as u16,
+                index_start: from as u16,
+                index_count: count as u16,
             }
         });
         // 展开态的选中项是平铺下标：高亮行之前的整行都算进去。
