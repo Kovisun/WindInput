@@ -129,19 +129,22 @@ def sh(*args):
 
 def candidate_window(classname="wind-candidate"):
     """按 WM_CLASS 实例名找窗（候选窗 wind-candidate；浮层 wind-status / wind-toast /
-    wind-tooltip），返回 (id, x, y, w, h, 是否可见)；没建过返回 None。"""
-    ids = sh("xdotool", "search", "--classname", classname).split()
-    if not ids:
-        return None
-    wid = ids[0]
-    info = sh("xwininfo", "-id", wid)
-    def field(name):
-        for line in info.splitlines():
-            if line.strip().startswith(name):
-                return line.split(":", 1)[1].strip()
-        return ""
-    return (wid, int(field("Absolute upper-left X")), int(field("Absolute upper-left Y")),
-            int(field("Width")), int(field("Height")), field("Map State") == "IsViewable")
+    wind-tooltip；面板 wind-toolbar / wind-softkeyboard），返回 (id, x, y, w, h, 是否可见)；
+    没建过返回 None。
+
+    查的途中窗口可能正被销毁重建（合成器起停换 visual、X 重连），xwininfo 查不到的跳过。"""
+    for wid in sh("xdotool", "search", "--classname", classname).split():
+        info = sh("xwininfo", "-id", wid)
+        def field(name):
+            for line in info.splitlines():
+                if line.strip().startswith(name):
+                    return line.split(":", 1)[1].strip()
+            return ""
+        if not field("Width"):
+            continue
+        return (wid, int(field("Absolute upper-left X")), int(field("Absolute upper-left Y")),
+                int(field("Width")), int(field("Height")), field("Map State") == "IsViewable")
+    return None
 
 
 def xwd_to_png(xwd_bytes, png_path):
@@ -1501,6 +1504,270 @@ async def overlay_restart_cases(bus, im, restart):
     return c
 
 
+# ── 工具栏 / 软键盘（X11）────────────────────────────────────────────────
+# 两块常驻面板由服务光栅化，addon 各开一个 override-redirect、不取焦点的窗口（wind-toolbar /
+# wind-softkeyboard），拖动区外的点击经 CMD_PANEL_POINTER 转给服务端。格子与键帽的命中矩形只在
+# 服务端：几何按默认主题算（wind-ui 的 toolbar.rs / soft_keyboard.rs，Xvfb 下缩放为 1），算错了
+# 效果断言会红，不会静默通过。工具栏显隐有迟滞（toolbar_gate），等待一律留足。
+TB_GRIP = 12  # 工具栏拖动柄宽
+TB_CELL = 30  # 每格宽
+TB_CELLS = 5  # 出厂排布显示的格：中英 / 标点 / 全半角 / 软键盘 / 设置
+SK_UNIT, SK_GAP, SK_PAD = 42, 5, 12  # 软键盘键位单元 / 键间距 / 面板内边距
+
+
+def toolbar_cell(win, i):
+    """工具栏第 i 格的中心（横条：拖动柄在左，其后每格等宽）。"""
+    return win[1] + TB_GRIP + TB_CELL * i + TB_CELL // 2, win[2] + win[4] // 2
+
+
+def softkey_digit_row(win, col):
+    """软键盘数字行第 col 个键帽的中心。行从底往上数：底行（Ctrl / 空格 ┄ ◀ ▶ Esc）贴底边内边距，
+    其上依次 ZXCV / ASDF / QWERTY / 数字行，每行一个单元高、隔一个键间距；数字行行首没有功能键。"""
+    _, x, y, w, h, _ = win
+    top = y + h - SK_PAD - SK_UNIT - 4 * (SK_UNIT + SK_GAP)
+    return x + SK_PAD + col * (SK_UNIT + SK_GAP) + SK_UNIT // 2, top + SK_UNIT // 2
+
+
+def softkey_page_next(win):
+    """底行「▶」（下一面）的中心：右组 ◀ ▶ Esc 贴右缘，各 1.5 个单元宽。"""
+    _, x, y, w, h, _ = win
+    key_w = SK_UNIT * 3 // 2 + SK_GAP // 2
+    return x + w - SK_PAD - key_w - SK_GAP - key_w // 2, y + h - SK_PAD - SK_UNIT // 2
+
+
+async def chord(c, sym, code, state):
+    eaten = await c.ic.call_process_key_event(sym, code, state, False, 0)
+    await c.ic.call_process_key_event(sym, code, state, True, 0)
+    await asyncio.sleep(0.05)
+    return eaten
+
+
+async def click(x, y, settle=0.4):
+    sh("xdotool", "mousemove", str(x), str(y), "click", "1")
+    await asyncio.sleep(settle)
+
+
+PANEL_KEYS = ("ui.toolbar.auto_hide_delay", "ui.toolbar.auto_hide_hover_reveal")
+
+
+async def restore_panel_state(c, saved):
+    """面板用例改过的服务状态，失败路径上也还原，免得一条失败带红后面一串：关掉自动隐藏、
+    延时与悬停唤回改回原值；中英 / 标点按实测状态拨回中文、中文标点（点工具栏格子）。"""
+    sh("xdotool", "mousemove", "5", "5")
+    await set_config("ui.toolbar.auto_hide", "false")
+    for key, value in saved.items():
+        if value:
+            await set_config(key, value)
+    await c.ic.call_focus_in()
+    tb = await wait_window("wind-toolbar", True)
+    if not (tb and tb[5]):
+        return
+    await end_composition(c)
+    if await c.key("a") is False:  # 英文态：字母直通
+        await click(*toolbar_cell(tb, 0))
+    await end_composition(c)
+    await chord(c, 0x2C, 59, 0)
+    if c.take() == ",":  # 英文标点
+        await click(*toolbar_cell(tb, 1))
+    sh("xdotool", "mousemove", "5", "5")
+    await end_composition(c)
+
+
+async def panel_cases(bus, im):
+    """工具栏随焦点显隐、点工具栏不夺焦（组字原样、上下文不换）、指针停在工具栏上时被隐藏，
+    悬停唤回，以及软键盘点键帽上屏。"""
+    c = await new_ctx(bus, im, "e2e-panels")
+    saved = {k: await get_config(k) for k in PANEL_KEYS}
+    try:
+        await panel_toolbar_cases(c)
+        await panel_hover_reveal_cases(c)
+    finally:
+        await restore_panel_state(c, saved)
+    await panel_softkeyboard_cases(c)
+
+
+async def panel_hover_reveal_cases(c):
+    """悬停唤回（X11 + 合成器）：淡出完毕工具栏以 alpha≈1 留在原位（假隐藏），指针移回去要能
+    唤回。服务端把整窗透明度乘进了像素，面板若按 alpha 裁输入区，假隐藏那帧的输入区是空的，
+    指针穿透下去、服务端收不到移动，永远唤不回来。按 alpha 裁输入区只在 ARGB 那条路上做，
+    故临时起合成器（e2e.sh 已起的话沿用）。"""
+    ours = None
+    if not os.environ.get("WIND_E2E_COMP_PID"):
+        ours = subprocess.Popen(["xcompmgr"], stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL)
+        await asyncio.sleep(0.8)
+    try:
+        # 重新获焦推一帧：窗口按合成器状态重建成 ARGB 的。
+        await c.ic.call_focus_out()
+        await wait_window("wind-toolbar", False)
+        await c.ic.call_focus_in()
+        tb = await wait_window("wind-toolbar", True)
+        await asyncio.sleep(0.4)
+        if not (tb and tb[5]):
+            check("工具栏：悬停唤回（合成器下工具栏出现）", False, f"window={tb}")
+            return
+        shown = xwd_raw(tb[0])
+        rs = [await set_config("ui.toolbar.auto_hide_delay", "1"),
+              await set_config("ui.toolbar.auto_hide_hover_reveal", "true"),
+              await set_config("ui.toolbar.auto_hide", "true")]
+        # 延时 1 秒 + 淡出 1 秒，之后内容停在假隐藏那帧、窗口仍映射。
+        await asyncio.sleep(3.0)
+        ghost_win = candidate_window("wind-toolbar")
+        ghost = xwd_raw(tb[0])
+        sh("xdotool", "mousemove", *map(str, toolbar_cell(tb, 2)))
+        revealed = await wait_until(lambda: xwd_raw(tb[0]) != ghost, 2.0)
+        sh("xdotool", "mousemove", "5", "5")
+        check("工具栏：假隐藏后指针移回原位，工具栏被唤回",
+              all(r.returncode == 0 for r in rs) and ghost != shown
+              and ghost_win is not None and ghost_win[5] and revealed,
+              f"config set rc={[r.returncode for r in rs]} 淡出={ghost != shown} "
+              f"假隐藏仍映射={ghost_win} 唤回={revealed}")
+    finally:
+        if ours:
+            ours.terminate()
+            ours.wait()
+            await asyncio.sleep(0.5)
+
+
+async def panel_toolbar_cases(c):
+    await c.ic.call_set_cursor_rect(300, 400, 2, 20)
+    sh("xdotool", "mousemove", "5", "5")
+
+    # ── toolbar_follows_focus：焦点进入 → 映射，离开 → 取消映射 ──
+    await c.ic.call_focus_out()
+    hidden = await wait_window("wind-toolbar", False)
+    await c.ic.call_focus_in()
+    tb = await wait_window("wind-toolbar", True)
+    check("工具栏：焦点进入后出现（wind-toolbar 已映射）",
+          (hidden is None or not hidden[5]) and tb is not None and tb[5],
+          f"进入前={hidden} 进入后={tb}")
+    await c.ic.call_focus_out()
+    gone = await wait_window("wind-toolbar", False)
+    check("工具栏：焦点离开后隐藏（取消映射）", gone is not None and not gone[5], f"window={gone}")
+    await c.ic.call_focus_in()
+    tb = await wait_window("wind-toolbar", True)
+    check("工具栏：焦点回来再出现", tb is not None and tb[5], f"window={tb}")
+    if not (tb and tb[5]):
+        return
+    check("工具栏：几何与默认主题一致（下面按它算格子坐标）",
+          (tb[3], tb[4]) == (TB_GRIP + TB_CELL * TB_CELLS, TB_CELL), f"window={tb}")
+    await asyncio.sleep(0.3)
+    baseline = xwd_raw(tb[0])
+
+    # ── click_panel_keeps_focus：点工具栏不夺焦 ──
+    # a) 中英格：点一下切英文（字母直通），再点切回中文（组字）——点击生效，上下文还是这一个。
+    await click(*toolbar_cell(tb, 0))
+    en_eaten = await c.key("a")
+    await click(*toolbar_cell(tb, 0))
+    sh("xdotool", "mousemove", "5", "5")
+    await c.type("nihao")
+    await c.key(" ")
+    got = c.take()
+    check("工具栏：点中英格切到英文（字母直通）、再点切回中文照常上屏",
+          en_eaten is False and got == "你好", f"英文态 a 被吃={en_eaten} 切回后上屏={got!r}")
+
+    # b) 组字中点标点格：状态切了，组字原样挂着（不上屏、预编辑不清、候选窗还在），接着打字照常。
+    await c.type("nihao")
+    await asyncio.sleep(0.3)
+    before = c.preedit
+    n = len(c.preedits)
+    await click(*toolbar_cell(tb, 1))
+    sh("xdotool", "mousemove", "5", "5")
+    await asyncio.sleep(0.2)
+    later = c.preedits[n:]
+    cand = candidate_window()
+    committed = c.take()
+    check("工具栏：组字中点标点格，组字不受影响（不上屏、预编辑不清、候选窗仍在）",
+          before != "" and committed == "" and "" not in later and c.preedit == before
+          and cand is not None and cand[5],
+          f"点前预编辑={before!r} 之后={later} 上屏={committed!r} 候选窗={cand}")
+    await c.key(" ")
+    got = c.take()
+    check("工具栏：点击后接着按空格，「你好」上屏到同一个文本框", got == "你好", f"上屏={got!r}")
+    # 标点格真的切了：无组字时逗号由中文「，」变成英文「,」，再点一下切回。
+    await chord(c, 0x2C, 59, 0)
+    after_toggle = c.take()
+    await click(*toolbar_cell(tb, 1))
+    sh("xdotool", "mousemove", "5", "5")
+    await chord(c, 0x2C, 59, 0)
+    restored = c.take()
+    check("工具栏：标点格点击生效（逗号出英文「,」），再点恢复中文「，」",
+          after_toggle == "," and restored == "，",
+          f"切后={after_toggle!r} 恢复后={restored!r}")
+
+    # ── 指针停在工具栏上时服务端推隐藏：X 不会再发离开，addon 摘窗时补报 LEAVE ──
+    # LEAVE 丢了的可见后果：服务端认为指针一直在工具栏里，自动隐藏永远不触发。故开着自动隐藏
+    # （1 秒）验：悬停 → 失焦隐藏 → 指针挪走 → 焦点回来，工具栏要按时自己隐藏；全程不卡。
+    tb = candidate_window("wind-toolbar")
+    hx, hy = toolbar_cell(tb, 2)
+    sh("xdotool", "mousemove", str(hx), str(hy))
+    await asyncio.sleep(0.4)
+    hovered = xwd_raw(tb[0]) != baseline
+    r1 = await set_config("ui.toolbar.auto_hide_delay", "1")
+    r2 = await set_config("ui.toolbar.auto_hide", "true")
+    await c.ic.call_focus_out()
+    gone = await wait_window("wind-toolbar", False)
+    sh("xdotool", "mousemove", "5", "5")
+    await c.ic.call_focus_in()
+    back = await wait_window("wind-toolbar", True)
+    t0 = time.monotonic()
+    auto = await wait_window("wind-toolbar", False, timeout=6.0)
+    waited = time.monotonic() - t0
+    await set_config("ui.toolbar.auto_hide", "false")
+    check("工具栏：指针悬停其上时失焦隐藏（补报 LEAVE），回来后自动隐藏照常触发",
+          r1.returncode == 0 and r2.returncode == 0 and hovered
+          and gone is not None and not gone[5] and back is not None and back[5]
+          and auto is not None and not auto[5],
+          f"config set rc={r1.returncode},{r2.returncode} {r1.stderr.strip()}{r2.stderr.strip()} "
+          f"悬停高亮={hovered} 隐藏={gone} 回来={back} 自动隐藏={auto}（等了 {waited:.1f}s）")
+    await c.ic.call_focus_out()
+    await wait_window("wind-toolbar", False)
+    await c.ic.call_focus_in()
+    back = await wait_window("wind-toolbar", True)
+    await asyncio.sleep(0.4)
+    clean = back is not None and back[5] and xwd_raw(back[0]) == baseline
+    check("工具栏：关掉自动隐藏后焦点进入照常出现，且不残留悬停高亮", clean, f"window={back}")
+    await c.type("nihao")
+    await c.key(" ")
+    got = c.take()
+    check("工具栏：悬停中被隐藏后照常打字", got == "你好", f"上屏={got!r}")
+
+
+async def panel_softkeyboard_cases(c):
+    # ── softkeyboard_click_commits：Ctrl+Shift+K 开软键盘，点键帽上屏 ──
+    # Shift 按住时 k 的 keysym 是 K（0x4B），keycode 45。
+    eaten = await chord(c, 0x4B, 45, STATE_CTRL | STATE_SHIFT)
+    sk = await wait_window("wind-softkeyboard", True)
+    check("软键盘：Ctrl+Shift+K 被吃、面板出现", eaten is True and sk is not None and sk[5],
+          f"eaten={eaten} window={sk}")
+    if sk and sk[5]:
+        path, _ = screenshot("softkeyboard", sk[0])
+        print(f"  软键盘：{sk[3]}x{sk[4]} @ ({sk[1]},{sk[2]})，截图 {path}", flush=True)
+        # 出厂第一面是 PC 键盘（送按键、不直接上屏），点 ▶ 翻到第二面「标点符号」。
+        face = xwd_raw(sk[0])
+        await click(*softkey_page_next(sk))
+        sh("xdotool", "mousemove", "5", "5")
+        await asyncio.sleep(0.2)
+        flipped = xwd_raw(sk[0]) != face
+        screenshot("softkeyboard_punct", sk[0])
+        c.take()
+        await click(*softkey_digit_row(sk, 1))  # 「1」键位：标点面上是「！」
+        sh("xdotool", "mousemove", "5", "5")
+        got = c.take()
+        check("软键盘：点 ▶ 翻到标点面，点「1」键帽上屏「！」",
+              flipped and got == "！", f"翻面={flipped} 上屏={got!r}")
+    eaten = await chord(c, 0x4B, 45, STATE_CTRL | STATE_SHIFT)
+    gone = await wait_window("wind-softkeyboard", False)
+    check("软键盘：再按 Ctrl+Shift+K 关闭", eaten is True and gone is not None and not gone[5],
+          f"eaten={eaten} window={gone}")
+    await c.type("nihao")
+    await c.key(" ")
+    got = c.take()
+    check("软键盘：关闭后照常打字", got == "你好", f"上屏={got!r}")
+    await c.ic.call_focus_out()
+    await asyncio.sleep(0.2)
+
+
 def settings_windows():
     """设置程序的顶层窗口（WM_CLASS 实例名 = 可执行文件名 wind_setting.bin，见 windui
     `x11.rs::wm_class`；e2e 里经包装脚本启动，真程序是那个软链）。"""
@@ -1754,6 +2021,14 @@ async def mode_icon_cases(bus, im):
     check("托盘图标：切方案前后图标名不同", ICON_WU != ICON_PIN)
     await c.ic.call_focus_out()
     await asyncio.sleep(0.2)
+
+async def get_config(key):
+    """经 `wind_input config get` 读在线服务的配置值（读不到返回空串）。"""
+    svc = os.path.join(os.environ["W"], "svc", "wind_input")
+    r = await asyncio.to_thread(subprocess.run, [svc, "config", "get", key],
+                                capture_output=True, text=True)
+    return r.stdout.strip() if r.returncode == 0 else ""
+
 
 async def set_config(key, value):
     """经 `wind_input config set` 改在线服务的配置（RPC 热重载，不重启服务）。"""
@@ -2209,6 +2484,7 @@ async def main():
         await overlay_interaction_cases(bus, im)
         await mode_icon_cases(bus, im)
         await settings_cases(bus, im)
+        await panel_cases(bus, im)
         await a.ic.call_focus_in()
         await asyncio.sleep(0.2)
 
