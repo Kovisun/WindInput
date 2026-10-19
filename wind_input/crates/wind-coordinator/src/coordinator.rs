@@ -1453,6 +1453,16 @@ pub struct Coordinator {
     /// 反复重置回记忆值。拖动落盘时（`save_toolbar_anchor`）同步更新，否则拖到别的屏之后
     /// 这里仍记着旧 key，下一次校正会被误判为「屏没变」而跳过。
     pub(crate) current_toolbar_monitor: Mutex<Option<String>>,
+    /// Linux：addon 最近一次 `host.display` 报的焦点输出（显示器）名与其工作区。服务端问不到
+    /// 屏幕几何，工具栏 / 软键盘的位置记忆改以输出名分桶（见 `Coordinator::current_monitor`）。
+    #[cfg(all(target_os = "linux", ext_presenter))]
+    pub(crate) host_output: Mutex<Option<String>>,
+    #[cfg(all(target_os = "linux", ext_presenter))]
+    pub(crate) host_work: Mutex<Option<(i32, i32, i32, i32)>>,
+    /// Linux：`pos.toolbar` / `pos.softkeyboard` 报的落点输出名，按浮层 kind 暂存，等渲染端把
+    /// 左上角换算成右下角回报（`ToolbarMoved` / `SoftKeyboardMoved`）时作为落盘的显示器键取走。
+    #[cfg(all(target_os = "linux", ext_presenter))]
+    pub(crate) panel_drop_output: Mutex<std::collections::HashMap<u32, String>>,
     /// `state.toml` 的单点延迟写入器：合并连续微调、进程内串行化 load-modify-save。
     /// 无 `store`（headless 测试夹具）时是不写盘的空实现，见 [`state_writer::StateWriter`]。
     pub(crate) state_writer: state_writer::StateWriter,
@@ -2457,6 +2467,20 @@ impl Coordinator {
         }
     }
 
+    /// Linux addon 的 push 连接每（重）建立一次，就让渲染端补推可见的工具栏 / 软键盘：addon 收到
+    /// SERVICE_READY 会丢掉手里的面板，而同一服务换了连接时面板状态并没有变，不会自己再推。
+    /// 服务 main 在 `PushServer::mark_ready` 之后调一次；其它形态是空操作。
+    pub fn install_host_reconnect_hook(&self) {
+        #[cfg(all(target_os = "linux", ext_presenter))]
+        {
+            let tx = self.ui_tx.clone();
+            self.push_server
+                .set_client_connected_hook(Box::new(move |_token| {
+                    let _ = tx.send(wind_ui_types::UiCommand::HostReconnected);
+                }));
+        }
+    }
+
     /// 只读模式的原因（用户数据设计 §7.1 降级保护）；`None` = 正常读写。
     pub fn storage_readonly_reason(&self) -> Option<&str> {
         self.storage_readonly.as_deref()
@@ -2904,6 +2928,12 @@ impl Coordinator {
             toolbar_anchors: Mutex::new(toolbar_anchors_init),
             softkeyboard_anchors: Mutex::new(softkeyboard_anchors_init),
             current_toolbar_monitor: Mutex::new(None),
+            #[cfg(all(target_os = "linux", ext_presenter))]
+            host_output: Mutex::new(None),
+            #[cfg(all(target_os = "linux", ext_presenter))]
+            host_work: Mutex::new(None),
+            #[cfg(all(target_os = "linux", ext_presenter))]
+            panel_drop_output: Mutex::new(std::collections::HashMap::new()),
             // 判据借 `store`：它的文档本来就写着「None = 无持久化（headless 测试）」。
             // 只看 `state_dir()` 挡不住测试夹具——那是进程外的全局路径，夹具同样取得到。
             state_writer: state_writer::StateWriter::new(persists_state, Config::state_dir()),
@@ -7545,8 +7575,14 @@ impl Coordinator {
             UiEvent::RequestCandidateMenu { page_local, x, y } => {
                 self.show_candidate_menu(page_local, x, y)
             }
-            UiEvent::RequestMainMenu(anchor) => self.show_main_menu(anchor),
+            UiEvent::RequestMainMenu(anchor) => {
+                #[cfg(all(target_os = "linux", ext_presenter))]
+                self.send_host_work_area();
+                self.show_main_menu(anchor)
+            }
             UiEvent::RequestToolbarMenu { action, anchor } => {
+                #[cfg(all(target_os = "linux", ext_presenter))]
+                self.send_host_work_area();
                 self.show_toolbar_menu(action, anchor)
             }
             UiEvent::MenuAction(kind) => self.menu_action(kind),

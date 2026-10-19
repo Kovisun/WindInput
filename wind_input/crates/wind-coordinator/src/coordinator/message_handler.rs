@@ -268,6 +268,39 @@ fn decode_ext_point(body: &[u8]) -> Option<(i32, i32)> {
     Some((i32::try_from(x).ok()?, i32::try_from(y).ok()?))
 }
 
+/// 扩展信封 body 里的 `output`（输出 / 显示器名）。缺字段、非字符串、空串都返回 `None`：
+/// 位置记忆按它分桶，空串当键只会多出一个读不回来的桶。
+#[cfg(all(target_os = "linux", ext_presenter))]
+fn decode_ext_output(body: &[u8]) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_slice(body).ok()?;
+    let s = v.get("output")?.as_str()?;
+    (!s.is_empty()).then(|| s.to_owned())
+}
+
+/// 扩展信封 body 里的 `work`（`[左,上,右,下]`，屏幕坐标）。缺字段、不是四个整数、空矩形都返回 `None`。
+#[cfg(all(target_os = "linux", ext_presenter))]
+fn decode_ext_work(body: &[u8]) -> Option<(i32, i32, i32, i32)> {
+    let v: serde_json::Value = serde_json::from_slice(body).ok()?;
+    let arr = v.get("work")?.as_array()?;
+    let mut w = [0i32; 4];
+    if arr.len() != 4 {
+        return None;
+    }
+    for (slot, n) in w.iter_mut().zip(arr) {
+        *slot = clamp_host_coord(i32::try_from(n.as_i64()?).ok()?);
+    }
+    let [left, top, right, bottom] = w;
+    (right > left && bottom > top).then_some((left, top, right, bottom))
+}
+
+/// `host.fullscreen` 的 body `{"fullscreen":bool}`。字段不是布尔就整条不认：把坏值当成「退出全屏」
+/// 会让工具栏冒到全屏应用上面。
+#[cfg(all(target_os = "linux", ext_presenter))]
+fn decode_ext_fullscreen(body: &[u8]) -> Option<bool> {
+    let v: serde_json::Value = serde_json::from_slice(body).ok()?;
+    v.get("fullscreen")?.as_bool()
+}
+
 /// `host.display` 的 body：两个字段各自可缺省（缺省 = 不改现值）。
 #[derive(Debug, PartialEq)]
 struct HostDisplay {
@@ -550,6 +583,23 @@ impl MessageHandler for Coordinator {
                     self.save_status_tip_pos(x, y);
                 }
             }
+            // Linux addon：工具栏 / 软键盘本地拖完的落点（内容盒左上，屏幕坐标）与落点输出名。
+            #[cfg(all(target_os = "linux", ext_presenter))]
+            ext_kind::POS_TOOLBAR | ext_kind::POS_SOFTKEYBOARD => {
+                use wind_ipc::protocol::overlay::{
+                    OVERLAY_KIND_SOFTKEYBOARD, OVERLAY_KIND_TOOLBAR,
+                };
+                let Some((x, y)) = decode_ext_point(body) else {
+                    tracing::warn!("扩展消息 {kind} 的 body 不是 {{x,y}}，忽略");
+                    return;
+                };
+                let panel = if kind == ext_kind::POS_TOOLBAR {
+                    OVERLAY_KIND_TOOLBAR
+                } else {
+                    OVERLAY_KIND_SOFTKEYBOARD
+                };
+                self.on_host_panel_dropped(panel, x, y, decode_ext_output(body));
+            }
             // Linux addon：当前焦点宿主的显示环境（光标坐标是否可用、界面缩放）。
             ext_kind::HOST_DISPLAY => match decode_ext_host_display(body) {
                 Some(d) => {
@@ -567,9 +617,37 @@ impl MessageHandler for Coordinator {
                     if let Some(scale) = d.scale {
                         wind_ui::dpi::set_host_scale(scale);
                     }
+                    // 焦点输出名与其工作区：工具栏 / 软键盘位置记忆的分桶键与默认落点。两者成对：
+                    // 报了其一，工作区就跟着这次报告换（只报输出名 = 工作区未知），免得新输出配上旧输出的
+                    // 工作区；输出名只在报了时更新；都没报 = 不改现值。
+                    #[cfg(all(target_os = "linux", ext_presenter))]
+                    {
+                        let output = decode_ext_output(body);
+                        let work = decode_ext_work(body);
+                        if output.is_some() || work.is_some() {
+                            tracing::debug!("host.display: output={output:?} work={work:?}");
+                            if output.is_some() {
+                                *self.host_output.lock().unwrap_or_else(|e| e.into_inner()) =
+                                    output;
+                            }
+                            *self.host_work.lock().unwrap_or_else(|e| e.into_inner()) = work;
+                        }
+                    }
                     tracing::debug!("host.display: {d:?}");
                 }
                 None => tracing::warn!("host.display 载荷无法解析，忽略"),
+            },
+            // Linux addon：焦点窗口进出全屏。全屏期间不显示工具栏，判据在渲染端（对位 Windows 的
+            // `blocked_by_exclusive_fullscreen`）。
+            #[cfg(all(target_os = "linux", ext_presenter))]
+            ext_kind::HOST_FULLSCREEN => match decode_ext_fullscreen(body) {
+                Some(on) => {
+                    tracing::debug!("host.fullscreen: {on}");
+                    let _ = self
+                        .ui_tx
+                        .send(wind_ui_types::UiCommand::SetHostFullscreen(on));
+                }
+                None => tracing::warn!("host.fullscreen 载荷无法解析，忽略"),
             },
             // Windows TSF：host render 候选窗落位诊断（SearchHost 写不了 tsf_log，只能看这条）。
             ext_kind::DIAG_HOST_RENDER_PLACED => match host_render_placed_log(body) {
@@ -626,12 +704,37 @@ impl MessageHandler for Coordinator {
         let _ = (event, button, x, y);
     }
 
+    /// Linux addon 报来的工具栏 / 软键盘指针事件：原样交给渲染端，由它翻译成 `WM_*` 喂给窗口
+    /// 自己的鼠标状态机（点格子、右键菜单、按住连发都在那一侧）。其它平台没有这条消息，沿用默认实现。
+    #[cfg(all(target_os = "linux", ext_presenter))]
+    fn on_panel_pointer(&self, kind: u32, event: u32, button: u32, x: i32, y: i32) {
+        let _ = self.ui_tx.send(wind_ui_types::UiCommand::PanelPointer {
+            kind,
+            event,
+            button,
+            x,
+            y,
+        });
+    }
+
     /// Linux：addon 的请求连接断了。菜单若开着，没人会再报关闭——就地复位，免得下一个
     /// addon 实例（fcitx5 重启）送来的方向键 / 回车 / Esc 被一个不存在的菜单吞掉。
+    ///
+    /// 宿主上报状态的统一复位在渲染端的 `HostReconnected`（push 连接重建，见 manager_macos
+    /// `reset_host_state`）。这里只先补一次面板离开，让 addon 崩溃时按住的软键盘键当场停止连发，
+    /// 不必等新 addon 连上；全屏不在这里复位——请求连接超时熔断也会断开，addon 其实还在。
     fn handle_client_disconnected(&self) {
         #[cfg(ext_presenter)]
         if self.is_menu_open() {
             self.menu_dismissed_by_host("addon 连接断开");
+        }
+        #[cfg(all(target_os = "linux", ext_presenter))]
+        {
+            use wind_ipc::protocol::overlay::{OVERLAY_KIND_SOFTKEYBOARD, OVERLAY_KIND_TOOLBAR};
+            use wind_ipc::protocol::panel_pointer::PANEL_POINTER_LEAVE;
+            for kind in [OVERLAY_KIND_TOOLBAR, OVERLAY_KIND_SOFTKEYBOARD] {
+                self.on_panel_pointer(kind, PANEL_POINTER_LEAVE, 0, 0, 0);
+            }
         }
     }
 
