@@ -641,6 +641,7 @@ static REGISTRY: &[ConfigField] = &[
         "ui.candidate.grid_index_fill",
         Enum(&["rows", "cells", "off"]),
     ),
+    f("ui.candidate.grid_tooltip_follows_highlight", Bool),
     f("ui.candidate.comment_enabled", Bool),
     f("ui.candidate.comment_template_vertical", Str),
     f("ui.candidate.comment_template_horizontal", Str),

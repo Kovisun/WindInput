@@ -786,6 +786,48 @@ mod tests {
         assert_eq!(c.state.lock().unwrap().grid_top, None, "上屏后收起");
     }
 
+    /// 真实词库：开了气泡跟随高亮，展开态的高亮格也有气泡；没开时（且无悬停）一格都没有。
+    #[test]
+    fn tooltip_follows_highlight_only_when_enabled() {
+        if !data_dir().join("schemas/pinyin.schema.toml").exists() {
+            return;
+        }
+        for follow in [false, true] {
+            let mut cfg = wind_config::Config::default();
+            cfg.schema.available = vec!["pinyin".into()];
+            cfg.schema.active = "pinyin".into();
+            cfg.input.default.chinese_mode = true;
+            cfg.ui.candidate.grid_expand = true;
+            cfg.ui.candidate.grid_tooltip_follows_highlight = follow;
+            let (c, rx) = Coordinator::new_headless_with_ui(cfg, Some(&data_dir()));
+            c.debug_mark_coords_ready();
+            for ch in "YI".chars() {
+                c.handle_key_event(&key(ch as u32));
+            }
+            c.handle_key_event(&key(keymap::VK_EQUAL));
+            c.handle_key_event(&key(keymap::VK_DOWN));
+            let tips: Vec<bool> = rx
+                .try_iter()
+                .filter_map(|cmd| match cmd {
+                    UiCommand::UpdateCandidates { candidates, .. } => Some(
+                        candidates
+                            .into_iter()
+                            .map(|i| !i.tooltip.is_empty())
+                            .collect::<Vec<_>>(),
+                    ),
+                    _ => None,
+                })
+                .last()
+                .unwrap();
+            let with_tip: Vec<usize> = (0..tips.len()).filter(|&i| tips[i]).collect();
+            let want = if follow { vec![PP] } else { vec![] };
+            assert_eq!(
+                with_tip, want,
+                "follow={follow}：只有高亮格（第二行行首）该有气泡"
+            );
+        }
+    }
+
     /// 真实词库、每页 5 个：展开后按 6 上屏的是第二行行首（序号顺延到下一行，数字键跟着走）。
     #[test]
     fn number_key_follows_indices_onto_the_next_row() {

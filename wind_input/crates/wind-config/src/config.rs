@@ -6605,6 +6605,10 @@ pub struct UiCandidateConfig {
     /// - `"off"`：只编高亮行。
     #[serde(default = "default_grid_index_fill")]
     pub grid_index_fill: String,
+    /// 展开态下悬停气泡跟随键盘高亮（出厂关）：没有鼠标悬停时，高亮格的气泡也显示，
+    /// 贴在窗口外侧。代价是每次移动高亮多渲染一份气泡。
+    #[serde(default)]
+    pub grid_tooltip_follows_highlight: bool,
     /// 候选注释总开关（默认开）。关掉后不渲染注释段（含上方注释条与 `${code_hint}`），
     /// 注释模板也不再计入按需加载的需求（反查索引、用户层编码索引、拆字表随之可卸）。
     ///
@@ -6830,6 +6834,7 @@ impl Default for UiCandidateConfig {
             grid_rows: default_grid_rows(),
             grid_cell_max_chars: default_grid_cell_max_chars(),
             grid_index_fill: default_grid_index_fill(),
+            grid_tooltip_follows_highlight: false,
             comment_enabled: true,
             comment_template_vertical: default_comment_template(),
             comment_template_horizontal: default_comment_template(),

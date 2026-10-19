@@ -7295,6 +7295,13 @@ impl Coordinator {
         // 悬停提示/候选微调配置（热重载快照）
         let rt = self.rt();
         let cand_cfg = &rt.config.ui.candidate;
+        // 气泡跟随键盘高亮（`grid_tooltip_follows_highlight`）：高亮格也渲染一份。平铺下标。
+        let tip_follow = grid_range
+            .zip(state.grid_top)
+            .filter(|_| cand_cfg.grid_tooltip_follows_highlight)
+            .map(|(_, top)| {
+                (state.current_page.saturating_sub(top) * per_page + state.selected_index) as i32
+            });
         let tip = &rt.tooltip;
         // 命令直通车候选前缀标注（features.cmdbar.candidate_prefix）：仅命令候选(is_command)显示。
         let cmd_prefix = rt.config.input.cmdbar.candidate_prefix.as_str();
@@ -7398,7 +7405,8 @@ impl Coordinator {
                 } else {
                     cand_cfg.truncate_display(&full)
                 };
-                let tip_skipped = grid_range.is_some() && i as i32 != hover_now;
+                let tip_skipped =
+                    grid_range.is_some() && i as i32 != hover_now && tip_follow != Some(i as i32);
                 // 悬停提示按段列表渲染（见 `crate::tooltip`）。逐字段遍历**截断后**的显示文本、
                 // 且不含截断追加的 `…`：超长候选（如长短语）逐字展开会撑爆气泡，只提示实际
                 // 显示出的字；被截掉的部分由「完整原文」段（`${full_text}`）整段给出。

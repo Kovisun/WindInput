@@ -480,6 +480,9 @@ pub struct CandidateWindow {
     /// `Cell`：在 `&self` 的测量路径里回写。第二项是记下它时的缩放：设备像素跨了 DPI
     /// 就不可比，换屏后作废重新起算。
     grid_peak_w: Cell<(f32, f32)>,
+    /// 展开态这一帧内容区的横向范围 `(左, 右)`（窗口内坐标，与命中矩形同一坐标系）。
+    /// 悬停气泡据此贴到整个窗口外侧，见 [`Self::tip_anchor`]。
+    grid_box_x: Cell<(f32, f32)>,
 }
 
 impl CandidateWindow {
@@ -572,6 +575,7 @@ impl CandidateWindow {
             min_rows: 0,
             grid: None,
             grid_peak_w: Cell::new((0.0, 0.0)),
+            grid_box_x: Cell::new((0.0, 0.0)),
         })
     }
 
@@ -1401,12 +1405,41 @@ impl CandidateWindow {
         self.grid = grid;
     }
 
-    /// 记下展开态这一帧的内容宽度，供下一帧当宽度下限（见 [`Self::grid_peak_w`]）。
-    fn note_grid_width(&self, w: f32) {
+    /// 记下展开态这一帧的内容区：宽度供下一帧当宽度下限（见 [`Self::grid_peak_w`]），
+    /// 横向范围供悬停气泡定位（见 [`Self::grid_box_x`]）。`left` 是内容区在窗口里的左缘
+    /// （软阴影扩边）。
+    fn note_grid_width(&self, left: f32, w: f32) {
         if self.grid.is_some() {
             self.grid_peak_w
                 .set((self.grid_peak_px().max(w), self.scale));
+            self.grid_box_x.set((left, left + w));
         }
+    }
+
+    /// 此刻是否按展开态（网格）画。判据与 `build_tree` 里的 `grid` 同源。
+    fn grid_shown(&self) -> bool {
+        self.grid.is_some_and(|g| g.cols > 0)
+            && !self.vertical
+            && !self.rotated
+            && !self.candidates.is_empty()
+    }
+
+    /// 悬停气泡的锚点：`(放侧边?, 左缘, 右缘)`，窗口内坐标；纵向一律对齐悬停那一格所在的行。
+    ///
+    /// - 展开态：贴着**整个窗口**的外侧（右侧优先、放不下改左）。按单格放的话，横排的「下方」
+    ///   与竖排的「侧边」都会盖住相邻的格子。
+    /// - 竖排 / 旋转态：候选项侧边（旋转态的候选项是又高又窄的一列，放上下会离得很远）。
+    /// - 横排：候选项下方（不足时上翻）。
+    ///
+    /// ★ 三处定位（本地显示 `update_tooltip`、host-render `render_tooltip_frame`、外部宿主
+    /// `render_tooltip_overlay`）都从这里取，一处放侧边、一处放上下的话，同一个悬停在
+    /// 「实时显示」与「重推帧」之间会跳位置。
+    fn tip_anchor(&self, r: &Rect) -> (bool, f32, f32) {
+        if self.grid_shown() {
+            let (l, rr) = self.grid_box_x.get();
+            return (true, l, rr);
+        }
+        (self.vertical || self.rotated, r.x, r.x + r.w)
     }
 
     /// 本次展开见过的最大宽度（当前缩放下有效；缩放变了视为 0）。
@@ -1501,7 +1534,7 @@ impl CandidateWindow {
         let t_layout0 = Instant::now();
         root.layout(ml as f32, mt as f32, &self.text_renderer);
         let (w_f, h_f) = root.measured_size();
-        self.note_grid_width(w_f);
+        self.note_grid_width(ml as f32, w_f);
         let mut content_w = (w_f.ceil() as u32).max(40);
         // 竖排最大宽度（behavior.vertical_max_width，单位 dp，默认 0=不限）：仅在用户/主题
         // 显式配置正值时生效。本 View 引擎不支持文本折行，超宽候选在窗口右缘裁切（draw_text
@@ -1673,7 +1706,7 @@ impl CandidateWindow {
         };
         root.layout(ml as f32, mt as f32, &self.text_renderer);
         let (w_f, h_f) = root.measured_size();
-        self.note_grid_width(w_f);
+        self.note_grid_width(ml as f32, w_f);
         let mut content_w = (w_f.ceil() as u32).max(40);
         if self.vertical && !self.candidates.is_empty() {
             let vmax = self.theme.behavior.vertical_max_width;
@@ -1849,7 +1882,7 @@ impl CandidateWindow {
         };
         root.layout(ml as f32, mt as f32, &self.text_renderer);
         let (w_f, h_f) = root.measured_size();
-        self.note_grid_width(w_f);
+        self.note_grid_width(ml as f32, w_f);
         let mut content_w = (w_f.ceil() as u32).max(40);
         if self.vertical && !self.candidates.is_empty() {
             let vmax = self.theme.behavior.vertical_max_width;
@@ -2001,6 +2034,14 @@ impl CandidateWindow {
     fn tooltip_hover(&self) -> i32 {
         if self.mouse.borrow().tip_hold.active() {
             -1
+        } else if self.hover < 0 && self.grid_shown() {
+            // 展开态没有鼠标悬停时，气泡跟随键盘高亮——前提是协调器给高亮格渲染了气泡
+            // （`ui.candidate.grid_tooltip_follows_highlight`，出厂关）。没开时高亮格的气泡
+            // 是空文档，这里按「无内容」不显示，与原行为一致。
+            self.candidates
+                .get(self.selected)
+                .filter(|c| !c.tooltip.is_empty())
+                .map_or(-1, |_| self.selected as i32)
         } else {
             self.hover
         }
@@ -2028,6 +2069,8 @@ impl CandidateWindow {
         } else {
             None
         };
+        // 锚点先算好：下面要可变借用气泡，`tip_anchor` 读的是窗口自身的状态。
+        let anchor = info.as_ref().map(|(_, r)| self.tip_anchor(r));
         if let Some(tip) = self.tooltip.as_mut() {
             match info {
                 Some((code, r)) => {
@@ -2040,14 +2083,15 @@ impl CandidateWindow {
                         wx + (r.x + r.w) as i32,
                         wy + (r.y + r.h) as i32,
                     ));
-                    if self.vertical || self.rotated {
-                        // 竖排：以悬停候选项自身宽度为锚点（hit rect 已含阴影偏移，wx+r.x 即屏幕坐标）。
-                        // tooltip 显示在候选项右侧，空间不足时改左侧，不遮挡下方候选。
+                    let (beside, x0, x1) = anchor.unwrap_or((false, r.x, r.x + r.w));
+                    if beside {
+                        // 侧边：锚点左右边界见 `tip_anchor`（hit rect 已含阴影偏移，wx+x 即屏幕
+                        // 坐标）。显示在右侧，空间不足时改左侧，不遮挡下方候选。
                         tip.show_beside(
                             &code,
                             hover,
-                            wx + r.x as i32,         // 候选项左边界
-                            wx + (r.x + r.w) as i32, // 候选项右边界
+                            wx + x0 as i32,
+                            wx + x1 as i32,
                             wy + r.y as i32,
                             wy + (r.y + r.h) as i32,
                         );
@@ -2103,17 +2147,18 @@ impl CandidateWindow {
         wy: i32,
     ) -> Option<(Vec<u8>, u32, u32, i32, i32, bool)> {
         let info = self.tooltip_target();
+        // 判据见 `tip_anchor`（与 `update_tooltip` 同源）；先于可变借用气泡算好。
+        let anchor = info.as_ref().map(|(_, r, _)| self.tip_anchor(r));
         let tip = self.tooltip.as_mut()?;
         match info {
             Some((code, r, hover)) => {
-                // 与上面 `update_tooltip` 那处同判据，两处必须一起改：一处走侧边、
-                // 一处走上下的话，同一个悬停在「实时显示」与「重推帧」之间会跳位置。
-                if self.vertical || self.rotated {
+                let (beside, x0, x1) = anchor.unwrap_or((false, r.x, r.x + r.w));
+                if beside {
                     tip.render_frame_beside(
                         &code,
                         hover,
-                        wx + r.x as i32,
-                        wx + (r.x + r.w) as i32,
+                        wx + x0 as i32,
+                        wx + x1 as i32,
                         wy + r.y as i32,
                         wy + (r.y + r.h) as i32,
                     )
@@ -2141,15 +2186,10 @@ impl CandidateWindow {
         wy: i32,
     ) -> Option<crate::overlay_host::Overlay> {
         let (code, r, hover) = self.tooltip_target()?;
-        let beside = self.vertical || self.rotated;
+        let (beside, x0, x1) = self.tip_anchor(&r);
         // 命中矩形是位图像素，`(wx, wy)` 是宿主坐标单位（macOS 为点），先折成同一单位。
         let u = |px: f32| crate::overlay_host::to_host(px, self.scale);
-        let row = (
-            wx + u(r.x),
-            wy + u(r.y),
-            wx + u(r.x + r.w),
-            wy + u(r.y + r.h),
-        );
+        let row = (wx + u(x0), wy + u(r.y), wx + u(x1), wy + u(r.y + r.h));
         self.tooltip
             .as_mut()?
             .render_overlay(&code, hover, row, beside)
@@ -5132,6 +5172,51 @@ mod grid_tests {
         assert!(alphas[3..].iter().all(|a| *a > 0), "高亮行可见: {alphas:?}");
     }
 
+    /// 悬停气泡的锚点：展开态贴整个内容区外侧（不是单格侧边），收起态横排放候选下方。
+    #[test]
+    fn tooltip_anchor_hugs_the_window_when_expanded() {
+        let w = grid_win(3, 2, 0, SIX);
+        let root = laid(&w);
+        let width = root.measured_size().0;
+        w.note_grid_width(6.0, width);
+        let cell = hit(&root, 4);
+        assert_eq!(
+            w.tip_anchor(&cell),
+            (true, 6.0, 6.0 + width),
+            "展开态：侧边、窗口左右缘"
+        );
+        let mut flat = grid_win(3, 2, 0, SIX);
+        flat.set_grid(None);
+        let cell = hit(&laid(&flat), 1);
+        assert_eq!(
+            flat.tip_anchor(&cell),
+            (false, cell.x, cell.x + cell.w),
+            "收起态横排：放下方"
+        );
+    }
+
+    /// 没有鼠标悬停时，气泡跟随键盘高亮——只在高亮格带了气泡内容时（协调器开了跟随才会给）。
+    #[test]
+    fn tooltip_follows_the_highlight_only_when_it_has_content() {
+        let mut w = grid_win(3, 2, 0, SIX);
+        w.selected = 4;
+        assert_eq!(w.tooltip_hover(), -1, "高亮格没有气泡内容：不跟随");
+        let doc = wind_ui_types::TooltipDoc {
+            sections: vec![wind_ui_types::TooltipSection {
+                title: None,
+                inline: false,
+                lines: vec![wind_ui_types::TooltipLine {
+                    text: "yī".into(),
+                    raw: 0,
+                }],
+            }],
+        };
+        w.candidates[4].tooltip = std::sync::Arc::new(doc);
+        assert_eq!(w.tooltip_hover(), 4, "无悬停：跟随高亮");
+        w.hover = 1;
+        assert_eq!(w.tooltip_hover(), 1, "有悬停：悬停优先");
+    }
+
     /// 序号顺延到下一行：带序号区间覆盖两行时，两行的序号都可见，第三行仍是透明占位。
     #[test]
     fn indices_can_span_two_rows() {
@@ -5173,7 +5258,7 @@ mod grid_tests {
     fn width_never_shrinks_while_expanded() {
         let mut w = grid_win(3, 2, 0, &["一二三四五", "一", "一", "一", "一", "一"]);
         let wide = laid(&w).measured_size().0;
-        w.note_grid_width(wide);
+        w.note_grid_width(0.0, wide);
         refill(&mut w, 3, 2, 0, &["一"; 6]);
         assert_eq!(laid(&w).measured_size().0, wide, "滚到窄的一屏宽度不回缩");
         w.set_grid(None);
