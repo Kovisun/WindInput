@@ -74,13 +74,8 @@
 
 ```rust
 // State 新增（coordinator.rs）
-grid: Option<GridView>,
-
-struct GridView {
-    top_page: usize,   // 可见区第一行对应的页
-    rows: usize,       // 可见行数（配置，出厂 5）
-    filter: GridFilter, // §8，P3 才有
-}
+/// `Some(p)` = 已展开，第 p 页在可见区第一行。可见行数读配置，不进状态。
+grid_top: Option<usize>,
 ```
 
 选「一行一页」，而不选威注音那种按宽度自适应换行，原因有三：
@@ -100,10 +95,11 @@ struct GridView {
 |---|---|
 | 收起态，按 `PageNext`（`=`、PageDown 等已绑定的翻页键），且候选多于一页 | **只展开，不翻页**，高亮停在原位（决策 D3） |
 | 收起态，按 ↓ | **不展开**，保持现有的线性移动（D1） |
-| 点击翻页栏的「展开」按钮 | 展开 |
+| 鼠标在候选窗上往下滚、或点翻页栏的 › | 展开（与翻页键同语义） |
 
-**不展开**的情况：只有一页、竖排或旋转布局（v1，见 §9）、TSF UI-less 宿主、快捷输入、
-辅助码筛选中、整句块激活中。
+**不展开**的情况：只有一页、竖排或旋转布局（v1，见 §9）、TSF UI-less 宿主、候选窗被隐藏、
+联想态、临拼与临英以外的 overlay 模式（快捷输入、辅助码筛选、特殊模式等）。判据收在
+`Coordinator::grid_eligible` 一处，只在进入时判。
 
 ### 5.2 展开态的按键
 
@@ -113,7 +109,7 @@ struct GridView {
 | ↓ / ↑ | 换行并保持列号（目标行较短时落到行尾）。在首行按 ↑ 收起 |
 | `=` / PageDown（`PageNext`） | 向下滚 `rows` 行，高亮跟着下移 `rows` 行并保持列号 |
 | `-` / PageUp（`PagePrev`） | 向上滚 `rows` 行；已在首屏时高亮回到首行，不收起 |
-| Tab / Shift+Tab | P3 起用于切换分类（决策 D5）；P3 之前保持高亮移动 |
+| Tab / Shift+Tab | 与 ↓ / ↑ 同一组动作（出厂都绑在「高亮上下」），展开态下同样是换行。P3 起改为切换分类（决策 D5） |
 | 1–9 / 0、`;'`、Alt/Ctrl+数字 | 作用于高亮行（不改） |
 | 空格 | 上屏高亮项，然后收起 |
 | 回车 | 保持现有的 `enter_behavior`（上屏原码 / 清空） |
@@ -126,12 +122,17 @@ struct GridView {
 - ↑↓ 必须走 `apply_session_action` 这个统一入口（根 `AGENTS.md`「候选导航键」）。展开态下
   `HighlightUp/Down` 的含义改为换行；`flip_when_above` 只在竖排时才翻转方向，对网格没有影响。
 - 展开态下 ←→ 不再移动编码区光标。Home/End 仍然移动光标。
+- ←→ 与 Esc 在 `apply_session_action` 的最前面截下（`candidate_grid::grid_key`）：主输入与
+  各 overlay 都先经过这里，才落到各自的光标移动臂与 Esc 臂，所以只需接这一处。用户绑了
+  `cancel` 的其它键同样先收起。
 
 ### 5.3 鼠标
 
 - 单击任意格：先把 `current_page` 和 `selected` 切到那一格，再上屏。
 - 右键任意格：先切高亮，再弹现有的候选菜单。置顶、删除、设为生僻等菜单项全部照常可用。
-- 滚轮：滚一行（收起态仍然是翻页）。
+- 滚轮 / 翻页栏的 ‹ ›：展开态滚一行，往上滚到第一行停住、不收起（滚轮滚过头是常事）；
+  收起态往下滚与翻页键同语义，先展开。host-render 宿主的滚轮（`handle_candidate_scroll`）
+  同此。
 - 悬停：用于驱动提示，见 §7。
 
 ### 5.4 收起
@@ -139,8 +140,9 @@ struct GridView {
 触发收起的情况：空格或数字上屏、组字变化（这时候选会整份重建）、Esc、在首行按 ↑、
 失焦、候选窗隐藏。
 
-`notify_ui_hide` 是所有隐藏通路的汇合点，把 `grid = None` 放在这里，就能覆盖全部 40 多处
-调用（`hover_index` 归零也是这么做的）。**不记忆展开状态**：每次新输入都从单行开始。
+收起点放在 `reset_candidate_view`：它是候选重新装填的汇合点，上屏、打字、退格、分步上屏
+后续查都经过它，`paged` 也在这里清零，两者同一个时机。末页放宽在临拼 / 反查下会经它重建，
+那两支与页码一起存还网格位置。**不记忆展开状态**：每次新输入都从单行开始。
 
 ## 6 协议与渲染
 
@@ -148,18 +150,18 @@ struct GridView {
 
 ```rust
 // wind-ui-types/src/command.rs  UpdateCandidates 新增
-grid: Option<GridLayout>,
+grid: Option<CandidateGrid>,
 
-pub struct GridLayout {
-    pub cols: u8,          // = per_page
-    pub rows: u8,          // 本帧实际下发的行数
-    pub highlight_row: u8, // 高亮行在可见区内的行号
-    pub more_above: bool,
-    pub more_below: bool,  // = 下面还有已加载的页 || has_more
-    pub tabs: Vec<String>, // P3；为空表示不显示分类栏
-    pub active_tab: u8,
+// wind-ui-types/src/candidate.rs
+pub struct CandidateGrid {
+    pub cols: u16,          // = per_page
+    pub rows: u16,          // 可见行数（配置值）；末屏实际行数由 candidates.len() 推出
+    pub highlight_row: u16, // 高亮行在可见区内的行号
 }
 ```
+
+`page` / `total_pages` 照旧下发，展开态读作「高亮行 / 总行数」，翻页栏无需改。P3 的分类
+标签到时再加字段。
 
 展开态下 `candidates` 是可见区内**扁平排列**的 `rows × cols` 项，`selected` 和 `hover`
 也是这个扁平数组里的下标。
@@ -168,11 +170,11 @@ pub struct GridLayout {
 `page = top_page + idx / cols`，`col = idx % cols`。三端宿主都不用改，因为它们本来就
 不解释这个数。下面这些协调器入口统一先换算，再走原有逻辑：
 
-- `mouse_select`
-- `mouse_hover`（目前按 `end - start` 校验下标，要改成按帧内条数校验）
-- `CandidateOp`
-- `show_candidate_menu`、`menu_target_page_local`
-- `tooltip_page`
+- `mouse_select`、`show_candidate_menu`：函数内先经 `resolve_event_index` 换算（收起态原样返回），
+  它们的其它调用方传的页内下标不受影响；
+- `CandidateOp`：只在 UI 事件分发处换算——Ctrl+数字热键等调用方传的本来就是页内下标；
+- `mouse_hover`：校验范围从「当页条数」改为「可见区条数」；
+- `tooltip_page`：按帧内平铺下标存，与 UI 回报的下标天然一致。
 
 这样做满足 wind-ui-types 的三条红线：纯数据、不加依赖、不分平台。wind-mobile 的映射层
 直接忽略这个字段，移动端本来就走 `candidate_pull` 拉取。
@@ -181,19 +183,18 @@ pub struct GridLayout {
 
 - **布局**：一个 `Column`，里面每行一个 `Row`。不给 `view.rs` 新增布局变体。
 - **对齐**：列宽取可见行里这一列的最大宽度，各列对齐成表格。
-- **格宽上限**：新增配置 `grid.cell_max_chars`，出厂 6 个字，超出部分截断加 `…`。
+- **格宽上限**：新增配置 `ui.candidate.grid_cell_max_chars`，出厂 6 个字，超出部分截断加 `…`
+  （协调器截，与 `max_chars` 取较紧者）。
   被截断时，悬停提示的 `${full_text}` 段会自动出现（这是现有能力）。
 - **列宽缩减**：表格总宽超过 `screen_safety_max_width_px` 时，对各列宽用 `water_fill`
   缩减（这是现有的截断算法）。
-- **序号**：只有高亮行显示 `labels`，其它行留出等宽的空位，保证各行对齐。
-- **高亮行**：整行加一条行底色，复用主题现有的 `accent_bar` / `item` 选中态推导，
-  出厂主题不需要改。
-- **翻页栏**：改成行位置指示，比如 `▲ 3/12 ▼`；`has_more` 为真时显示 `12+`。
-  新增一个「展开 / 收起」按钮 tag。
-- **注释**：沿用现有的注释模板，同样受格宽上限约束。
-- **主题新字段**（都可选，缺省时由现有字段推导）：`candidate_list.grid_row_gap`、
-  `grid_row_highlight`、`grid_tab_bar`。按 `theme-capability-extension.md` 的约定，
-  新字段必须在本期被引擎实际消费。
+- **序号**：协调器给每行都编 1..N，渲染端只让高亮行的序号可见，其余行画**透明序号**占住同样
+  的宽度，各行文字起点才对得齐。
+- **翻页栏**：挂在表格下方独立成行（同竖排），沿用现有的 `‹ 页/总页 ›`，展开态读作行位置。
+- **行距**：沿用主题 `candidate_list.row_gap`。
+- **注释**：沿用现有的注释模板，同样受格宽上限约束；上方注释条按列宽截断。
+- **P1 不加主题字段**。整行底色、`12+` 这类「还有更多」提示、分类栏样式留到确有需要时再加
+  （按 `theme-capability-extension.md`，新字段必须在当期被引擎实际消费）。
 
 ### 6.3 定位：尺寸要稳定
 
@@ -201,7 +202,8 @@ pub struct GridLayout {
 （搜狗的更新日志里专门修过「卷轴展开时显示在屏幕下方跳跃的视觉效果」）。
 
 - **高度固定**：滚到末尾、行数不够 `rows` 时，用占位行补齐。这与竖排的 `min_rows` 是同一种做法。
-- **宽度只增不减**：一次展开期间，宽度取见过的最大值，收起时复位。
+- **宽度只增不减**：一次展开期间，宽度取见过的最大值（`grid_peak_w`，每帧测量后回写，
+  下一帧作根容器的宽度下限），收起时复位。
 - **位置只在展开那一刻决定一次**：按网格的高度判断下方放不放得下；放不下就翻到上方，
   让底边贴住光标。之后滚动期间位置不变。
 - Windows 的 `place_window`、macOS 的 `CandidatePanel.show`、Linux 的 `placePanel` 本来就按
@@ -234,8 +236,9 @@ pub struct GridLayout {
 展开态一帧有 35 项（5 行 × 7 列）。如果像现在这样每项都渲染一份提示，再加上每次悬停都
 重新 notify，热路径上的开销是现在的 5 倍。所以展开态下：
 
-- 只为悬停格（或高亮格，见 §7.2）渲染提示，其它格的 `tooltip` 置空。
-- `tooltip_page` 也只缓存这一项，按扁平下标存。右键复制一段或上屏一段时只需要这一项。
+- 只为悬停格（或高亮格，见 §7.2）渲染提示，其它格的 `tooltip` 置空。**P1 已做**：悬停一变
+  `mouse_hover` 就重新下发，所以按需渲染不丢气泡；`${word_code}` 的反查也随之跳过。
+- `tooltip_page` 按平铺下标逐格存，未渲染的格子是空文档（与 UI 收到的一致，指纹校验照常成立）。
 - 注释无法按需渲染（格子里要直接显示），只能逐格渲染。用日志打点量一次 35 项下的按键延迟
   （在 Dev 实例日志里分段计时）。超出预算的话，就把展开态的注释限制为只在高亮行显示。
 
@@ -254,7 +257,7 @@ pub struct GridLayout {
 
 实现要点：
 
-- 筛选只在协调器里做。`GridView.filter` 生效时，维护一张 `view: Vec<u32>` 映射到
+- 筛选只在协调器里做。筛选生效时（P3 给展开态再加一个筛选状态），维护一张 `view: Vec<u32>` 映射到
   `state.candidates`，这时的「页」是在 `view` 上切出来的。为了不让这个映射扩散到全部
   `page_range` 调用点，**筛选态只允许出现在展开态里**，并且由 `page_range` /
   `highlighted_global_index` 这两个函数统一换算。
@@ -282,17 +285,21 @@ pub struct GridLayout {
 
 ## 10 配置
 
+与 `[ui.candidate]` 其余键同为扁平写法（P1 已落地前三项）：
+
 ```toml
-[ui.candidate.grid]
-enabled         = false       # D2：默认关
-rows            = 5           # 可见行数，2..=10
-cell_max_chars  = 6           # 单格最多几个字，0 = 不限
-esc_collapses   = true        # D4：Esc 先收起
-tooltip_follows_highlight = false
-categories      = ["all", "single", "phrase", "rare"]   # P3；为空表示不显示分类栏
+[ui.candidate]
+grid_expand         = false   # D2：默认关
+grid_rows           = 5       # 可见行数，夹在 2..=10
+grid_cell_max_chars = 6       # 单格最多几个字，0 = 只受 max_chars 约束
+# P2：grid_tooltip_follows_highlight = false
+# P3：grid_categories = ["all", "single", "phrase", "rare"]
 ```
 
-- 默认值只写在 `wind-config`（按配置规范，`config.toml` 只记录非默认值）。
+- Esc 两段式（D4）是固定行为，不设开关。
+- 预置 `data/config.toml` 按惯例列全三个键（`data_config_toml_covers_registry` 守这条）。
+- ⚠️ 新键要同步邻仓 wind-setting 的 capability 快照（`dev.sh sg` 重生成），否则合并后
+  `cargo test -p wind-rpc --test wind_setting_assets` 会红。设置页本身在 P4 做。
 - 设置端在「外观 → 候选窗」下面加一个「展开候选」分组。label 用到的生字要先过一遍拼音
   检索表的用例。
 
@@ -300,7 +307,7 @@ categories      = ["all", "single", "phrase", "rare"]   # P3；为空表示不�
 
 | 期 | 交付 | 验收 |
 |---|---|---|
-| **P1 核心** | `GridView` 状态、二维导航、进入和收起规则、扁平下标换算、`GridLayout` 协议字段、渲染器表格布局、尺寸稳定 | 协调器单测：导航、滚动触发扩容、收起时机、鼠标和菜单的下标换算、数字键作用于高亮行。Linux e2e 加用例：点击第 3 行的格子。Windows 靶机人工验证（会给出判据） |
+| **P1 核心**（已实现） | `grid_top` 状态、二维导航、进入和收起规则、平铺下标换算、`CandidateGrid` 协议字段、渲染器表格布局、尺寸稳定、按需渲染气泡 | 协调器单测：导航、滚动触发扩容、收起时机、鼠标和菜单的下标换算、数字键作用于高亮行。Linux e2e 加用例：点击第 3 行的格子。Windows 靶机人工验证（会给出判据） |
 | **P2 提示与性能** | 提示放到窗口外、只渲染需要的那一份提示、可选跟随高亮、延迟打点 | 35 项展开时按键延迟与单行相比的增量在预算内；提示不盖住任何格 |
 | **P3 分类** | 筛选映射、标签栏、自动补加载 | 输入 `yi`，切到「单字」后满屏都是单字；切回「全部」时高亮锚定在原来那个词上 |
 | **P4 设置与文档** | wind-setting 分组、文档站页面 | — |
