@@ -3150,6 +3150,10 @@ impl Coordinator {
     /// `CommitAndHoldComposition`），第三态加进来时，bool 判据的漏接会静默落进 else 分支，
     /// 而 `match` 的漏接是编译错误。参见 [`Self::enter_clears_composition`] 的同款教训。
     pub(crate) fn punct_empty_code_policy(&self, state: &State) -> PunctEmptyCodePolicy {
+        // 缓冲里有入缓冲符号（`gong-`）时候选恒空，但那是用户打的字面文本，不是废码。
+        if self.buffer_has_literal_symbol(state) {
+            return PunctEmptyCodePolicy::Commit;
+        }
         self.punct_empty_code_policy_for(state, &state.input_buffer)
     }
 
