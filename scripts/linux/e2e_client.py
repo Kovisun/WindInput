@@ -34,14 +34,14 @@ KEYSYM = {c: ord(c) for c in "abcdefghijklmnopqrstuvwxyz0123456789 "}
 KEYSYM.update({"BackSpace": 0xFF08, "Return": 0xFF0D, "Escape": 0xFF1B, "Shift_L": 0xFFE1,
                "Caps_Lock": 0xFFE5,
                "Left": 0xFF51, "Up": 0xFF52, "Right": 0xFF53, "Down": 0xFF54,
-               "equal": 0x3D})
+               "equal": 0x3D, "Tab": 0xFF09})
 KEYCODE = {
     **dict(zip("qwertyuiop", range(24, 34))),
     **dict(zip("asdfghjkl", range(38, 47))),
     **dict(zip("zxcvbnm", range(52, 59))),
     **dict(zip("1234567890", range(10, 20))),
     " ": 65, "Return": 36, "Escape": 9, "BackSpace": 22, "Shift_L": 50, "Caps_Lock": 66,
-    "Left": 113, "Up": 111, "Right": 114, "Down": 116, "equal": 21,
+    "Left": 113, "Up": 111, "Right": 114, "Down": 116, "equal": 21, "Tab": 23,
 }
 
 
@@ -2124,6 +2124,31 @@ async def grid_cases(bus, im):
     await c.key("Escape")
     await c.key("Escape")
     await asyncio.sleep(0.3)
+    c.take()
+
+    # 分类标签：Tab 切到「单字」，窗口高度不变（标签栏恒在），数字键在筛过的列表里选。
+    # 用 yi：单字一选即上屏（shijian 里选单字只消耗 shi，按分步转换留在组合区）。
+    await c.type("yi")
+    await asyncio.sleep(0.3)
+    await c.key("equal")
+    await asyncio.sleep(0.4)
+    all_win = candidate_window()
+    await c.key("Tab")
+    await asyncio.sleep(0.4)
+    single_win = candidate_window()
+    if single_win and single_win[5]:
+        screenshot("candidate_grid_single", single_win[0])
+    check("展开：Tab 切分类后候选窗高度不变",
+          bool(all_win and single_win and single_win[5] and single_win[4] == all_win[4]),
+          f"全部={all_win} 单字={single_win}")
+    c.take()
+    await c.key("1")
+    await asyncio.sleep(0.3)
+    got = c.take()
+    check("展开：「单字」里按 1 上屏一个字", len(got) == 1, f"上屏={got!r}")
+    await c.key("Escape")
+    await c.key("Escape")
+    await asyncio.sleep(0.2)
     c.take()
 
     # Esc 两段式：先收起（候选窗回到单行高度），再按才取消。
