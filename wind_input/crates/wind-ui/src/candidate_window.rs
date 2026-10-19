@@ -1412,7 +1412,10 @@ impl CandidateWindow {
         if self.grid.is_some() {
             self.grid_peak_w
                 .set((self.grid_peak_px().max(w), self.scale));
-            self.grid_box_x.set((left, left + w));
+            // 气泡贴的是**窗口实际的**右缘：渲染入口随后会按屏幕安全宽度收窄窗口，超宽的网格
+            // 按测得宽度记会让气泡离窗口右缘空出一截。与入口那道钳制同一个上限。
+            let shown = w.min(self.screen_safety_max_width_px() as f32);
+            self.grid_box_x.set((left, left + shown));
         }
     }
 

@@ -4614,11 +4614,12 @@ impl Coordinator {
         {
             return;
         }
+        // 位置一律按完整列表计（分类筛选中 `idx` 只是子集下标），见 `reorder_positions`。
+        let pos = self.reorder_positions(&state, idx);
         // 已在首位：置顶是冗余规则，直接忽略（菜单已灰显，热键路径 defensive）。
-        if matches!(op, CandidateOp::MoveTop) && idx == 0 {
+        if matches!(op, CandidateOp::MoveTop) && pos.here == 0 {
             return;
         }
-        let last = state.candidates.len().saturating_sub(1);
         if let Some(store) = &self.store {
             // 候选调整按 data_schema_id 归属（拼音族折叠）；Delete 分支仍传原始 schema，
             // 供 delete_candidate_by_source 对用户词/临时词按来源分流（混输）。
@@ -4631,10 +4632,10 @@ impl Coordinator {
             let r = match op {
                 CandidateOp::MoveTop => store.pin_shadow(&sh_schema, &code, &word, cand_id, 0),
                 CandidateOp::MoveUp => {
-                    store.pin_shadow(&sh_schema, &code, &word, cand_id, idx.saturating_sub(1))
+                    store.pin_shadow(&sh_schema, &code, &word, cand_id, pos.prev)
                 }
                 CandidateOp::MoveDown => {
-                    store.pin_shadow(&sh_schema, &code, &word, cand_id, (idx + 1).min(last))
+                    store.pin_shadow(&sh_schema, &code, &word, cand_id, pos.next)
                 }
                 // ⚠️ Delete 走 `raw_code`（击键）而非归一码：它落的是短语表 / 用户词库，
                 // 两者的键空间都是击键域（短语按 `input_buffer` 召回），与 shadow 不同。

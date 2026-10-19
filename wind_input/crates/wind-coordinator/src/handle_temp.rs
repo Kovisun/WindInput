@@ -1243,6 +1243,8 @@ impl Coordinator {
         state.preedit.clear();
         state.candidates.clear();
         state.grid_top = None;
+        state.grid_tab = wind_ui_types::GridTab::All;
+        state.grid_full.clear();
     }
 
     /// 刷新临时英文候选：`原文 → 大小写变形 → 英文词库前缀匹配（保持词库原文）`。

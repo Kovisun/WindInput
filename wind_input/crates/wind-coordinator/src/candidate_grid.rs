@@ -23,6 +23,19 @@ use wind_ipc::protocol::{MOD_SHIFT, MOD_SHORTCUT};
 use wind_keys::keymap;
 use wind_ui_types::{GRID_TAB_TAG_BASE, GridTab};
 
+/// 调位位置（见 [`Coordinator::reorder_positions`]），均为完整候选列表里的下标。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ReorderPositions {
+    /// 本条。
+    pub(crate) here: usize,
+    /// 前移的目标。
+    pub(crate) prev: usize,
+    /// 后移的目标。
+    pub(crate) next: usize,
+    /// 末位。
+    pub(crate) last: usize,
+}
+
 impl Coordinator {
     /// 展开态的生效可见行数。
     pub(crate) fn grid_rows(&self) -> usize {
@@ -239,10 +252,12 @@ impl Coordinator {
         if !Self::grid_active(state) {
             return None;
         }
-        // Tab / Shift+Tab 切分类（设计 D5）。没有标签栏时不截，照旧是绑定表里的动作
-        // （出厂是高亮上下，展开态下即换行）。
+        // Tab / Shift+Tab 切分类（设计 D5）。只在 Tab 没被另作他用时截：没有标签栏、或用户把
+        // Tab 绑成了别的动作（`tab = "aux_code:page_next"` / `"cancel"` 这类，或设成整句切换键）
+        // 时不截，照旧走它自己的绑定——展开态凭空吞掉用户的绑定是静默失效。
         if data.key_code == keymap::VK_TAB
             && data.modifiers & MOD_SHORTCUT == 0
+            && self.tab_free_for_grid(data.modifiers & MOD_SHIFT != 0)
             && self.grid_tabs(state).len() >= 2
         {
             return Some(self.grid_cycle_tab(state, data.modifiers & MOD_SHIFT == 0));
@@ -257,6 +272,19 @@ impl Coordinator {
             keymap::VK_ESCAPE => Some(self.collapse_grid(state)),
             _ => None,
         }
+    }
+
+    /// Tab（或 Shift+Tab）能不能拿来切分类：没绑任何会话动作，或绑的就是出厂那组高亮上下
+    /// （展开态下它们本是换行，让给分类不丢功能——方向键照样换行）；且不是整句切换键。
+    fn tab_free_for_grid(&self, shift: bool) -> bool {
+        use wind_config::SessionAction as A;
+        let bound = self.session_action_for(keymap::VK_TAB, shift, true);
+        let default_like = matches!(bound, None | Some(A::HighlightUp) | Some(A::HighlightDown));
+        let sentence_key = self
+            .rt()
+            .sentence_cycle_key
+            .is_some_and(|k| k.vk == keymap::VK_TAB && k.shift == shift);
+        default_like && !sentence_key
     }
 
     /// 可见区覆盖的候选绝对下标范围 `[start, end)`；没展开返回 `None`。
@@ -312,9 +340,16 @@ impl Coordinator {
         match tab {
             GridTab::All => true,
             GridTab::Single => han && wind_candidate::semantic_units(&c.text) == 1,
-            GridTab::Phrase => han && wind_candidate::semantic_units(&c.text) >= 2,
+            // 整句不算词组（设计 §8 表）：它是拼出来的一句话，混在词组里只会把真正的词挤下去。
+            GridTab::Phrase => {
+                han && wind_candidate::semantic_units(&c.text) >= 2 && !c.is_sentence
+            }
             GridTab::Rare => han && rare_known && (!c.is_common || c.user_rare),
-            GridTab::Symbol => !c.text.chars().any(wind_candidate::is_han),
+            // 符号 = 既不含汉字、也不是英文词：拼音里混进来的英文单词另有归处（「全部」里）。
+            GridTab::Symbol => {
+                !c.text.chars().any(wind_candidate::is_han)
+                    && !c.text.chars().any(|ch| ch.is_ascii_alphanumeric())
+            }
         }
     }
 
@@ -327,30 +362,35 @@ impl Coordinator {
             .is_empty()
     }
 
-    /// 这批候选可用的分类标签（按配置顺序）。少于两个即不显示标签栏。
+    /// 这批候选可用的分类标签。少于两个即不显示标签栏。
+    ///
+    /// 配置只决定**有哪些**，顺序固定按 [`GridTab`] 枚举：标签栏按枚举顺序画，Tab 循环若按
+    /// 配置顺序走，两者就对不上；设置端的多选写回也只保证集合、不保证顺序。
     ///
     /// 「全部」恒在首位（配置里漏写也补上）：切走之后总得有一条回到完整列表的路。生僻要求
     /// 常用字表在；符号只在列表里真有非汉字候选时才给——否则就是一个点开必空的标签。
     pub(crate) fn grid_tabs(&self, state: &State) -> Vec<GridTab> {
         let rt = self.rt();
-        let mut tabs = vec![GridTab::All];
+        let configured = &rt.config.ui.candidate.grid_categories;
         let full: &[Candidate] = if state.grid_tab == GridTab::All {
             &state.candidates
         } else {
             &state.grid_full
         };
-        for key in &rt.config.ui.candidate.grid_categories {
-            let Some(tab) = GridTab::from_key(key.trim()) else {
+        let mut tabs = vec![GridTab::All];
+        for tab in GridTab::ALL.into_iter().skip(1) {
+            if !configured.iter().any(|k| k.trim() == tab.key()) {
                 continue;
-            };
-            let usable = match tab {
-                GridTab::Rare => self.rare_known(),
-                GridTab::Symbol => full
+            }
+            // 每一类都要在完整列表里**已经**有内容才给。只看「还能再取」不够：拼音 `yi` 取到
+            // 上限也没有一个词组，临英全是英文词——给出点开必空的标签，Tab 还会因为一路跳过
+            // 而被吞掉（原本它在网格里是换行）。生僻另要求常用字表在。
+            let rare_known = self.rare_known();
+            let usable = (tab != GridTab::Rare || rare_known)
+                && full
                     .iter()
-                    .any(|c| Self::grid_tab_admits(GridTab::Symbol, c, true)),
-                _ => true,
-            };
-            if usable && !tabs.contains(&tab) {
+                    .any(|c| Self::grid_tab_admits(tab, c, rare_known));
+            if usable {
                 tabs.push(tab);
             }
         }
@@ -397,7 +437,9 @@ impl Coordinator {
         let rare_known = self.rare_known();
         if tab != GridTab::All {
             let want = 2 * self.grid_rows() * self.per_page(state.active);
-            loop {
+            // 补加载最多两次：每次扩容都是整份重建且在按键线程上（TSF 那边同步等着）。分类稀疏
+            // 时一路翻倍到上限要重建五次，而这时多半也凑不满——标签已保证当前列表里至少有一条。
+            for _ in 0..2 {
                 let have = state
                     .candidates
                     .iter()
@@ -423,10 +465,12 @@ impl Coordinator {
                 .cloned()
                 .collect();
             if filtered.is_empty() {
-                // 这个分类在当前编码下一个都没有：退回原来的分类，不切。
+                // 这个分类在当前编码下一个都没有：退回原来的分类，不切。补加载可能改过列表
+                // （智能档扩容会滤掉先前放行的生僻字），重新锚定在原来那个词上，别留越界页码。
                 if prev != GridTab::All {
                     self.grid_apply_tab(state, prev);
                 }
+                self.grid_land_on(state, anchor.as_deref());
                 return false;
             }
             state.grid_full = std::mem::replace(&mut state.candidates, filtered);
@@ -455,7 +499,8 @@ impl Coordinator {
             .and_then(|t| state.candidates.iter().position(|c| c.text == t))
             .unwrap_or(0);
         let pp = self.per_page(state.active);
-        Self::turn_page(state, idx / pp);
+        // 直接写页码、不经 `turn_page`：切分类不是翻页，不该改变 `-` 键的翻页身份（同整句切换）。
+        state.current_page = idx / pp;
         state.selected_index = idx % pp;
         // 可见区从高亮行起、尽量凑满一屏（同在靠后的页上展开）。
         let full_top = self.total_pages(state).saturating_sub(self.grid_rows());
@@ -483,6 +528,54 @@ impl Coordinator {
         }
     }
 
+    /// 调位（置顶 / 前移 / 后移）要用的位置，全部按**完整列表**计——shadow 规则写下的位置，
+    /// 读端是按完整候选列表解释的。分类筛选中 `candidates` 只是子集，直接拿子集下标去写，
+    /// 「后移」会把一个排在第 40 位的词持久地提到第 4 位。
+    ///
+    /// 前移 / 后移的目标是子集里**前一个 / 后一个可见词**在完整列表里的位置：用户看到的是
+    /// 子集，「往前挪一格」挪的是看得见的那一格。没在筛选时与 `idx ± 1` 逐字一致。
+    pub(crate) fn reorder_positions(&self, state: &State, idx: usize) -> ReorderPositions {
+        if state.grid_tab == GridTab::All || state.grid_full.is_empty() {
+            let last = state.candidates.len().saturating_sub(1);
+            return ReorderPositions {
+                here: idx,
+                prev: idx.saturating_sub(1),
+                next: (idx + 1).min(last),
+                last,
+            };
+        }
+        let full = &state.grid_full;
+        let at = |i: usize| -> Option<usize> {
+            let c = state.candidates.get(i)?;
+            full.iter().position(|f| {
+                f.text == c.text && f.code == c.code && f.id == c.id && f.source == c.source
+            })
+        };
+        let last = full.len().saturating_sub(1);
+        let here = at(idx).unwrap_or(idx);
+        ReorderPositions {
+            here,
+            prev: idx
+                .checked_sub(1)
+                .and_then(at)
+                .unwrap_or(here.saturating_sub(1)),
+            next: at(idx + 1).unwrap_or((here + 1).min(last)),
+            last,
+        }
+    }
+
+    /// 退出分类筛选、换回完整列表（不动页码与网格位置以外的东西）。没在筛选时什么也不做。
+    ///
+    /// 给那些要拿「原始候选」做快照的入口用（如辅助码）。
+    pub(crate) fn grid_restore_full(&self, state: &mut State) {
+        if state.grid_tab == GridTab::All {
+            return;
+        }
+        state.candidates = std::mem::take(&mut state.grid_full);
+        state.grid_tab = GridTab::All;
+        self.clamp_candidate_view(state);
+    }
+
     /// UI 回传的下标若落在分类标签那一段（[`GRID_TAB_TAG_BASE`] 起），返回对应分类。
     pub(crate) fn grid_tab_of_event(&self, idx: usize) -> Option<GridTab> {
         let k = idx.checked_sub(GRID_TAB_TAG_BASE as usize)?;
@@ -496,6 +589,9 @@ impl Coordinator {
             return;
         }
         if self.grid_switch_tab(&mut state, tab) {
+            // 高亮换了 ⇒ 混输下组合区按高亮候选重算（键盘那条路在 `after_nav_changed` 里做）。
+            // 这里没有按键可回传组合串，嵌入宿主的组合区要等下一键才跟上，与鼠标点格子同形。
+            self.sync_preedit_to_highlight(&mut state);
             self.notify_ui_update(&state);
         }
     }
@@ -637,8 +733,8 @@ mod tests {
                 highlight_row: 0,
                 index_start: 0,
                 index_count: PP as u16,
-                // 出厂分类 全部 / 单字 / 词组 / 生僻；无头构造没有常用字表 ⇒ 不给生僻。
-                tabs: GridTab::All.bit() | GridTab::Single.bit() | GridTab::Phrase.bit(),
+                // 合成候选全是非汉字：单字 / 词组 / 生僻都没有内容 ⇒ 不显示标签栏。
+                tabs: 0,
                 active_tab: 0,
             }),
             "每页 7 个按整行补只编得下高亮行"
@@ -1196,16 +1292,137 @@ mod tests {
         assert!(st.grid_full.is_empty());
     }
 
-    /// 分类筛出来是空的就跳过：合成候选全是非汉字，单字 / 词组都空，Tab 不切、也不清空候选。
+    /// 当前候选里一条都没有的分类不给：合成候选全是非汉字，单字 / 词组都不出现，标签栏消失，
+    /// Tab 回到它原本的绑定（出厂高亮下移 ⇒ 展开态下换行），而不是被一路跳过的循环吞掉。
     #[test]
-    fn empty_categories_are_skipped() {
-        let (c, _rx) = coord(true);
+    fn empty_categories_are_not_offered() {
+        let (c, rx) = coord(true);
         seed(&c, PP * 3);
         c.handle_key_event(&key(keymap::VK_EQUAL));
+        let (_, _, grid) = last_frame(&rx).unwrap();
+        assert_eq!(grid.unwrap().tabs, 0, "没有可用分类 ⇒ 不显示标签栏");
         c.handle_key_event(&key(keymap::VK_TAB));
         let st = c.state.lock().unwrap();
         assert_eq!(st.grid_tab, GridTab::All);
         assert_eq!(st.candidates.len(), PP * 3);
+        assert_eq!(st.current_page, 1, "Tab 照旧是高亮下移（展开态即换行）");
+    }
+
+    fn cand(text: &str) -> Candidate {
+        Candidate {
+            text: text.into(),
+            ..Default::default()
+        }
+    }
+
+    /// 分类判据：词组不收整句，符号不收英文词。
+    #[test]
+    fn category_rules() {
+        let admits = |t, c: &Candidate| Coordinator::grid_tab_admits(t, c, true);
+        let mut sentence = cand("时间不早了");
+        sentence.is_sentence = true;
+        assert!(admits(GridTab::Phrase, &cand("时间")));
+        assert!(!admits(GridTab::Phrase, &sentence), "整句不算词组");
+        assert!(!admits(GridTab::Phrase, &cand("时")));
+        assert!(admits(GridTab::Single, &cand("时")));
+        assert!(admits(GridTab::Symbol, &cand("😀")));
+        assert!(admits(GridTab::Symbol, &cand("※")));
+        assert!(!admits(GridTab::Symbol, &cand("shijian")), "英文词不算符号");
+        assert!(!admits(GridTab::Symbol, &cand("时")));
+    }
+
+    /// 调位位置按完整列表计：子集 [b, d] 对应完整列表 [A, b, C, d]。
+    #[test]
+    fn reorder_positions_map_back_to_the_full_list() {
+        let (c, _rx) = coord(true);
+        let mut st = c.state.lock().unwrap();
+        st.candidates = vec![cand("b"), cand("d")];
+        st.grid_full = vec![cand("A"), cand("b"), cand("C"), cand("d")];
+        st.grid_tab = GridTab::Single;
+        let p0 = c.reorder_positions(&st, 0);
+        assert_eq!(
+            (p0.here, p0.prev, p0.next, p0.last),
+            (1, 0, 3, 3),
+            "后移落到下一个可见词 d 的位置"
+        );
+        let p1 = c.reorder_positions(&st, 1);
+        assert_eq!(
+            (p1.here, p1.prev, p1.next),
+            (3, 1, 3),
+            "前移落到上一个可见词 b 的位置"
+        );
+        // 没在筛选：与 idx ± 1 逐字一致。
+        st.grid_tab = GridTab::All;
+        st.grid_full.clear();
+        let p = c.reorder_positions(&st, 1);
+        assert_eq!((p.here, p.prev, p.next, p.last), (1, 0, 1, 1));
+    }
+
+    /// 退回完整列表（辅助码等要拿原始候选做快照的入口用）。
+    #[test]
+    fn restore_full_list() {
+        let (c, _rx) = coord(true);
+        let mut st = c.state.lock().unwrap();
+        st.candidates = vec![cand("b")];
+        st.grid_full = vec![cand("A"), cand("b")];
+        st.grid_tab = GridTab::Single;
+        c.grid_restore_full(&mut st);
+        assert_eq!(st.grid_tab, GridTab::All);
+        assert!(st.grid_full.is_empty());
+        assert_eq!(st.candidates.len(), 2);
+    }
+
+    /// 用户把 Tab 另作他用（这里是整句切换键）时，展开态不截 Tab。
+    #[test]
+    fn tab_left_alone_when_bound_elsewhere() {
+        let (c, _rx) = coord(true);
+        assert!(
+            c.tab_free_for_grid(false),
+            "出厂 Tab = 高亮下移，可以让给分类"
+        );
+        let mut cfg = wind_config::Config::default();
+        cfg.ui.candidate.grid_expand = true;
+        cfg.schema.pinyin.sentence_cycle_key = "tab".into();
+        let (c, _rx) = Coordinator::new_headless_with_ui(cfg, None);
+        assert!(!c.tab_free_for_grid(false), "Tab 是整句切换键 ⇒ 不截");
+    }
+
+    /// 真实词库：常用字表在时给「生僻」，切过去只剩非常用（或手动标生僻）的汉字。
+    ///
+    /// 无头构造不会从数据目录装常用字表，这里注入一张小表：名单里的算常用，其余汉字生僻。
+    /// 检索范围取「全部字符」：出厂智能档下同码有常用字就滤掉生僻字，完整列表里压根没有
+    /// 生僻字，标签也就（正确地）不给。
+    #[test]
+    fn rare_category_keeps_only_uncommon_han() {
+        if !data_dir().join("schemas/pinyin.schema.toml").exists() {
+            return;
+        }
+        let mut cfg = wind_config::Config::default();
+        cfg.input.filter_mode = "gb18030".into();
+        cfg.schema.available = vec!["pinyin".into()];
+        cfg.schema.active = "pinyin".into();
+        cfg.input.default.chinese_mode = true;
+        cfg.ui.candidate.grid_expand = true;
+        let (c, _rx) = Coordinator::new_headless_with_ui(cfg, Some(&data_dir()));
+        c.debug_mark_coords_ready();
+        crate::charset_test_support::set_common_chars(&c, "以一亿已亦易矣乙译意依".chars());
+        for ch in "YI".chars() {
+            c.handle_key_event(&key(ch as u32));
+        }
+        c.handle_key_event(&key(keymap::VK_EQUAL));
+        let mut st = c.state.lock().unwrap();
+        assert!(
+            c.grid_tabs(&st).contains(&GridTab::Rare),
+            "常用字表在 ⇒ 给生僻"
+        );
+        assert!(c.grid_switch_tab(&mut st, GridTab::Rare));
+        assert!(!st.candidates.is_empty());
+        assert!(
+            st.candidates
+                .iter()
+                .all(|x| !"以一亿已亦易矣乙译意依".contains(x.text.as_str())),
+            "名单里的常用字不该出现在生僻里"
+        );
     }
 
     /// 真实词库、每页 5 个：展开后按 6 上屏的是第二行行首（序号顺延到下一行，数字键跟着走）。

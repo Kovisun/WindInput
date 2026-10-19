@@ -6615,8 +6615,9 @@ pub struct UiCandidateConfig {
     /// 贴在窗口外侧。代价是每次移动高亮多渲染一份气泡。
     #[serde(default)]
     pub grid_tooltip_follows_highlight: bool,
-    /// 展开态的分类标签（顺序即标签栏顺序）：`all` 全部 / `single` 单字 / `phrase` 词组 /
-    /// `rare` 生僻 / `symbol` 符号。少于两个时不显示标签栏。未知名字忽略。
+    /// 展开态的分类标签：`all` 全部 / `single` 单字 / `phrase` 词组 / `rare` 生僻 / `symbol` 符号。
+    /// 只决定**有哪些**，顺序固定按上面这个次序（「全部」恒在首位）。少于两个时不显示标签栏。
+    /// 未知名字忽略。
     #[serde(default = "default_grid_categories")]
     pub grid_categories: Vec<String>,
     /// 候选注释总开关（默认开）。关掉后不渲染注释段（含上方注释条与 `${code_hint}`），
