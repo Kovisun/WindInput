@@ -5015,6 +5015,9 @@ impl Coordinator {
     /// 页内下标 → 绝对下标的换算在此，**页范围校验也在此**：桌面候选窗只画当前页，
     /// 点到页外即为坐标算错，必须拒绝。移动端不是这样（见 [`Self::select_candidate_at`]）。
     fn mouse_select_action(&self, page_local: usize) -> Option<KeyAction> {
+        // 展开态下 UI 回传的是网格平铺下标，先切到那一格再按页内下标选。
+        // 切高亮时即重绘：选词可能不上屏（`$CC` 命令、组折叠），那时屏幕上要看到高亮已到这一格。
+        let page_local = self.resolve_event_index(page_local, true)?;
         let (start, end) = {
             let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
             self.page_range(&state)

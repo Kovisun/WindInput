@@ -1516,6 +1516,7 @@ impl Coordinator {
             hover: -1,
             page: 1,
             total_pages: 1,
+            grid: None,
             caret_x: state.caret_x,
             caret_y: state.caret_y,
             caret_height: state.caret_height,

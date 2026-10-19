@@ -2359,6 +2359,11 @@ impl Coordinator {
     /// - 无词库落点者（临拼/临英/混输/网址，以及特殊模式的空码浏览态）：仅提供复制。
     pub(crate) fn show_candidate_menu(&self, page_local: usize, x: i32, y: i32) {
         use wind_ui_types::MenuItemSpec as M;
+        // 展开态下右键的是网格里的某一格：先把高亮切过去（菜单操作的就是高亮那一格），
+        // 再按页内下标走下面的原有逻辑。
+        let Some(page_local) = self.resolve_event_index(page_local, true) else {
+            return;
+        };
         let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if state.candidates.is_empty() {
             return;

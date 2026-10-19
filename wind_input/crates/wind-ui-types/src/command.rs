@@ -34,6 +34,11 @@ pub enum UiCommand {
         page: usize,
         /// 总页数（含动态加载估计）
         total_pages: usize,
+        /// 展开态的网格版式；`None` = 单行（单列）的普通候选窗。
+        ///
+        /// 为 `Some` 时 `candidates` / `selected` / `hover` 都是网格内的平铺下标，见
+        /// [`CandidateGrid`]；`page` / `total_pages` 照旧，此时读作「高亮行 / 总行数」。
+        grid: Option<crate::candidate::CandidateGrid>,
         caret_x: i32,
         caret_y: i32,
         /// 光标高度（用于上翻时定位到光标上方）

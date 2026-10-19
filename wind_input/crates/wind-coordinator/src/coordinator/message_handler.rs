@@ -527,7 +527,14 @@ impl MessageHandler for Coordinator {
         }
         let mut changed = false;
         for _ in 0..notches {
-            let moved = if up {
+            // 展开态滚一行（同 `mouse_page`）：网格里逐个移动高亮，滚一格只挪一个字，太慢。
+            let moved = if Self::grid_active(&state) {
+                if up {
+                    state.current_page > 0 && self.grid_move_row(&mut state, false)
+                } else {
+                    self.grid_scroll_down(&mut state)
+                }
+            } else if up {
                 self.move_up(&mut state)
             } else {
                 self.move_down(&mut state)

@@ -63,6 +63,8 @@ impl Coordinator {
         // 该归零的地方。生产代码里 `current_page` 的写点全在本文件，别处的都是测试。
         state.paged = false;
         state.selected_index = 0;
+        // 展开态随候选一起作废：新装填的是另一批候选，网格从单行重新开始（不记忆展开状态）。
+        state.grid_top = None;
         self.clear_hover();
     }
 
@@ -91,6 +93,8 @@ impl Coordinator {
         if changed {
             self.clear_hover();
         }
+        // 页码被夹低了，网格可见区也要跟着收回来，否则高亮行落在可见区外。
+        self.grid_follow(state);
     }
 
     /// 翻到第 `page` 页并记下「这批候选被翻过页」。
@@ -113,7 +117,7 @@ impl Coordinator {
     /// 它们照样走这个函数，是因为**判据不该按写点分叉**：留两处裸赋值，下一个人照着最近
     /// 的先例加第六个写点时，抄到的可能正是那两处。所以「删掉它们没有用例会红」是设计的
     /// 一部分，不是漏测——别为此去补一条只能靠白盒读 `paged` 才写得出的用例。
-    fn turn_page(state: &mut State, page: usize) {
+    pub(crate) fn turn_page(state: &mut State, page: usize) {
         state.current_page = page;
         state.paged = true;
     }
@@ -263,12 +267,20 @@ impl Coordinator {
         // overlay 在按键分派处就 return 了），但不变式破一个口子就不再是不变式。
         let page_before = state.current_page;
         let paged_before = state.paged;
+        // 网格滚动位置同理：重建会经 `reset_candidate_view` 收起网格，而用户此刻正在展开态里
+        // 往下翻，收起就等于把他踢回单行。
+        let grid_before = state.grid_top;
+        // 列号同理：重建会把高亮归零，放宽若没放出东西就原样返回，屏幕上的高亮与空格的上屏
+        // 目标从此对不上。
+        let selected_before = state.selected_index;
         if in_temp {
             // ⚠️ `update_temp_pinyin_candidates` 会把 current_page/selected_index 归零，
             // 重建后须还原，否则用户翻到的位置丢失。
             self.update_temp_pinyin_candidates(state);
             state.current_page = page_before;
             state.paged = paged_before;
+            state.grid_top = grid_before;
+            state.selected_index = selected_before;
         } else if in_reverse {
             // 反查的候选另有构建函数（主路的读 `input_buffer`，在本模式恒空）。它本身不动
             // 页码 / 高亮，这里仍同临拼那支还原，免得哪天它内部改成复位视图时静默丢位置。
@@ -276,6 +288,8 @@ impl Coordinator {
             self.build_reverse_candidates(state, limit);
             state.current_page = page_before;
             state.paged = paged_before;
+            state.grid_top = grid_before;
+            state.selected_index = selected_before;
         } else {
             let limit = state.candidate_limit;
             self.build_candidates(state, limit);

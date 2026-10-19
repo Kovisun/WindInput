@@ -24,6 +24,21 @@ pub struct CandidateItem {
     pub no_index: bool,
 }
 
+/// 候选展开态（多行网格）的版式，见 `docs/design/candidate-grid-expand.md`。
+///
+/// 网格的**一行就是原来的一页**：`candidates` 是可见区内逐行平铺的候选，第 `r` 行第 `c` 列
+/// 在 `r * cols + c`。`selected` / `hover` 与命中矩形的 tag 都是这个平铺数组的下标，
+/// 宿主照旧原样回传，换算回「哪一页、页内第几个」是协调器的事。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CandidateGrid {
+    /// 每行候选数（= 每页候选数）。
+    pub cols: u16,
+    /// 可见行数。末屏行数不足时渲染端补等高占位行，保证滚动期间窗口高度不变。
+    pub rows: u16,
+    /// 高亮行在可见区内的行号（0 起）。只有这一行显示序号——数字键选的是它。
+    pub highlight_row: u16,
+}
+
 /// 结构化的悬停提示：有序段列表。纯文本形态见 [`TooltipDoc::to_plain_text`]。
 ///
 /// 段结构一路保留到 UI，右键才有东西可命中（按段 / 按行复制、上屏）：渲染端按

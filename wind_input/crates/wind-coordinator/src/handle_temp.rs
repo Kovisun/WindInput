@@ -1242,6 +1242,7 @@ impl Coordinator {
         state.english_case_variant = crate::english_candidates::CaseVariant::default();
         state.preedit.clear();
         state.candidates.clear();
+        state.grid_top = None;
     }
 
     /// 刷新临时英文候选：`原文 → 大小写变形 → 英文词库前缀匹配（保持词库原文）`。
