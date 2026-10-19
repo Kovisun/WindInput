@@ -9369,12 +9369,30 @@ impl Coordinator {
     /// ——要触发得先在临拼/混输的逐步转换里选中一个带换行的词条，再切中英；而码表（五笔）
     /// 选词消费整串、根本不进那个态。⇒ 修它是为了让四条出口语义一致，不是修现场。
     pub(crate) fn take_input_on_mode_switch(&self, state: &mut State, chinese: bool) -> String {
-        let text = self.take_input_on_mode_switch_raw(state, chinese);
+        self.take_input_on_mode_switch_cased(state, chinese, false)
+    }
+
+    /// 同 [`Self::take_input_on_mode_switch`]，`upper` 为真时上屏的原码转大写
+    /// （`input.capslock.commit_upper`，打字中按 CapsLock 开大写那一路）。
+    /// 只转用户打的码（含字母引导符），已转换前缀 `committed_text` 不动。
+    pub(crate) fn take_input_on_mode_switch_cased(
+        &self,
+        state: &mut State,
+        chinese: bool,
+        upper: bool,
+    ) -> String {
+        let text = self.take_input_on_mode_switch_raw(state, chinese, upper);
         self.convert_commit_newline(text)
     }
 
-    /// [`Self::take_input_on_mode_switch`] 的本体，不含换行改写。
-    fn take_input_on_mode_switch_raw(&self, state: &mut State, chinese: bool) -> String {
+    /// [`Self::take_input_on_mode_switch_cased`] 的本体，不含换行改写。
+    fn take_input_on_mode_switch_raw(
+        &self,
+        state: &mut State,
+        chinese: bool,
+        upper: bool,
+    ) -> String {
+        let cased = |code: String| if upper { code.to_uppercase() } else { code };
         // 切中英 / CapsLock / 系统切换三条路径全部经此。语境变了，上一句中文后面的联想
         // 已无意义。三个调用方随后都会 `notify_ui_hide`，故此处只清状态不动 UI。
         self.exit_assoc(state, crate::handle_assoc::AssocExit::ModeSwitch);
@@ -9389,10 +9407,11 @@ impl Coordinator {
             let text = if state.active == Some(ModeKind::TempEnglish)
                 && !state.temp_english_buffer.is_empty()
             {
+                let buf = cased(state.temp_english_buffer.clone());
                 let text = if state.full_width {
-                    to_full_width(&state.temp_english_buffer)
+                    to_full_width(&buf)
                 } else {
-                    state.temp_english_buffer.clone()
+                    buf
                 };
                 // 与临拼 / mix / 主路的残留同口径：本次上屏按模式切换来源记统计。
                 self.record_commit(
@@ -9444,7 +9463,8 @@ impl Coordinator {
                         // 符号引导符不输出、字母引导符归还，判据见 `guide_to_return`
                         // ——与临拼/mix 的回车上屏共用同一条，三处必须同进同出。
                         // committed 段已在选词时记过，此处只记本次实际上屏的原码（来源模式切换）。
-                        let guide = Self::guide_to_return(&prefix, &state.committed_text);
+                        let guide = cased(Self::guide_to_return(&prefix, &state.committed_text));
+                        let buf = cased(buf);
                         let code = format!("{}{}", guide, buf);
                         self.record_commit(&code, code.len() as u32, -1, CommitSource::ModeSwitch);
                         let raw = format!("{}{}{}", guide, state.committed_text, buf);
@@ -9461,6 +9481,7 @@ impl Coordinator {
                     } else if !prefix.is_empty() && !self.enter_clears_composition() {
                         // 只按了模式进入符（缓冲空）：原样上屏该前缀符号本身，与回车空缓冲上屏一致
                         // （enter_behavior=clear 时回车也不上屏，故一并放弃）。
+                        let prefix = cased(prefix);
                         self.record_commit(&prefix, 0, -1, CommitSource::Punctuation);
                         prefix
                     } else {
@@ -9482,9 +9503,10 @@ impl Coordinator {
             // 切到英文且配置上屏：把「已转换前缀 + 剩余原码」一并上屏。
             let prefix = self.take_committed(state);
             // 上屏原码 → 同回车，用用户所打的大小写形态（缓冲本身恒小写）。
-            let raw_code =
+            let raw_code = cased(
                 preedit_cursor::cased_or_buffer(&state.input_buffer, &state.input_buffer_cased)
-                    .to_string();
+                    .to_string(),
+            );
             // 模式切换上屏：committed 段已在选词时记过，此处只记剩余原码（来源模式切换）。
             self.record_commit(
                 &raw_code,
@@ -16879,6 +16901,137 @@ mod capslock_tests {
         let s = c.state.lock().unwrap();
         assert!(s.caps_lock);
         assert!(s.input_buffer.is_empty(), "未绑定时维持既有的清空语义");
+    }
+
+    /// 打字中按 CapsLock 开大写（`toggles` 置 1）的那一下 keyup，返回上屏文本。
+    fn caps_on_commit(c: &Coordinator) -> String {
+        let mut ev = kev(keymap::VK_CAPITAL, EVENT_KEY_UP);
+        ev.toggles = 0x01;
+        match c.handle_key_event(&ev) {
+            KeyAction::InsertText { text, .. } => text,
+            other => panic!("开大写应上屏编码，实际: {other:?}"),
+        }
+    }
+
+    fn coord_commit_upper(on: bool) -> Arc<Coordinator> {
+        let mut cfg = Config::default();
+        cfg.input.default.chinese_mode = true;
+        cfg.input.symbol.smart_mode = false;
+        cfg.input.capslock.commit_upper = on;
+        Coordinator::new_headless(cfg, None)
+    }
+
+    #[test]
+    fn caps_on_commits_code_uppercase_when_enabled() {
+        let c = coord_commit_upper(true);
+        c.state.lock().unwrap().input_buffer = "wps".to_string();
+        assert_eq!(caps_on_commit(&c), "WPS");
+        assert!(c.state.lock().unwrap().caps_lock, "之后是大写状态");
+    }
+
+    #[test]
+    fn caps_on_commits_code_as_typed_by_default() {
+        let c = coord_commit_upper(false);
+        c.state.lock().unwrap().input_buffer = "wps".to_string();
+        assert_eq!(caps_on_commit(&c), "wps");
+    }
+
+    /// 已转换前缀是选定的字词，不转大写。
+    #[test]
+    fn caps_on_upper_keeps_committed_prefix() {
+        let c = coord_commit_upper(true);
+        {
+            let mut s = c.state.lock().unwrap();
+            s.committed_text = "用iPhone".to_string();
+            s.input_buffer = "wps".to_string();
+        }
+        assert_eq!(caps_on_commit(&c), "用iPhoneWPS");
+    }
+
+    #[test]
+    fn caps_on_upper_applies_to_temp_english_buffer() {
+        let c = coord_commit_upper(true);
+        {
+            let mut s = c.state.lock().unwrap();
+            s.active = Some(ModeKind::TempEnglish);
+            s.temp_english_buffer = "Hello".to_string();
+        }
+        assert_eq!(caps_on_commit(&c), "HELLO");
+    }
+
+    #[test]
+    fn caps_on_upper_temp_english_full_width() {
+        let c = coord_commit_upper(true);
+        {
+            let mut s = c.state.lock().unwrap();
+            s.active = Some(ModeKind::TempEnglish);
+            s.temp_english_buffer = "Hi".to_string();
+            s.full_width = true;
+        }
+        assert_eq!(caps_on_commit(&c), "ＨＩ");
+    }
+
+    /// 字母引导符随原码转大写。
+    #[test]
+    fn caps_on_upper_temp_pinyin_letter_guide() {
+        let c = coord_commit_upper(true);
+        {
+            let mut s = c.state.lock().unwrap();
+            s.active = Some(ModeKind::TempPinyin);
+            s.temp_pinyin_prefix = "z".to_string();
+            s.temp_pinyin_buffer = "ni".to_string();
+        }
+        assert_eq!(caps_on_commit(&c), "ZNI");
+    }
+
+    /// 只按了字母引导符（缓冲空）也转。
+    #[test]
+    fn caps_on_upper_temp_pinyin_guide_only() {
+        let c = coord_commit_upper(true);
+        {
+            let mut s = c.state.lock().unwrap();
+            s.active = Some(ModeKind::TempPinyin);
+            s.temp_pinyin_prefix = "z".to_string();
+        }
+        assert_eq!(caps_on_commit(&c), "Z");
+    }
+
+    /// CapsLock 被勾成中英切换键（C++ 不带「仅状态通知」标记）时同一支、同一结果。
+    #[test]
+    fn caps_on_upper_when_capslock_is_toggle_key() {
+        let mut cfg = Config::default();
+        cfg.input.default.chinese_mode = true;
+        cfg.input.symbol.smart_mode = false;
+        cfg.input.capslock.commit_upper = true;
+        cfg.keys.toggle_mode_keys = vec!["capslock".to_string()];
+        let c = Coordinator::new_headless(cfg, None);
+        c.state.lock().unwrap().input_buffer = "wps".to_string();
+        let mut ev = kev(keymap::VK_CAPITAL, EVENT_KEY_UP);
+        ev.toggles = 0x01;
+        ev.modifiers = 0x0100; // KEYMOD_CAPSLOCK，不带 0x8000「仅状态通知」
+        match c.handle_key_event(&ev) {
+            KeyAction::InsertText { text, .. } => assert_eq!(text, "WPS"),
+            other => panic!("开大写应上屏编码，实际: {other:?}"),
+        }
+    }
+
+    /// 只管大小写：`commit_on_switch` 关时照旧丢弃编码。
+    #[test]
+    fn caps_on_upper_respects_commit_on_switch_off() {
+        let mut cfg = Config::default();
+        cfg.input.default.chinese_mode = true;
+        cfg.input.capslock.commit_upper = true;
+        cfg.keys.commit_on_switch = false;
+        let c = Coordinator::new_headless(cfg, None);
+        c.state.lock().unwrap().input_buffer = "wps".to_string();
+        let mut ev = kev(keymap::VK_CAPITAL, EVENT_KEY_UP);
+        ev.toggles = 0x01;
+        let act = c.handle_key_event(&ev);
+        assert!(
+            !matches!(&act, KeyAction::InsertText { text, .. } if !text.is_empty()),
+            "不该上屏，实际: {act:?}"
+        );
+        assert!(c.state.lock().unwrap().input_buffer.is_empty());
     }
 
     /// ★ `capslock = "select_candidate:N"` 必须走得到选词出口。

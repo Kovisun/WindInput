@@ -477,6 +477,7 @@ static REGISTRY: &[ConfigField] = &[
         "input.capslock.mode_after_cancel",
         Enum(&["chinese", "english", "toggle"]),
     ),
+    f("input.capslock.commit_upper", Bool),
     f("input.temp_pinyin.enabled", Bool),
     f("input.temp_pinyin.trigger_keys", StrList),
     f("input.temp_pinyin.hotkey", Str),

@@ -987,6 +987,10 @@ cancel_on_mode_switch = false
 #   "english" — 一律进英文（取消大写接着打小写）
 #   "toggle"  — 照常切换：Shift 翻转中英，Ctrl+空格 按它自己的切换方向
 mode_after_cancel = "chinese"
+# 打字中按 CapsLock 打开大写时，编码转大写上屏（打 wps 得 WPS），之后照常是大写状态。
+# 只管大小写：上不上屏由 [keys] commit_on_switch 决定（临时英文总会上屏）；已选定的字词不转。
+# CapsLock 在打字时绑了别的动作（keys.session_actions / 英文大小写档位键）时不走这里。
+commit_upper = false
 [input.temp_pinyin]
 enabled = true
 trigger_keys = ["backtick"]

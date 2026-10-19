@@ -1157,7 +1157,8 @@ impl MessageHandler for Coordinator {
                 let commit_text = {
                     let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
                     // 切大写时按"切英文"语义处理待输入（commit_on_switch）；切回小写时直接丢弃。
-                    let text = self.take_input_on_mode_switch(&mut s, !caps_lock_on);
+                    let upper = caps_lock_on && self.rt().config.input.capslock.commit_upper;
+                    let text = self.take_input_on_mode_switch_cased(&mut s, !caps_lock_on, upper);
                     s.caps_lock = caps_lock_on;
                     text
                 };
