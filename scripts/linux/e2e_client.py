@@ -2094,6 +2094,38 @@ async def grid_cases(bus, im):
           f"鼠标={by_mouse!r} 键盘={by_key!r}")
     sh("xdotool", "mousemove", "5", "5")
 
+    # 悬停提示：展开态贴在整个候选窗外侧，不盖住任何格子；纵向对齐悬停的那一行。
+    await c.type("yi")
+    await asyncio.sleep(0.3)
+    await c.key("equal")
+    await asyncio.sleep(0.4)
+    win = candidate_window()
+    tip = None
+    if one and win and win[5]:
+        _, x, y, _w, h, _ = win
+        row_h = (h - one[4]) / 5
+        cy = int(y + (one[4] - row_h) / 2 + 2.5 * row_h)
+        for dx in (30, 60, 90):
+            sh("xdotool", "mousemove", str(x + dx), str(cy))
+            tip = await wait_window("wind-tooltip", True, timeout=0.8)
+            if tip and tip[5]:
+                break
+    shown = bool(tip and tip[5])
+    check("展开：悬停格子后 tooltip 出现", shown, f"tooltip={tip} candidate={win}")
+    if shown:
+        _, tx, ty, tw, _th, _ = tip
+        outside = tx >= win[1] + win[3] or tx + tw <= win[1]
+        check("展开：tooltip 在候选窗外侧、不盖格子", outside,
+              f"tooltip x={tx}..{tx + tw} 候选窗 x={win[1]}..{win[1] + win[3]}")
+        check("展开：tooltip 纵向对齐悬停的那一行", win[2] + row_h * 2 <= ty <= win[2] + row_h * 3.5,
+              f"tooltip y={ty} 候选窗 y={win[2]} 行高≈{row_h:.0f}")
+        screenshot("grid_tooltip_screen")
+    sh("xdotool", "mousemove", "5", "5")
+    await c.key("Escape")
+    await c.key("Escape")
+    await asyncio.sleep(0.3)
+    c.take()
+
     # Esc 两段式：先收起（候选窗回到单行高度），再按才取消。
     await c.type("yi")
     await asyncio.sleep(0.3)
