@@ -2722,6 +2722,11 @@ impl MessageHandler for Coordinator {
             // 消费点在 handle_focus_lost 的 WARN。
             self.push_server.note_focus_gained(data.client_token);
         }
+        // 空闲吃 CapsLock 的闸门按活动客户端的 pid 下发，故在 set_active_token 之后同步。
+        {
+            let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            self.sync_capslock_idle_gate(&s);
+        }
         // per-app 状态：进程名已入缓存，按规则表/记忆表/默认值切换本应用中英状态。若与同步段
         // get_current_mode 回传值不同（该进程首次聚焦），随后的 push_activation_status 推送修正。
         //
@@ -2884,6 +2889,7 @@ impl MessageHandler for Coordinator {
                 // 别的输入法的应用不会触发 IME_DEACTIVATED，只有 FocusLost。工具栏隐藏经
                 // UI 层 50ms 防抖——紧接着若有 FocusGained 会取消隐藏，无闪烁。
                 s.ime_active = false;
+                self.sync_capslock_idle_gate(&s);
                 // 真正离开了这个宿主 ⇒ 焦点气泡的去重记录作废，下次再进来该重新提示一次。
                 // **只在这一档清**：CtxLost/DocChanged 是宿主内部换 docMgr 的噪声，清了就等于
                 // 按 docMgr 计数，Excel 下又会变回「输入一次闪两下」。
@@ -3079,6 +3085,7 @@ impl MessageHandler for Coordinator {
         {
             let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
             s.ime_active = true;
+            self.sync_capslock_idle_gate(&s);
             // 兜底置真：宿主主动激活本输入法，通常意味着焦点已进入输入框。
             // 若某些宿主 IME_ACTIVATED 之后不补发 focus_gained，而这里不置位，
             // has_edit_context 将永远停在 false —— 工具栏再也不显示。
@@ -3141,6 +3148,7 @@ impl MessageHandler for Coordinator {
         {
             let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
             s.ime_active = false;
+            self.sync_capslock_idle_gate(&s);
             s.has_edit_context = false; // 切走本输入法：谈不上焦点在不在可编辑控件里
             s.focus_no_edit_ctx = false; // 同上：不表态（input_block 也会因 ime_active 早退）
             s.input_buffer.clear();
@@ -3186,53 +3194,7 @@ impl MessageHandler for Coordinator {
     }
 
     fn handle_toggle_mode(&self) -> (Option<StatusUpdateData>, String) {
-        // 模式变更的四个入口都打一条同形日志（见 handle_system_mode_switch 的说明）。
-        // 本入口 = 本地切换键（Shift 等），按键侧另有 `toggle_mode key_up` 记录键码，
-        // 但那条只在 policed 路径上，菜单/热键触发的 toggle 走不到，故这里仍要打。
-        tracing::debug!(
-            "toggle_mode: {} -> 翻转",
-            if self.is_chinese_mode() { "中" } else { "英" }
-        );
-        // 「切换模式时取消大小写锁定」：CapsLock 开时按切换键，出厂语义是"回到可输入中文
-        // 的状态"（对齐搜狗）——取消锁定并归位中文，而非翻转 chinese_mode；否则
-        // chinese_mode 原本为 true（被 CapsLock 压制）时翻转反而落到英文，切换仍然无效。
-        // 落点可配（`input.capslock.mode_after_cancel`，论坛 t283 要「取消大写并进英文」），
-        // 判定见 `mode_after_caps_cancel`。
-        let caps_cancelled = self.cancel_caps_on_switch();
-        // 中英切换 = 一段输入结束。须在取 state 锁之前调用：terminate_auto_phrase 内部
-        // 走词库 IO，不可在持 state 锁时进行。
-        self.terminate_auto_phrase("toggle_mode");
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        state.chinese_mode = if caps_cancelled {
-            Self::mode_after_caps_cancel(
-                &self.rt().config.input.capslock.mode_after_cancel,
-                CapsCancelSwitch::Toggle,
-                state.chinese_mode,
-            )
-        } else {
-            !state.chinese_mode
-        };
-        let chinese = state.chinese_mode;
-        // 标点随中英文切换（对齐 Go）：开启 punct_follow_mode 时，标点中/英跟随当前模式。
-        if self.rt().config.input.punct.follow_mode {
-            self.set_punct_below_schema_intent(&mut state, chinese);
-        }
-        let commit_text = self.take_input_on_mode_switch(&mut state, chinese);
-        drop(state);
-        self.record_app_mode(chinese);
-        self.record_last_state();
-        self.punct.lock().unwrap_or_else(|e| e.into_inner()).reset();
-        self.disarm_smart_symbol();
-        // 配对栈**刻意不清**：中英切换既不移动光标也不消除已插入的右符号，「光标紧贴右符号」
-        // 这个前提仍然成立，清掉只会让用户切走再切回后 Tab/Enter 跳不出去。真正让前提失效的
-        // 是失焦与组合被终止，那两处仍清（见 clear_pair_tracker 的其余调用点）。
-        // C++ 侧同源：模式切换路径调 ResetComposingState(TRUE) 保留 _pairPendingDepth，
-        // 否则中文模式下 Enter 会被会话门控挡在 DLL 里，根本到不了这里。
-        self.push_state_update();
-        self.show_status();
-        self.notify_toolbar();
-        self.notify_ui_hide(); // 取消输入：隐藏候选窗
-        (Some(self.build_status()), commit_text)
+        self.handle_toggle_mode_cased(false)
     }
 
     fn handle_system_mode_switch(
@@ -4886,6 +4848,61 @@ mod ext_envelope_tests {
 }
 
 impl Coordinator {
+    /// 同 `MessageHandler::handle_toggle_mode`，`upper` 为真时切英文上屏的原码转大写
+    /// （CapsLock 作切换键且开了 `input.capslock.commit_upper`）。
+    pub(crate) fn handle_toggle_mode_cased(
+        &self,
+        upper: bool,
+    ) -> (Option<StatusUpdateData>, String) {
+        // 模式变更的四个入口都打一条同形日志（见 handle_system_mode_switch 的说明）。
+        // 本入口 = 本地切换键（Shift 等），按键侧另有 `toggle_mode key_up` 记录键码，
+        // 但那条只在 policed 路径上，菜单/热键触发的 toggle 走不到，故这里仍要打。
+        tracing::debug!(
+            "toggle_mode: {} -> 翻转",
+            if self.is_chinese_mode() { "中" } else { "英" }
+        );
+        // 「切换模式时取消大小写锁定」：CapsLock 开时按切换键，出厂语义是"回到可输入中文
+        // 的状态"（对齐搜狗）——取消锁定并归位中文，而非翻转 chinese_mode；否则
+        // chinese_mode 原本为 true（被 CapsLock 压制）时翻转反而落到英文，切换仍然无效。
+        // 落点可配（`input.capslock.mode_after_cancel`，论坛 t283 要「取消大写并进英文」），
+        // 判定见 `mode_after_caps_cancel`。
+        let caps_cancelled = self.cancel_caps_on_switch();
+        // 中英切换 = 一段输入结束。须在取 state 锁之前调用：terminate_auto_phrase 内部
+        // 走词库 IO，不可在持 state 锁时进行。
+        self.terminate_auto_phrase("toggle_mode");
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.chinese_mode = if caps_cancelled {
+            Self::mode_after_caps_cancel(
+                &self.rt().config.input.capslock.mode_after_cancel,
+                CapsCancelSwitch::Toggle,
+                state.chinese_mode,
+            )
+        } else {
+            !state.chinese_mode
+        };
+        let chinese = state.chinese_mode;
+        // 标点随中英文切换（对齐 Go）：开启 punct_follow_mode 时，标点中/英跟随当前模式。
+        if self.rt().config.input.punct.follow_mode {
+            self.set_punct_below_schema_intent(&mut state, chinese);
+        }
+        let commit_text = self.take_input_on_mode_switch_cased(&mut state, chinese, upper);
+        drop(state);
+        self.record_app_mode(chinese);
+        self.record_last_state();
+        self.punct.lock().unwrap_or_else(|e| e.into_inner()).reset();
+        self.disarm_smart_symbol();
+        // 配对栈**刻意不清**：中英切换既不移动光标也不消除已插入的右符号，「光标紧贴右符号」
+        // 这个前提仍然成立，清掉只会让用户切走再切回后 Tab/Enter 跳不出去。真正让前提失效的
+        // 是失焦与组合被终止，那两处仍清（见 clear_pair_tracker 的其余调用点）。
+        // C++ 侧同源：模式切换路径调 ResetComposingState(TRUE) 保留 _pairPendingDepth，
+        // 否则中文模式下 Enter 会被会话门控挡在 DLL 里，根本到不了这里。
+        self.push_state_update();
+        self.show_status();
+        self.notify_toolbar();
+        self.notify_ui_hide(); // 取消输入：隐藏候选窗
+        (Some(self.build_status()), commit_text)
+    }
+
     /// 热键进入的 overlay 模式（临拼 / 特殊 / 生僻字）该发什么组合区。
     ///
     /// # 为什么只在 `display` 为空时看开关

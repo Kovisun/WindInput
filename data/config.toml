@@ -987,7 +987,8 @@ cancel_on_mode_switch = false
 #   "english" — 一律进英文（取消大写接着打小写）
 #   "toggle"  — 照常切换：Shift 翻转中英，Ctrl+空格 按它自己的切换方向
 mode_after_cancel = "chinese"
-# 打字中按 CapsLock 打开大写时，编码转大写上屏（打 wps 得 WPS），之后照常是大写状态。
+# 打字中按 CapsLock 切换时，正在打的编码转大写上屏（打 wps 得 WPS）：开大写那一下，以及
+# CapsLock 作中英切换键（[keys] toggle_mode_keys）切到英文那一下，都转。
 # 只管大小写：上不上屏由 [keys] commit_on_switch 决定（临时英文总会上屏）；已选定的字词不转。
 # CapsLock 在打字时绑了别的动作（keys.session_actions / 英文大小写档位键）时不走这里。
 commit_upper = false
@@ -1174,6 +1175,10 @@ candidate_prefix = "⚡"
 min_prefix = 2
 
 [keys]
+# 中英切换键，可选 lshift / rshift / lctrl / rctrl / capslock。
+# capslock（仅 Windows）：短按切中英，按住 0.5 秒以上松开才开关大写锁定；大写开着时、在密码框里
+#   短按也是开关大写；带 Shift / Ctrl / Alt / Win 时交还系统。为此会装全局键盘钩子，
+#   只在本输入法所在的程序处于前台时拦下 CapsLock。
 toggle_mode_keys = ["lshift", "rshift"]
 commit_on_switch = true
 # Ctrl+空格 切换中英文。关掉后 Ctrl+空格 原样交给应用（如 IDEA 的代码提示）。

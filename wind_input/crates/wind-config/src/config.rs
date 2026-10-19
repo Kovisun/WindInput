@@ -4509,7 +4509,8 @@ pub struct CapslockConfig {
     /// 平台门控与文档，改类型要做旧值兼容反序列化，收益只是少一个键。
     #[serde(default = "default_capslock_mode_after_cancel")]
     pub mode_after_cancel: String,
-    /// 打字中按 CapsLock 打开大写时，把正在打的编码转大写上屏（打 `wps` 得 `WPS`）。
+    /// 打字中按 CapsLock 切换时，把正在打的编码转大写上屏（打 `wps` 得 `WPS`）：开大写那一下，
+    /// 以及 CapsLock 作中英切换键切到英文那一下。
     ///
     /// 只改大小写，上不上屏仍由 `keys.commit_on_switch` 决定（临英总会上屏）；已转换前缀不转。
     /// 消费端见 `Coordinator::take_input_on_mode_switch_cased`。

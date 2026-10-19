@@ -43,6 +43,9 @@ use std::sync::{Arc, Mutex};
 use tracing::{debug, info, trace, warn};
 use wind_keys::keymap;
 
+/// CapsLock 作中英切换键时，按住超过这么久（毫秒）松开算长按：开关大写锁定而不切中英。
+const CAPS_TOGGLE_LONG_PRESS_MS: u32 = 500;
+
 use wind_bridge::handler::*;
 use wind_bridge::push::PushServer;
 use wind_candidate::{Candidate, CandidateSource};
@@ -1417,7 +1420,10 @@ pub struct Coordinator {
     ///
     /// 在 `new` 里就建好并起好消费线程（那里才有 `Arc<Self>`），钩子装卸只是复用它。
     /// 消费线程空闲时阻塞在 channel 上，未装钩子时零开销。
-    capslock_press_tx: std::sync::mpsc::Sender<()>,
+    capslock_press_tx: std::sync::mpsc::Sender<wind_keys::capslock_hook::CapsEvent>,
+    /// 这次被钩子接管的 CapsLock 按下已被会话动作（翻页、选词、大小写档位等）用掉：
+    /// 松开时就不再当中英切换键处理。只在 CapsLock 动作消费线程里读写。
+    caps_press_claimed: std::sync::atomic::AtomicBool,
     /// 短语层（系统+用户，来自 store，仅 enabled）。变更后可 rebuild_phrases 重建。
     pub(crate) phrases: std::sync::RwLock<wind_phrase::PhraseLayer>,
     /// 最近一次解析的系统短语条目（启动时填充；"恢复默认"重读文件成功后刷新）。
@@ -2812,7 +2818,8 @@ impl Coordinator {
         } else {
             (d.chinese_mode, d.full_width, d.chinese_punct)
         };
-        let (capslock_press_tx, capslock_press_rx) = std::sync::mpsc::channel::<()>();
+        let (capslock_press_tx, capslock_press_rx) =
+            std::sync::mpsc::channel::<wind_keys::capslock_hook::CapsEvent>();
         // 简繁两方向的生效口径（互斥，冲突时 s2t 赢）收在 config 层的单一函数里，
         // 与 reload 那处同源——散着写迟早漏改一处。
         let (conv_s2t, conv_t2s) = config.input.conversion_directions();
@@ -2916,6 +2923,7 @@ impl Coordinator {
             punct: Mutex::new(punct_conv),
             capslock_hook: Mutex::new(None),
             capslock_press_tx,
+            caps_press_claimed: std::sync::atomic::AtomicBool::new(false),
             smart_symbol: Mutex::new(SmartSymbolArm::default()),
             draft_window: Mutex::new(crate::draft_window::DraftWindowBuf::new()),
             draft_queue: Mutex::new(Vec::new()),
@@ -3081,8 +3089,8 @@ impl Coordinator {
             std::thread::Builder::new()
                 .name("capslock-action".into())
                 .spawn(move || {
-                    for _ in capslock_press_rx {
-                        c.handle_capslock_hook_press();
+                    for ev in capslock_press_rx {
+                        c.handle_capslock_hook_event(ev);
                     }
                     debug!("CapsLock 钩子事件通道已关闭");
                 })
@@ -8634,8 +8642,16 @@ impl Coordinator {
     /// `let (status, _)` 丢掉 commit_text，于是经热键表/菜单触发的中英切换既不上屏
     /// 也不结束组合——与本次修的方案切换是同一个缺口，只是少了一个出口。
     pub(crate) fn toggle_mode_with_commit(&self) -> (Option<StatusUpdateData>, SwitchCommit) {
+        self.toggle_mode_with_commit_cased(false)
+    }
+
+    /// 同 [`Self::toggle_mode_with_commit`]，`upper` 见 `handle_toggle_mode_cased`。
+    pub(crate) fn toggle_mode_with_commit_cased(
+        &self,
+        upper: bool,
+    ) -> (Option<StatusUpdateData>, SwitchCommit) {
         let had_pending = self.has_pending_composition();
-        let (status, text) = self.handle_toggle_mode();
+        let (status, text) = self.handle_toggle_mode_cased(upper);
         (status, SwitchCommit { text, had_pending })
     }
 
@@ -8868,9 +8884,14 @@ impl Coordinator {
     ///
     /// ★ 幂等：已装且仍该装 → 不动（重复 `SetWindowsHookExW` 会留下卸不掉的旧钩子）。
     pub(crate) fn sync_capslock_hook(&self) {
-        let want = self.capslock_bound();
+        let want = self.capslock_bound() || self.capslock_is_toggle_key();
         let mut slot = self.capslock_hook.lock().unwrap_or_else(|e| e.into_inner());
         if want == slot.is_some() {
+            // 配置热重载可能只改了「切换按键」：钩子不动，空闲闸门要跟着重算。
+            if want {
+                let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                self.sync_capslock_idle_gate(&s);
+            }
             // ★ 「没配所以没装」此前是**完全静默**的：装成功打 INFO、卸载打 INFO，唯独这条
             // 最常见的路径一行都没有。排障时日志里搜不到任何 CapsLock 字样，无从区分
             // 「用户没配」「配了但动词/键名写错被剔除」「装失败」——三者的处置完全不同。
@@ -8889,17 +8910,15 @@ impl Coordinator {
         // 钩子回调在钩子线程执行，**必须只做非阻塞投递**：它超时会被系统静默移除且无从察觉。
         // 故这里只 send，真正的动作在 new 起的消费线程里做（可安全加锁）。
         let tx = self.capslock_press_tx.clone();
-        match wind_keys::capslock_hook::CapsLockHook::install(Box::new(move || {
-            let _ = tx.send(());
+        match wind_keys::capslock_hook::CapsLockHook::install(Box::new(move |ev| {
+            let _ = tx.send(ev);
         })) {
             Ok(h) => {
                 *slot = Some(h);
                 // 立刻按当前会话状态校准一次，避免装好后到下一次按键之间状态为默认值。
-                let eat = {
-                    let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
-                    Self::has_input_session(&s)
-                };
-                wind_keys::capslock_hook::set_should_eat(eat);
+                let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                wind_keys::capslock_hook::set_should_eat(Self::has_input_session(&s));
+                self.sync_capslock_idle_gate(&s);
             }
             Err(e) => {
                 // 装不上就退化为「CapsLock 绑定不生效」，不影响其余功能。绝不回退到
@@ -8907,6 +8926,29 @@ impl Coordinator {
                 tracing::error!("CapsLock 全局钩子安装失败，该绑定将不生效: {e}");
             }
         }
+    }
+
+    /// 「切换按键」勾了 CapsLock（`keys.toggle_mode_keys` 含 `capslock`）。
+    ///
+    /// 只有装得上钩子时它才真的切中英：锁定态由系统在 TSF 之前翻，没有钩子就压不住，
+    /// 那时 CapsLock 仍只是大写键（服务端 CapsLock 分支照旧只同步大写）。
+    pub(crate) fn capslock_is_toggle_key(&self) -> bool {
+        self.is_toggle_mode_keycode(keymap::VK_CAPITAL)
+    }
+
+    /// 同步「空闲时也吃 CapsLock」：CapsLock 是切换键且本输入法激活时，交给钩子当前活动
+    /// 客户端的进程 pid（token 高 32 位），钩子只在前台窗口属于它时接管。
+    ///
+    /// 激活态 `ime_active` 由焦点进出与输入法切入切出维护，凡改它的地方都要紧跟着调本函数
+    /// （焦点进入那处要在 `set_active_token` 之后）。宿主崩溃这类清不掉激活态的情形由钩子的
+    /// 前台进程比对兜住。
+    pub(crate) fn sync_capslock_idle_gate(&self, state: &State) {
+        let pid = if self.capslock_is_toggle_key() && state.ime_active {
+            (self.push_server.active_token() >> 32) as u32
+        } else {
+            0
+        };
+        wind_keys::capslock_hook::set_idle_pid(pid);
     }
 
     /// 同步「钩子此刻该不该吃 CapsLock」。
@@ -9158,7 +9200,83 @@ impl Coordinator {
         );
     }
 
-    fn handle_capslock_hook_press(&self) {
+    /// 钩子报来的 CapsLock 事件（在专用消费线程执行，可安全加锁）。
+    ///
+    /// down 照旧走会话动作（含自动重复）；松开时若 CapsLock 是切换键、且这次按下没被会话
+    /// 动作用掉，按 [`Self::caps_toggle_key_released`] 处理。
+    fn handle_capslock_hook_event(&self, ev: wind_keys::capslock_hook::CapsEvent) {
+        use std::sync::atomic::Ordering::Relaxed;
+        use wind_keys::capslock_hook::CapsEvent;
+        match ev {
+            CapsEvent::Down { first } => {
+                // 首个 down 先清账：上一次按下的 up 若丢了（钩子被系统摘掉），标志不该带过来。
+                if first {
+                    self.caps_press_claimed.store(false, Relaxed);
+                }
+                if self.handle_capslock_hook_press() {
+                    self.caps_press_claimed.store(true, Relaxed);
+                }
+            }
+            CapsEvent::Up {
+                held_ms,
+                interrupted,
+            } => {
+                let claimed = self.caps_press_claimed.swap(false, Relaxed);
+                if claimed || !self.capslock_is_toggle_key() {
+                    return;
+                }
+                // 按住期间按了别的键：同 Shift 的轻敲判定，不算单按，什么都不做。
+                if interrupted {
+                    debug!("CapsLock 切换键：按住期间按了别的键，不切换");
+                    return;
+                }
+                self.caps_toggle_key_released(held_ms);
+            }
+        }
+    }
+
+    /// CapsLock 作切换键时松开：短按切中英，长按（或大写已开着时）开关大写锁定。
+    ///
+    /// 开关大写靠注入一次 CapsLock：注入事件钩子放行，系统照常翻锁定态，TSF 收到后走
+    /// 服务端 CapsLock 分支的原有处理（正在打的编码按 `commit_on_switch` / `commit_upper`
+    /// 上屏），与没勾切换键时按 CapsLock 同一条路。
+    ///
+    /// 短按也当大写键的两种情形：大写开着（短按是关大写）、焦点在密码框（那里中英切换没有
+    /// 意义，用户要的是大写）。
+    ///
+    /// 注入成功后先乐观翻转大写镜像：TSF 回报要走一个往返，紧接着的短按不能读到旧值。
+    fn caps_toggle_key_released(&self, held_ms: u32) {
+        let caps_on = self
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .caps_lock;
+        let password = self
+            .password_suppress
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if held_ms >= CAPS_TOGGLE_LONG_PRESS_MS || caps_on || password {
+            debug!(
+                "CapsLock 切换键：开关大写锁定（按住 {held_ms}ms，大写原为 {caps_on}，密码框 {password}）"
+            );
+            match wind_keys::key_inject::tap_caps_lock() {
+                Ok(()) => {
+                    let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                    s.caps_lock = !caps_on;
+                }
+                Err(e) => warn!("CapsLock 切换键：注入 CapsLock 失败: {e}"),
+            }
+        } else {
+            debug!("CapsLock 切换键：短按切中英（按住 {held_ms}ms）");
+            // 同 `dispatch_hotkey("toggle_mode")`（无按键上下文，编码经 push 上屏），
+            // 只多一个 `commit_upper`：CapsLock 切的中英，编码同样转大写上屏。
+            let upper = self.rt().config.input.capslock.commit_upper;
+            let (_, commit) = self.toggle_mode_with_commit_cased(upper);
+            self.push_switch_commit(&commit);
+        }
+    }
+
+    /// 返回这次按下是否被某个会话动作用掉了。
+    fn handle_capslock_hook_press(&self) -> bool {
         // 合成一个 keyup 事件：CapsLock 在键盘路径上本来就只有 keyup 到得了服务端
         // （见 `handle_session_action_key_up`），保持同形以免两条路径的守卫产生差异。
         let data = KeyEventData {
@@ -9178,7 +9296,7 @@ impl Coordinator {
         {
             debug!("CapsLock 钩子：英文候选大小写档位循环");
             let _ = act;
-            return;
+            return true;
         }
         // ★ 必须先试选词出口，顺序与 `message_handler` 的 keyup 分支逐字一致。
         //   `apply_session_action` 对 `select_candidate:N` / `select_char:N` 一律
@@ -9193,7 +9311,8 @@ impl Coordinator {
             .map(|act| self.redispatch_commit_code(&data, act));
         // 候选窗刷新已在各出口内部完成（`notify_ui_update`），此处无须再推。
         match action {
-            Some(KeyAction::Consumed) | None => {}
+            None => false,
+            Some(KeyAction::Consumed) => true,
             Some(act) => {
                 // 钩子路径**没有 TSF 按键上下文**可回传——与鼠标点选候选完全同一处境，
                 // 故复用它的既有出口 `push_no_key_ctx_action`（`UpdateComposition` / `InsertText`
@@ -9208,6 +9327,7 @@ impl Coordinator {
                     .chinese_mode;
                 debug!("CapsLock 钩子：经 push 通道投递 {:?}", act);
                 self.push_no_key_ctx_action(&act, chinese_mode);
+                true
             }
         }
     }
@@ -17013,6 +17133,145 @@ mod capslock_tests {
             KeyAction::InsertText { text, .. } => assert_eq!(text, "WPS"),
             other => panic!("开大写应上屏编码，实际: {other:?}"),
         }
+    }
+
+    fn coord_caps_toggle_key() -> Arc<Coordinator> {
+        let mut cfg = Config::default();
+        cfg.input.default.chinese_mode = true;
+        cfg.input.symbol.smart_mode = false;
+        cfg.keys.toggle_mode_keys = vec!["lshift".to_string(), "capslock".to_string()];
+        Coordinator::new_headless(cfg, None)
+    }
+
+    fn caps_up(c: &Coordinator, held_ms: u32) {
+        c.handle_capslock_hook_event(wind_keys::capslock_hook::CapsEvent::Down { first: true });
+        c.handle_capslock_hook_event(wind_keys::capslock_hook::CapsEvent::Up {
+            held_ms,
+            interrupted: false,
+        });
+    }
+
+    #[test]
+    fn caps_toggle_key_is_recognized() {
+        assert!(coord_caps_toggle_key().capslock_is_toggle_key());
+        assert!(!coord_cn().capslock_is_toggle_key());
+    }
+
+    /// CapsLock 作切换键：短按切中英，再按切回。
+    #[test]
+    fn caps_toggle_key_short_press_toggles_mode() {
+        let c = coord_caps_toggle_key();
+        caps_up(&c, 120);
+        assert!(!c.is_chinese_mode(), "短按应切到英文");
+        caps_up(&c, 120);
+        assert!(c.is_chinese_mode(), "再短按应切回中文");
+    }
+
+    /// 打字中短按当成切英文：编码按 commit_on_switch 处置，不留在缓冲里。
+    #[test]
+    fn caps_toggle_key_short_press_while_composing_switches_to_english() {
+        let c = coord_caps_toggle_key();
+        c.state.lock().unwrap().input_buffer = "wps".to_string();
+        caps_up(&c, 120);
+        assert!(!c.is_chinese_mode());
+        assert!(c.state.lock().unwrap().input_buffer.is_empty());
+    }
+
+    /// 开了 commit_upper：CapsLock 短按切英文时编码同样转大写上屏（经 push 出口，这里看
+    /// 统计记账的上屏原码）；没开时原样。
+    #[test]
+    fn caps_toggle_key_short_press_commit_upper_follows_config() {
+        for (on, want) in [(true, "WPS"), (false, "wps")] {
+            let mut cfg = Config::default();
+            cfg.input.default.chinese_mode = true;
+            cfg.input.symbol.smart_mode = false;
+            cfg.input.capslock.commit_upper = on;
+            cfg.keys.toggle_mode_keys = vec!["capslock".to_string()];
+            let c = Coordinator::new_headless(cfg, None);
+            c.state.lock().unwrap().input_buffer = "wps".to_string();
+            c.debug_capture_stat_events();
+            caps_up(&c, 120);
+            assert!(!c.is_chinese_mode());
+            let texts: Vec<String> = c
+                .debug_take_stat_events()
+                .into_iter()
+                .map(|(_, t)| t)
+                .collect();
+            assert!(
+                texts.iter().any(|t| t == want),
+                "commit_upper={on} 应上屏 {want}，实际 {texts:?}"
+            );
+        }
+    }
+
+    /// 长按是开关大写，不切中英（大写由注入的 CapsLock 经系统翻转，这里只验不切中英）。
+    #[test]
+    fn caps_toggle_key_long_press_does_not_toggle_mode() {
+        let c = coord_caps_toggle_key();
+        caps_up(&c, CAPS_TOGGLE_LONG_PRESS_MS);
+        assert!(c.is_chinese_mode());
+    }
+
+    /// 大写开着时短按是关大写，不切中英。
+    #[test]
+    fn caps_toggle_key_short_press_with_caps_on_does_not_toggle_mode() {
+        let c = coord_caps_toggle_key();
+        c.state.lock().unwrap().caps_lock = true;
+        caps_up(&c, 120);
+        assert!(c.is_chinese_mode());
+    }
+
+    /// 被会话动作用掉的按下，松开时不再切中英。
+    #[test]
+    fn caps_toggle_key_claimed_press_does_not_toggle_mode() {
+        let c = coord_caps_toggle_key();
+        c.caps_press_claimed
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        c.handle_capslock_hook_event(wind_keys::capslock_hook::CapsEvent::Up {
+            held_ms: 120,
+            interrupted: false,
+        });
+        assert!(c.is_chinese_mode());
+    }
+
+    /// 首个 down 清掉上一次残留的「已被用掉」，这次短按照常切换。
+    #[test]
+    fn caps_toggle_key_first_down_clears_stale_claim() {
+        let c = coord_caps_toggle_key();
+        c.caps_press_claimed
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        caps_up(&c, 120);
+        assert!(!c.is_chinese_mode());
+    }
+
+    /// 按住期间按了别的键：不算单按，不切中英。
+    #[test]
+    fn caps_toggle_key_interrupted_press_does_not_toggle_mode() {
+        let c = coord_caps_toggle_key();
+        c.handle_capslock_hook_event(wind_keys::capslock_hook::CapsEvent::Down { first: true });
+        c.handle_capslock_hook_event(wind_keys::capslock_hook::CapsEvent::Up {
+            held_ms: 120,
+            interrupted: true,
+        });
+        assert!(c.is_chinese_mode());
+    }
+
+    /// 密码框里短按是开关大写，不切中英。
+    #[test]
+    fn caps_toggle_key_short_press_in_password_field_does_not_toggle_mode() {
+        let c = coord_caps_toggle_key();
+        c.password_suppress
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        caps_up(&c, 120);
+        assert!(c.is_chinese_mode());
+    }
+
+    /// 没勾切换键时，钩子（为会话绑定而装）报来的松开什么都不做。
+    #[test]
+    fn caps_release_without_toggle_key_does_nothing() {
+        let c = coord_cn();
+        caps_up(&c, 120);
+        assert!(c.is_chinese_mode());
     }
 
     /// 只管大小写：`commit_on_switch` 关时照旧丢弃编码。
