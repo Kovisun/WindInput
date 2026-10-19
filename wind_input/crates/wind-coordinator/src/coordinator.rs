@@ -656,6 +656,15 @@ pub(crate) struct State {
     /// 清零在 [`Coordinator::reset_candidate_view`]：候选重新装填（打字、退格、分步上屏后续查）
     /// 即收起，与 `paged` 同一个时机、同一个理由。
     pub(crate) grid_top: Option<usize>,
+    /// 展开态当前的分类标签（P3）。非 `All` 时 `candidates` 是**筛过的子集**，完整列表暂存在
+    /// [`Self::grid_full`]——下标在几十处调用里按 `candidates` 解释，就地换成子集，选词、序号、
+    /// 右键、置顶删除就都不用知道筛选的存在。重建候选的几处（扩容、末页放宽）之后要重新套一次
+    /// 筛选，见 `Coordinator::grid_reapply_filter`。
+    ///
+    /// 与 `grid_top` 同一个清零点（`reset_candidate_view`）。
+    pub(crate) grid_tab: wind_ui_types::GridTab,
+    /// 筛选期间的完整候选列表；`grid_tab == All` 时为空。
+    pub(crate) grid_full: Vec<Candidate>,
     /// 动态分级加载：当前候选对应的输入码
     pub(crate) candidate_input: String,
     /// 动态分级加载：当前加载上限
@@ -2866,6 +2875,8 @@ impl Coordinator {
                 selected_index: 0,
                 current_page: 0,
                 grid_top: None,
+                grid_tab: wind_ui_types::GridTab::All,
+                grid_full: Vec::new(),
                 paged: false,
                 candidate_input: String::new(),
                 candidate_limit: 0,
@@ -7540,6 +7551,8 @@ impl Coordinator {
                 highlight_row: state.current_page.saturating_sub(top) as u16,
                 index_start: from as u16,
                 index_count: count as u16,
+                tabs: self.grid_tabs(state).iter().fold(0, |m, t| m | t.bit()),
+                active_tab: state.grid_tab as u8,
             }
         });
         // 展开态的选中项是平铺下标：高亮行之前的整行都算进去。
@@ -9194,7 +9207,12 @@ impl Coordinator {
         }
         let mut guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let state: &mut State = &mut guard;
-        if state.active.is_some() || state.input_buffer.is_empty() || state.sentence_pool.len() < 2
+        // 展开态按分类筛选中：`candidates` 是子集，整句窗口按完整列表的位置滚，两者对不上。
+        // 筛选时把键让回原语义（多半是单字 / 词组标签里本就没有整句）。
+        if state.active.is_some()
+            || state.input_buffer.is_empty()
+            || state.sentence_pool.len() < 2
+            || state.grid_tab != wind_ui_types::GridTab::All
         {
             return None;
         }

@@ -4224,6 +4224,41 @@ impl CandidateWindow {
         // 网格装配：每 `cols` 格成一行。末屏行数不足时补与真实行同构的占位行（同竖排
         // `min_rows` 那套），滚到末尾窗口也不变矮——窗口高度一变，上翻定位时整个窗口就跳。
         if let Some(g) = grid {
+            // 分类标签栏（P3）：表格上方一行，当前分类画选中底色。命中 tag 落在
+            // `GRID_TAB_TAG_BASE` 段，点击经候选点选那条路回到协调器（宿主原样回传正数下标）。
+            // 展开期间它恒在，窗口高度不因切分类而变。
+            if g.tabs != 0 {
+                let dim_c = t.color("text_dim", [140, 140, 145, 255]);
+                let mut bar = View::container(Layout::Row)
+                    .gap(4.0 * s)
+                    .cross(Align::Center)
+                    .margin(Edges {
+                        b: 4.0 * s,
+                        ..Edges::default()
+                    });
+                for tab in wind_ui_types::GridTab::ALL {
+                    if g.tabs & tab.bit() == 0 {
+                        continue;
+                    }
+                    let active = tab as u8 == g.active_tab;
+                    let color = if active {
+                        eff_text(&v.text, text_color, true, false)
+                    } else {
+                        dim_c
+                    };
+                    let mut chip = View::leaf(tab.label().to_string(), color)
+                        .font_size(comment_fs)
+                        .font_family(text_family.clone())
+                        .pad(Edges::xy(8.0 * s, 2.0 * s))
+                        .radius(item_radius)
+                        .tag(wind_ui_types::GRID_TAB_TAG_BASE + tab as i32);
+                    if active {
+                        chip = chip.bg(sel_bg);
+                    }
+                    bar = bar.child(chip);
+                }
+                list = list.child(bar);
+            }
             let mut cells = grid_cells.into_iter().peekable();
             let mut shown = 0usize;
             while cells.peek().is_some() {
@@ -5100,6 +5135,8 @@ mod grid_tests {
             highlight_row: hl,
             index_start: hl * cols,
             index_count: cols,
+            tabs: 0,
+            active_tab: 0,
         }));
         // 序号与协调器一致：每行都是 1..cols。
         let items = texts
@@ -5227,6 +5264,8 @@ mod grid_tests {
             highlight_row: 0,
             index_start: 0,
             index_count: 6,
+            tabs: 0,
+            active_tab: 0,
         }));
         let mut leaves = Vec::new();
         index_leaves(&laid(&w), &mut leaves);
@@ -5236,6 +5275,36 @@ mod grid_tests {
             alphas[6..].iter().all(|a| *a == 0),
             "第三行透明: {alphas:?}"
         );
+    }
+
+    /// 分类标签栏：只画位集里的标签，各带 `GRID_TAB_TAG_BASE + 编号` 的命中 tag，当前分类画
+    /// 选中底色；标签栏在表格上方。
+    #[test]
+    fn tab_bar_lists_the_offered_tabs() {
+        use wind_ui_types::{GRID_TAB_TAG_BASE as B, GridTab};
+        let mut w = grid_win(3, 2, 0, SIX);
+        w.set_grid(Some(CandidateGrid {
+            cols: 3,
+            rows: 2,
+            highlight_row: 0,
+            index_start: 0,
+            index_count: 3,
+            tabs: GridTab::All.bit() | GridTab::Single.bit() | GridTab::Rare.bit(),
+            active_tab: GridTab::Single as u8,
+        }));
+        let root = laid(&w);
+        let mut hits = Vec::new();
+        root.collect_hits(&mut hits);
+        let tab_tags: Vec<i32> = hits
+            .iter()
+            .map(|(t, _)| *t)
+            .filter(|t| (B..B + 8).contains(t))
+            .collect();
+        assert_eq!(tab_tags, vec![B, B + 1, B + 3], "只有给出的三个标签");
+        assert!(hit(&root, B).y < hit(&root, 0).y, "标签栏在表格上方");
+        let sel = Some(wind_theme::fallback::SELECTED_BG);
+        assert_eq!(bg_of(&root, B + 1).unwrap(), sel, "当前分类画选中底色");
+        assert_ne!(bg_of(&root, B).unwrap(), sel);
     }
 
     /// 末屏只有两行时补占位行，窗口与满屏等高；占位行不是命中目标。

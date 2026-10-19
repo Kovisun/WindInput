@@ -18,8 +18,10 @@
 use crate::coordinator::{Coordinator, State};
 use crate::pipeline::ModeKind;
 use wind_bridge::handler::KeyEventData;
+use wind_candidate::Candidate;
 use wind_ipc::protocol::{MOD_SHIFT, MOD_SHORTCUT};
 use wind_keys::keymap;
+use wind_ui_types::{GRID_TAB_TAG_BASE, GridTab};
 
 impl Coordinator {
     /// 展开态的生效可见行数。
@@ -237,6 +239,14 @@ impl Coordinator {
         if !Self::grid_active(state) {
             return None;
         }
+        // Tab / Shift+Tab 切分类（设计 D5）。没有标签栏时不截，照旧是绑定表里的动作
+        // （出厂是高亮上下，展开态下即换行）。
+        if data.key_code == keymap::VK_TAB
+            && data.modifiers & MOD_SHORTCUT == 0
+            && self.grid_tabs(state).len() >= 2
+        {
+            return Some(self.grid_cycle_tab(state, data.modifiers & MOD_SHIFT == 0));
+        }
         if data.modifiers & (MOD_SHIFT | MOD_SHORTCUT) != 0 {
             return None;
         }
@@ -288,6 +298,205 @@ impl Coordinator {
             "cells" => DIGITS.max(pp).min(rows_below * pp),
             // "rows" 及未知值：只补整行，避免出现半行带号、半行不带号。
             _ => (DIGITS / pp).max(1).min(rows_below) * pp,
+        }
+    }
+
+    // ———————————————— 分类筛选（P3） ————————————————
+
+    /// 候选是否属于某个分类。判据全部取自 `Candidate` 上的现有字段（设计 §8）。
+    ///
+    /// `rare_known`：常用字表在不在。不在时没法分「常用 / 生僻」，生僻一律不收（`grid_tabs`
+    /// 也不会给出这个标签）。
+    fn grid_tab_admits(tab: GridTab, c: &Candidate, rare_known: bool) -> bool {
+        let han = !c.text.is_empty() && c.text.chars().all(wind_candidate::is_han);
+        match tab {
+            GridTab::All => true,
+            GridTab::Single => han && wind_candidate::semantic_units(&c.text) == 1,
+            GridTab::Phrase => han && wind_candidate::semantic_units(&c.text) >= 2,
+            GridTab::Rare => han && rare_known && (!c.is_common || c.user_rare),
+            GridTab::Symbol => !c.text.chars().any(wind_candidate::is_han),
+        }
+    }
+
+    /// 常用字表是否已加载（生僻分类的前提）。
+    fn rare_known(&self) -> bool {
+        !self
+            .common_chars
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_empty()
+    }
+
+    /// 这批候选可用的分类标签（按配置顺序）。少于两个即不显示标签栏。
+    ///
+    /// 「全部」恒在首位（配置里漏写也补上）：切走之后总得有一条回到完整列表的路。生僻要求
+    /// 常用字表在；符号只在列表里真有非汉字候选时才给——否则就是一个点开必空的标签。
+    pub(crate) fn grid_tabs(&self, state: &State) -> Vec<GridTab> {
+        let rt = self.rt();
+        let mut tabs = vec![GridTab::All];
+        let full: &[Candidate] = if state.grid_tab == GridTab::All {
+            &state.candidates
+        } else {
+            &state.grid_full
+        };
+        for key in &rt.config.ui.candidate.grid_categories {
+            let Some(tab) = GridTab::from_key(key.trim()) else {
+                continue;
+            };
+            let usable = match tab {
+                GridTab::Rare => self.rare_known(),
+                GridTab::Symbol => full
+                    .iter()
+                    .any(|c| Self::grid_tab_admits(GridTab::Symbol, c, true)),
+                _ => true,
+            };
+            if usable && !tabs.contains(&tab) {
+                tabs.push(tab);
+            }
+        }
+        if tabs.len() < 2 { Vec::new() } else { tabs }
+    }
+
+    /// Tab / Shift+Tab：切到下一个 / 上一个分类，跳过筛出来是空的（补加载到上限也没有）。
+    fn grid_cycle_tab(&self, state: &mut State, forward: bool) -> bool {
+        let tabs = self.grid_tabs(state);
+        let n = tabs.len();
+        let cur = tabs.iter().position(|t| *t == state.grid_tab).unwrap_or(0);
+        for step in 1..n {
+            let k = if forward {
+                (cur + step) % n
+            } else {
+                (cur + n - step) % n
+            };
+            if self.grid_switch_tab(state, tabs[k]) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// 切到分类 `tab`。筛出来是空的（补加载到上限也没有）就不切，返回 `false`。
+    ///
+    /// 筛选结果填不满两屏、而引擎还有更多时**先补加载**（单字常常排在首批 300 条之后），
+    /// 直到够数或到 `CANDIDATE_LIMIT_CAP`。高亮锚定在原来那个词上（新列表里有的话），
+    /// 否则落到第一个。
+    pub(crate) fn grid_switch_tab(&self, state: &mut State, tab: GridTab) -> bool {
+        if tab == state.grid_tab || !Self::grid_active(state) {
+            return false;
+        }
+        let anchor = state
+            .candidates
+            .get(self.highlighted_global_index(state))
+            .map(|c| c.text.clone());
+        let prev = state.grid_tab;
+        // 先回到完整列表：补加载（扩容）只认完整列表，筛选也从它出发。
+        if prev != GridTab::All {
+            state.candidates = std::mem::take(&mut state.grid_full);
+            state.grid_tab = GridTab::All;
+        }
+        let rare_known = self.rare_known();
+        if tab != GridTab::All {
+            let want = 2 * self.grid_rows() * self.per_page(state.active);
+            loop {
+                let have = state
+                    .candidates
+                    .iter()
+                    .filter(|c| Self::grid_tab_admits(tab, c, rare_known))
+                    .count();
+                let before = state.candidates.len();
+                if have >= want || !state.has_more {
+                    break;
+                }
+                self.expand_candidates(state);
+                // 扩容后可见条数没涨就停。两种情形都靠这一条收住：临拼 / 辅助码等路径的
+                // `expand_candidates` 直接返回、不动 `has_more`（只看它会死循环）；拼音完整音节
+                // 下引擎条数随 limit 翻倍、去重后可见条数却纹丝不动（`yi` 实测停在 145），一路扩到
+                // 上限只是每次整份重建、白费几十毫秒。
+                if state.candidates.len() <= before {
+                    break;
+                }
+            }
+            let filtered: Vec<Candidate> = state
+                .candidates
+                .iter()
+                .filter(|c| Self::grid_tab_admits(tab, c, rare_known))
+                .cloned()
+                .collect();
+            if filtered.is_empty() {
+                // 这个分类在当前编码下一个都没有：退回原来的分类，不切。
+                if prev != GridTab::All {
+                    self.grid_apply_tab(state, prev);
+                }
+                return false;
+            }
+            state.grid_full = std::mem::replace(&mut state.candidates, filtered);
+            state.grid_tab = tab;
+        }
+        self.grid_land_on(state, anchor.as_deref());
+        true
+    }
+
+    /// 在完整列表上直接套用分类（不补加载、不锚定）。调用前 `grid_tab` 须为 `All`。
+    fn grid_apply_tab(&self, state: &mut State, tab: GridTab) {
+        let rare_known = self.rare_known();
+        let filtered: Vec<Candidate> = state
+            .candidates
+            .iter()
+            .filter(|c| Self::grid_tab_admits(tab, c, rare_known))
+            .cloned()
+            .collect();
+        state.grid_full = std::mem::replace(&mut state.candidates, filtered);
+        state.grid_tab = tab;
+    }
+
+    /// 切分类后把高亮落到 `text` 那个词上（找不到就第一个），可见区跟过去。
+    fn grid_land_on(&self, state: &mut State, text: Option<&str>) {
+        let idx = text
+            .and_then(|t| state.candidates.iter().position(|c| c.text == t))
+            .unwrap_or(0);
+        let pp = self.per_page(state.active);
+        Self::turn_page(state, idx / pp);
+        state.selected_index = idx % pp;
+        // 可见区从高亮行起、尽量凑满一屏（同在靠后的页上展开）。
+        let full_top = self.total_pages(state).saturating_sub(self.grid_rows());
+        state.grid_top = Some(state.current_page.min(full_top));
+        self.grid_follow(state);
+        self.clear_hover();
+    }
+
+    /// 候选整份重建（扩容、末页放宽）之后：分类筛选中的话，在新的完整列表上重新筛一遍。
+    ///
+    /// 重建写的是 `candidates`，于是那一刻它装的是**完整**列表，旧的 `grid_full` 已作废。
+    /// 不重筛的后果是：用户在「单字」里往下翻、触发扩容，满屏突然冒出词组。
+    pub(crate) fn grid_reapply_filter(&self, state: &mut State) {
+        let tab = state.grid_tab;
+        if tab == GridTab::All {
+            return;
+        }
+        state.grid_tab = GridTab::All;
+        state.grid_full.clear();
+        self.grid_apply_tab(state, tab);
+        if state.candidates.is_empty() {
+            // 极端情况：重建后这一类一个都不剩（检索范围变了）。回到全部，别让候选窗变空。
+            state.candidates = std::mem::take(&mut state.grid_full);
+            state.grid_tab = GridTab::All;
+        }
+    }
+
+    /// UI 回传的下标若落在分类标签那一段（[`GRID_TAB_TAG_BASE`] 起），返回对应分类。
+    pub(crate) fn grid_tab_of_event(&self, idx: usize) -> Option<GridTab> {
+        let k = idx.checked_sub(GRID_TAB_TAG_BASE as usize)?;
+        GridTab::from_index(u8::try_from(k).ok()?)
+    }
+
+    /// 鼠标点了分类标签：切过去并重绘。没展开、或这个分类筛出来是空的，什么也不做。
+    pub(crate) fn grid_click_tab(&self, tab: GridTab) {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if !self.grid_tabs(&state).contains(&tab) {
+            return;
+        }
+        if self.grid_switch_tab(&mut state, tab) {
+            self.notify_ui_update(&state);
         }
     }
 
@@ -428,6 +637,9 @@ mod tests {
                 highlight_row: 0,
                 index_start: 0,
                 index_count: PP as u16,
+                // 出厂分类 全部 / 单字 / 词组 / 生僻；无头构造没有常用字表 ⇒ 不给生僻。
+                tabs: GridTab::All.bit() | GridTab::Single.bit() | GridTab::Phrase.bit(),
+                active_tab: 0,
             }),
             "每页 7 个按整行补只编得下高亮行"
         );
@@ -826,6 +1038,174 @@ mod tests {
                 "follow={follow}：只有高亮格（第二行行首）该有气泡"
             );
         }
+    }
+
+    /// 打出 `code`（大写键码）并展开（真实词库）。词库缺失返回 `None`。
+    ///
+    /// 分类用例用 `shijian`：它同时有单字与词组（实测 100 / 15）；`yi` 这类完整单音节一个
+    /// 词组都没有，测不到词组那一支。
+    fn typed_expanded(code: &str) -> Option<(Arc<Coordinator>, Receiver<UiCommand>)> {
+        if !data_dir().join("schemas/pinyin.schema.toml").exists() {
+            return None;
+        }
+        let mut cfg = wind_config::Config::default();
+        cfg.schema.available = vec!["pinyin".into()];
+        cfg.schema.active = "pinyin".into();
+        cfg.input.default.chinese_mode = true;
+        cfg.ui.candidate.grid_expand = true;
+        let (c, rx) = Coordinator::new_headless_with_ui(cfg, Some(&data_dir()));
+        c.debug_mark_coords_ready();
+        for ch in code.chars() {
+            c.handle_key_event(&key(ch as u32));
+        }
+        c.handle_key_event(&key(keymap::VK_EQUAL));
+        Some((c, rx))
+    }
+
+    fn shift_tab() -> KeyEventData {
+        KeyEventData {
+            modifiers: MOD_SHIFT,
+            ..key(keymap::VK_TAB)
+        }
+    }
+
+    fn texts(c: &Coordinator) -> Vec<String> {
+        c.state
+            .lock()
+            .unwrap()
+            .candidates
+            .iter()
+            .map(|c| c.text.clone())
+            .collect()
+    }
+
+    fn tab_of(c: &Coordinator) -> GridTab {
+        c.state.lock().unwrap().grid_tab
+    }
+
+    /// Tab 依次切到单字、词组：列表里只剩该类；切回全部，列表与切走之前逐条一致。
+    #[test]
+    fn tab_key_filters_by_category_and_back() {
+        let Some((c, rx)) = typed_expanded("SHIJIAN") else {
+            return;
+        };
+        let all = texts(&c);
+        let units = |t: &str| wind_candidate::semantic_units(t);
+        let han = |t: &str| t.chars().all(wind_candidate::is_han);
+        c.handle_key_event(&key(keymap::VK_TAB));
+        assert_eq!(tab_of(&c), GridTab::Single);
+        let single = texts(&c);
+        assert!(!single.is_empty());
+        assert!(
+            single.iter().all(|t| han(t) && units(t) == 1),
+            "单字：{single:?}"
+        );
+        let (_, _, grid) = last_frame(&rx).unwrap();
+        assert_eq!(grid.unwrap().active_tab, GridTab::Single as u8);
+        c.handle_key_event(&key(keymap::VK_TAB));
+        assert_eq!(tab_of(&c), GridTab::Phrase);
+        assert!(texts(&c).iter().all(|t| han(t) && units(t) >= 2));
+        // Shift+Tab 反向：词组 → 单字 → 全部。
+        c.handle_key_event(&shift_tab());
+        c.handle_key_event(&shift_tab());
+        assert_eq!(tab_of(&c), GridTab::All);
+        let back = texts(&c);
+        assert_eq!(
+            &back[..all.len().min(back.len())],
+            &all[..all.len().min(back.len())]
+        );
+        assert!(back.len() >= all.len(), "补加载过只会更多，不会丢");
+    }
+
+    /// 切分类时高亮锚定在原来那个词上。
+    #[test]
+    fn switching_tab_keeps_the_highlighted_word() {
+        let Some((c, _rx)) = typed_expanded("SHIJIAN") else {
+            return;
+        };
+        // 在「全部」里走到第一个单字上，记下它。
+        let first_single = {
+            let st = c.state.lock().unwrap();
+            st.candidates
+                .iter()
+                .position(|x| wind_candidate::semantic_units(&x.text) == 1)
+                .unwrap()
+        };
+        for _ in 0..first_single {
+            c.handle_key_event(&key(keymap::VK_RIGHT));
+        }
+        let word = {
+            let st = c.state.lock().unwrap();
+            st.candidates[c.highlighted_global_index(&st)].text.clone()
+        };
+        c.handle_key_event(&key(keymap::VK_TAB));
+        let st = c.state.lock().unwrap();
+        assert_eq!(st.candidates[c.highlighted_global_index(&st)].text, word);
+    }
+
+    /// 在「单字」里触发扩容：扩容重建的是完整列表（带词组），筛选要重新套上。
+    #[test]
+    fn expansion_keeps_the_filter() {
+        let Some((c, _rx)) = typed_expanded("SHIJIAN") else {
+            return;
+        };
+        c.handle_key_event(&key(keymap::VK_TAB));
+        let mut st = c.state.lock().unwrap();
+        assert_eq!(st.grid_tab, GridTab::Single);
+        // 白盒触发一次扩容：这个码首批就取完了，翻页触发不到。
+        st.has_more = true;
+        let limit = st.candidate_limit;
+        c.expand_candidates(&mut st);
+        assert!(st.candidate_limit > limit, "扩容确实重建过");
+        assert_eq!(st.grid_tab, GridTab::Single);
+        assert!(
+            st.candidates
+                .iter()
+                .all(|x| wind_candidate::semantic_units(&x.text) == 1),
+            "扩容后仍只有单字"
+        );
+        assert!(
+            st.grid_full
+                .iter()
+                .any(|x| wind_candidate::semantic_units(&x.text) >= 2),
+            "完整列表里有词组（重建出来的是完整列表）"
+        );
+    }
+
+    /// 鼠标点标签（tag 段 `GRID_TAB_TAG_BASE`）切分类；数字键在筛过的列表里选词；
+    /// 上屏后再打字，分类随视图一起复位。
+    #[test]
+    fn tab_click_then_select_then_reset() {
+        let Some((c, _rx)) = typed_expanded("SHIJIAN") else {
+            return;
+        };
+        c.handle_ui_event(UiEvent::CandidateSelect(
+            GRID_TAB_TAG_BASE as usize + GridTab::Phrase as usize,
+        ));
+        assert_eq!(tab_of(&c), GridTab::Phrase);
+        let want = texts(&c)[1].clone();
+        match c.handle_key_event(&key(u32::from(b'2'))) {
+            KeyAction::InsertText { text, .. } => assert_eq!(text, want),
+            other => panic!("按 2 应上屏词组里的第 2 个，实得 {other:?}"),
+        }
+        for ch in "SHI".chars() {
+            c.handle_key_event(&key(ch as u32));
+        }
+        let st = c.state.lock().unwrap();
+        assert_eq!((st.grid_tab, st.grid_top), (GridTab::All, None));
+        assert!(st.grid_full.is_empty());
+    }
+
+    /// 分类筛出来是空的就跳过：合成候选全是非汉字，单字 / 词组都空，Tab 不切、也不清空候选。
+    #[test]
+    fn empty_categories_are_skipped() {
+        let (c, _rx) = coord(true);
+        seed(&c, PP * 3);
+        c.handle_key_event(&key(keymap::VK_EQUAL));
+        c.handle_key_event(&key(keymap::VK_TAB));
+        let st = c.state.lock().unwrap();
+        assert_eq!(st.grid_tab, GridTab::All);
+        assert_eq!(st.candidates.len(), PP * 3);
     }
 
     /// 真实词库、每页 5 个：展开后按 6 上屏的是第二行行首（序号顺延到下一行，数字键跟着走）。

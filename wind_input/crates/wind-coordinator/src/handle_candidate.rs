@@ -2502,6 +2502,8 @@ impl Coordinator {
         let (engine_count, _) = self.build_candidates(state, new_limit);
         // 重建后立刻重新展开变体（列表整份重建，变体须随之重展）。
         self.expand_s2t_variants(state);
+        // 展开态正在按分类筛选：重建出来的是完整列表，重新筛一遍（见 `grid_reapply_filter`）。
+        self.grid_reapply_filter(state);
         // 可见列表可能变短（同组常用字进来、先前放行的生僻字被滤走），页码/高亮须夹回范围，
         // 下面两条出口都要——见 `clamp_candidate_view`。
         self.clamp_candidate_view(state);
@@ -5016,6 +5018,11 @@ impl Coordinator {
     /// 点到页外即为坐标算错，必须拒绝。移动端不是这样（见 [`Self::select_candidate_at`]）。
     fn mouse_select_action(&self, page_local: usize) -> Option<KeyAction> {
         // 展开态下 UI 回传的是网格平铺下标，先切到那一格再按页内下标选。
+        // 点的是展开态的分类标签（tag 段见 `GRID_TAB_TAG_BASE`）：切分类，不选词。
+        if let Some(tab) = self.grid_tab_of_event(page_local) {
+            self.grid_click_tab(tab);
+            return None;
+        }
         // 切高亮时即重绘：选词可能不上屏（`$CC` 命令、组折叠），那时屏幕上要看到高亮已到这一格。
         let page_local = self.resolve_event_index(page_local, true)?;
         let (start, end) = {

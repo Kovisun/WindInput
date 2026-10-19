@@ -65,6 +65,8 @@ impl Coordinator {
         state.selected_index = 0;
         // 展开态随候选一起作废：新装填的是另一批候选，网格从单行重新开始（不记忆展开状态）。
         state.grid_top = None;
+        state.grid_tab = wind_ui_types::GridTab::All;
+        state.grid_full.clear();
         self.clear_hover();
     }
 
@@ -273,6 +275,9 @@ impl Coordinator {
         // 列号同理：重建会把高亮归零，放宽若没放出东西就原样返回，屏幕上的高亮与空格的上屏
         // 目标从此对不上。
         let selected_before = state.selected_index;
+        // 分类筛选同理：临拼那支的重建会经视图复位把分类清掉，主路那支则把完整列表写回
+        // `candidates`。两种都在下面重套一次。
+        let tab_before = state.grid_tab;
         if in_temp {
             // ⚠️ `update_temp_pinyin_candidates` 会把 current_page/selected_index 归零，
             // 重建后须还原，否则用户翻到的位置丢失。
@@ -296,7 +301,11 @@ impl Coordinator {
         }
         // 判据取「列表里有没有真的出现被滤候选」，而非「总数是否变多」——候选受 limit 截断时
         // 总数可能不变，那样会误判成「没放出东西」而撤销。
-        if !state.candidates.iter().any(|c| c.is_scope_filtered) {
+        // ⚠️ 要在**完整**列表上判（重套分类筛选之前）：放出来的字不一定落在当前分类里。
+        let released = state.candidates.iter().any(|c| c.is_scope_filtered);
+        state.grid_tab = tab_before;
+        self.grid_reapply_filter(state);
+        if !released {
             // 该码位本就没有被滤的字 → 原样撤销，别留一个什么也没带来、却会影响后续按键的放宽态
             state.scope_relaxed = false;
             return false;

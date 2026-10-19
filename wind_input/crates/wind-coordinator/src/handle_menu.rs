@@ -2361,6 +2361,10 @@ impl Coordinator {
         use wind_ui_types::MenuItemSpec as M;
         // 悬停落到被右键的这一格：菜单开着时鼠标消息到不了候选窗，悬停停在上一次右键的那格，
         // 在另一格上再右键（关旧菜单开新菜单）时，旧格的悬停底色就留在原处，看上去像高亮没跟过来。
+        // 右键落在分类标签上：不是候选，没有候选菜单。
+        if self.grid_tab_of_event(page_local).is_some() {
+            return;
+        }
         let ui_idx = page_local as i32;
         let hover_moved = self
             .hover_index

@@ -5702,6 +5702,12 @@ fn default_grid_cell_max_chars() -> usize {
 fn default_grid_index_fill() -> String {
     "rows".to_string()
 }
+fn default_grid_categories() -> Vec<String> {
+    ["all", "single", "phrase", "rare"]
+        .into_iter()
+        .map(String::from)
+        .collect()
+}
 /// 展开态可见行数的合法范围（[`UiCandidateConfig::grid_rows`]）。
 pub const GRID_ROWS_RANGE: std::ops::RangeInclusive<usize> = 2..=10;
 fn default_first_show_settle_ratio() -> f32 {
@@ -6609,6 +6615,10 @@ pub struct UiCandidateConfig {
     /// 贴在窗口外侧。代价是每次移动高亮多渲染一份气泡。
     #[serde(default)]
     pub grid_tooltip_follows_highlight: bool,
+    /// 展开态的分类标签（顺序即标签栏顺序）：`all` 全部 / `single` 单字 / `phrase` 词组 /
+    /// `rare` 生僻 / `symbol` 符号。少于两个时不显示标签栏。未知名字忽略。
+    #[serde(default = "default_grid_categories")]
+    pub grid_categories: Vec<String>,
     /// 候选注释总开关（默认开）。关掉后不渲染注释段（含上方注释条与 `${code_hint}`），
     /// 注释模板也不再计入按需加载的需求（反查索引、用户层编码索引、拆字表随之可卸）。
     ///
@@ -6835,6 +6845,7 @@ impl Default for UiCandidateConfig {
             grid_cell_max_chars: default_grid_cell_max_chars(),
             grid_index_fill: default_grid_index_fill(),
             grid_tooltip_follows_highlight: false,
+            grid_categories: default_grid_categories(),
             comment_enabled: true,
             comment_template_vertical: default_comment_template(),
             comment_template_horizontal: default_comment_template(),

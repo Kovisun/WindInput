@@ -1379,6 +1379,9 @@ grid_cell_max_chars = 6
 grid_index_fill = "rows"
 # 展开态下悬停提示跟随键盘高亮：没有鼠标悬停时，高亮那一格的提示也显示（贴在候选窗外侧）。
 grid_tooltip_follows_highlight = false
+# 展开态的分类标签（Tab / Shift+Tab 或鼠标点击切换）：all 全部、single 单字、phrase 词组、
+# rare 生僻、symbol 符号。少于两个时不显示标签栏。
+grid_categories = ["all", "single", "phrase", "rare"]
 # 候选注释总开关。关掉后候选不再显示注释（含上方注释条），下面三层注释模板（全局 / 方案 /
 # 模式）一律不生效；关掉后不再计算注释，也不再为它预载反查编码、拆字等数据，省内存。
 # 此时 input.alt_commit = "comment" 按 "off" 处理（Alt+数字照常归程序）。
