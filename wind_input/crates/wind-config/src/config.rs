@@ -1915,6 +1915,7 @@ impl BoundAction {
 /// - `"select_char:N"`：以词定字，取当前高亮候选词的第 N 个字（N 从 1 起）
 /// - `"aux_code"` / `"aux_code:page_next"`：进辅助码筛选（后者与下翻页共键）
 /// - `"commit_highlighted"`：上屏当前高亮候选（即空格的「选词」功能）
+/// - `"commit_code"`：上屏编码（同回车上屏编码，但不看 `input.enter_behavior`）
 /// - `"command:<cmdbar 表达式>"`：执行一段命令，当前组合不动（同 [`BoundAction::Command`]）
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionAction {
@@ -1987,6 +1988,18 @@ pub enum SessionAction {
     /// 只在有候选时生效（[`Self::requires_candidates`]）：没有高亮可上屏时按键回落原语义，
     /// 空码空格的那套处置（`space_on_empty_behavior`）不属于本动词。
     CommitHighlighted,
+    /// 上屏编码——回车在「有编码」时做的那件事，换一个键来按（极点 / 小鸭用 Ctrl）。
+    ///
+    /// 恒为上屏编码，**不看 `input.enter_behavior`**：「回车清空编码」是回车这个键的配置，
+    /// 用户另绑一个键要的就是上屏编码。
+    ///
+    /// 执行方式是把这个键当成一次回车重新分派、且那一下强制走上屏编码那一支
+    /// （`Coordinator::redispatch_commit_code`），不另写上屏：回车在主路与各 overlay 里
+    /// 各有一条臂，另写一份就得跟着这些臂逐个维护。
+    ///
+    /// 不要候选（[`Self::requires_candidates`] 为假）：空码时上屏原码恰是它最常用的场合。
+    /// 无会话、联想态（没有编码可上屏）时放行，按键回落原语义。
+    CommitCode,
     /// 执行一段 cmdbar 表达式，**当前组合原样不动**（不清空、不上屏），吞键。
     /// 写法、载荷与执行通路都与 [`BoundAction::Command`] 逐字一致。
     ///
@@ -2093,6 +2106,7 @@ impl SessionAction {
             // （`key_actions` 那张表没有共键形态：它只认符号键与字母 z，翻页键压根解析不出来。）
             "aux_code" => Self::AuxCode(AuxCodeShare::Solo),
             "commit_highlighted" => Self::CommitHighlighted,
+            "commit_code" => Self::CommitCode,
             // `clear` 是 `cancel` 的别名（同一个动作，两种心智），见 `Cancel` 的文档。
             "cancel" | "clear" => Self::Cancel,
             _ => Self::None,
@@ -2112,9 +2126,10 @@ impl SessionAction {
         // ——单字模式下某个码本来就可能一条候选都不剩，那时按键若被判成「无事可做」而放行，
         // 用户就再也关不掉它了。
         // `Command` 同侧：命令与候选无关，打了码没出候选时照样要能执行。
+        // `CommitCode` 同侧：空码上屏原码正是它的用处。
         !matches!(
             self,
-            Self::None | Self::Cancel | Self::SingleChar(_) | Self::Command(_)
+            Self::None | Self::Cancel | Self::SingleChar(_) | Self::Command(_) | Self::CommitCode
         )
     }
 
@@ -2179,6 +2194,7 @@ impl std::fmt::Display for SessionAction {
             Self::AuxCode(AuxCodeShare::PageNext) => f.write_str("aux_code:page_next"),
             Self::SingleChar(a) => write!(f, "single_char:{}", a.as_payload()),
             Self::CommitHighlighted => f.write_str("commit_highlighted"),
+            Self::CommitCode => f.write_str("commit_code"),
             Self::Command(expr) => write!(f, "{COMMAND_VERB_PREFIX}{expr}"),
         }
     }
@@ -10719,6 +10735,19 @@ mod tests {
             Some(SessionAction::CommitHighlighted)
         );
         assert!(a.requires_candidates(), "无候选时无高亮可上屏，须放行按键");
+    }
+
+    /// `commit_code`：解析与回写互逆，且**不要候选**——空码上屏原码正是它的用处。
+    #[test]
+    fn commit_code_round_trips_and_works_without_candidates() {
+        let a = SessionAction::parse(" Commit_Code ");
+        assert_eq!(a, SessionAction::CommitCode);
+        assert_eq!(
+            SessionAction::parse(&a.to_string()),
+            a,
+            "Display 与 parse 须互逆"
+        );
+        assert!(!a.requires_candidates(), "空码无候选时也要能上屏原码");
     }
 
     /// `command:<表达式>`：两张表同一套解析，表达式**原样保留大小写与内部空白**。

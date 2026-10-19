@@ -2019,6 +2019,11 @@ pub struct Coordinator {
     pub(crate) stat_collector: Option<StatCollector>,
     /// 本次按键是否已被具体上屏路径记录统计（AtomicBool，避免与 state 锁冲突致死锁）。
     pub(crate) stat_recorded: std::sync::atomic::AtomicBool,
+    /// 本次按键命中了会话态动词 `commit_code`，出口处要把它当成一次回车重新分派。
+    /// 见 [`Coordinator::redispatch_commit_code`]。
+    pub(crate) commit_code_pending: std::sync::atomic::AtomicBool,
+    /// 正在为 `commit_code` 重新分派回车：这一下回车恒上屏编码，不看 `input.enter_behavior`。
+    pub(crate) commit_code_forced: std::sync::atomic::AtomicBool,
     /// 统计事件捕获（仅测试）：`None` = 不捕获（生产恒 `None`，零增长）；
     /// `debug_capture_stat_events` 置 `Some` 后，每次 `record_commit*` 追加 (来源, 文本)。
     pub(crate) debug_stat_events: Mutex<Option<Vec<(CommitSource, String)>>>,
@@ -3037,6 +3042,8 @@ impl Coordinator {
             candidate_font_sent: Mutex::new(String::new()),
             stat_collector,
             stat_recorded: std::sync::atomic::AtomicBool::new(false),
+            commit_code_pending: std::sync::atomic::AtomicBool::new(false),
+            commit_code_forced: std::sync::atomic::AtomicBool::new(false),
             debug_stat_events: Mutex::new(None),
             fullscreen_cached: std::sync::atomic::AtomicBool::new(false),
             fullscreen_probing: std::sync::atomic::AtomicBool::new(false),
@@ -3157,7 +3164,16 @@ impl Coordinator {
     /// 此判据由它们共用。此前各路径内联比较字符串，且**只判在「空缓冲」分支上**，
     /// 于是「打了码再按回车」时配置静默失效、照旧上屏原码；收口成单一具名判据，
     /// 使「某条路径没接」退化为「没有调用点」这种更容易发现的缺失。
+    ///
+    /// 会话态动词 `commit_code` 借回车的臂上屏编码，那一下恒为假（见
+    /// [`Self::redispatch_commit_code`]）——这里是各臂唯一的读点，故只在这里拦。
     pub(crate) fn enter_clears_composition(&self) -> bool {
+        if self
+            .commit_code_forced
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return false;
+        }
         self.rt().config.input.enter_behavior == "clear"
     }
 
@@ -5666,6 +5682,23 @@ impl Coordinator {
             wind_config::SessionAction::CommitHighlighted => {
                 return self.commit_highlighted(state);
             }
+            // 上屏编码：这里只登记、吞键，持锁的这一层没法重入分派；由出口
+            // `redispatch_commit_code` 把这个键当回车再走一遍。
+            //
+            // 无会话放行，判据与 `Cancel` 同侧。联想态也放行：那里没有编码，回车在联想态
+            // 是「收窗并把回车交还宿主」，借过来就成了把 Tab / Ctrl 交还宿主。
+            // 绑在回车自己身上没有意义，也会让重新分派再命中一次，一并放行。
+            wind_config::SessionAction::CommitCode => {
+                if !Self::has_input_session(state)
+                    || state.assoc_active()
+                    || data.key_code == keymap::VK_RETURN
+                {
+                    return None;
+                }
+                self.commit_code_pending
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                return Some(KeyAction::Consumed);
+            }
             // 命令：执行，**当前组合原样不动**（不清空、不上屏），吞键。
             //
             // 无会话放行，判据与 `Cancel` / `SingleChar` 同侧：本表收的 Tab / 翻页键那一批
@@ -5829,6 +5862,38 @@ impl Coordinator {
     ///
     /// ⚠️ 二期加 `clear` / `cancel` 时，判据要放宽到「有编码**或**有候选」——那时改**这一处**
     /// 的守卫，别在各调用点各判一次（Esc 散成七处就是那么来的）。
+    /// 会话态动词 `commit_code` 的执行：本次按键若命中了它，把触发键当成一次回车重新
+    /// 分派，并让这一下回车恒走「上屏编码」那一支。
+    ///
+    /// ★ 借回车的臂而不是另写上屏：回车在主路与各 overlay 里各有一条臂（引导符归还、
+    /// 已转换前缀、全角、英文造词、上屏历史各有讲究），另写一份就得跟着它们逐个维护。
+    /// 与回车唯一的不同是不看 `input.enter_behavior`——用户绑这个键要的就是上屏编码，
+    /// 「回车清空编码」是回车这个键的配置。
+    ///
+    /// 不在命中处直接执行：那里持着 `State` 锁，分派要自己取锁。按键出口
+    /// （`handle_key_event_policed`、CapsLock 钩子）都在锁外，于是挂在那里。
+    pub(crate) fn redispatch_commit_code(
+        &self,
+        data: &KeyEventData,
+        action: KeyAction,
+    ) -> KeyAction {
+        use std::sync::atomic::Ordering::Relaxed;
+        if !self.commit_code_pending.swap(false, Relaxed) {
+            return action;
+        }
+        let enter = KeyEventData {
+            key_code: keymap::VK_RETURN,
+            modifiers: 0,
+            event_type: EVENT_KEY_DOWN,
+            ..data.clone()
+        };
+        self.commit_code_forced.store(true, Relaxed);
+        let act = wind_bridge::handler::MessageHandler::handle_key_event(self, &enter);
+        self.commit_code_forced.store(false, Relaxed);
+        self.commit_code_pending.store(false, Relaxed);
+        act
+    }
+
     fn handle_session_action_key_up(&self, data: &KeyEventData) -> Option<KeyAction> {
         if !keymap::is_key_up_only_vk(data.key_code) {
             return None;
@@ -9124,7 +9189,8 @@ impl Coordinator {
         //   连大写都不翻。2026-08-31 修。
         let action = self
             .handle_select_key_up(&data)
-            .or_else(|| self.handle_session_action_key_up(&data));
+            .or_else(|| self.handle_session_action_key_up(&data))
+            .map(|act| self.redispatch_commit_code(&data, act));
         // 候选窗刷新已在各出口内部完成（`notify_ui_update`），此处无须再推。
         match action {
             Some(KeyAction::Consumed) | None => {}

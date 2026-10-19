@@ -853,6 +853,7 @@ impl MessageHandler for Coordinator {
             self.note_host_wrote_text("宿主自行出字");
         }
         let action = self.handle_key_event(data);
+        let action = self.redispatch_commit_code(data, action);
         // 上屏换行改写。与 record_input_stats / note_commit_action 同一收口理由（上屏路径
         // 40+ 个返回点，散点接线必漏），而且这里还多一条：换行形式是**平台/宿主**的表达
         // 约定，属于服务端的职责——DLL 拿到什么就写什么，不再自己判断（A3-3）。
@@ -988,6 +989,10 @@ impl MessageHandler for Coordinator {
         // 每次按键开始重置统计标志：具体上屏路径调 record_commit 置位，
         // 顶层 record_input_stats 仅在未置位时兜底（对齐 Go handle_key_event 开头 reset）。
         self.stat_recorded
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        // 不经 `handle_key_event_policed` 的调用方（移动端）没有重新分派这一步，
+        // 别让上一键的登记漏到这一键。
+        self.commit_code_pending
             .store(false, std::sync::atomic::Ordering::Relaxed);
 
         // 方案级行为覆盖的**兜底**同步点：代际未变时是一次 atomic load + 比较，可忽略。
