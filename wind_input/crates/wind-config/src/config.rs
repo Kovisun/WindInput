@@ -546,7 +546,7 @@ const LENIENT_MAX_SKIPS: usize = 32;
 /// ⚠️ 救回来的值里，「被跳过的键」与「用户从未写过的键」完全同形，事后无从区分。
 /// 这正是 [`ConfigDegradation::taints`] 在 `unparsable` 非空时对任何路径都返回真的理由。
 pub fn parse_toml_lenient(src: &str) -> LenientParse {
-    let first_error = match toml::from_str::<toml::Value>(src) {
+    let first_error = match src.parse::<toml::Value>() {
         Ok(v) => {
             return LenientParse {
                 value: Some(v),
@@ -609,7 +609,7 @@ pub fn parse_toml_lenient(src: &str) -> LenientParse {
         }
 
         let retry = lines.join("\n");
-        match toml::from_str::<toml::Value>(&retry) {
+        match retry.parse::<toml::Value>() {
             Ok(v) => {
                 skipped.sort_unstable();
                 skipped.dedup();

@@ -253,7 +253,7 @@ fn check_manifest(
             return None;
         }
     };
-    let raw: toml::Value = match toml::from_str(&text) {
+    let raw: toml::Value = match text.parse() {
         Ok(v) => v,
         Err(e) => {
             rep.error(
@@ -1239,7 +1239,7 @@ fn read_toml(path: &Path) -> TomlRead {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return TomlRead::Absent,
         Err(e) => return TomlRead::Unreadable(e),
     };
-    match toml::from_str(&text) {
+    match text.parse() {
         Ok(v) => TomlRead::Parsed(v),
         Err(e) => TomlRead::BadSyntax(e),
     }

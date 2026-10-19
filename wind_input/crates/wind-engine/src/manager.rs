@@ -6260,7 +6260,7 @@ impl EngineManager {
             return None;
         }
         let content = std::fs::read_to_string(&toml_path).ok()?;
-        let mut base: toml::Value = match toml::from_str(&content) {
+        let mut base: toml::Value = match content.parse() {
             Ok(v) => v,
             Err(e) => {
                 warn!("Parse schema TOML failed {}: {}", toml_path.display(), e);
@@ -6392,7 +6392,7 @@ impl EngineManager {
     fn read_override_value(schema_id: &str, override_dir: &Path) -> Option<toml::Value> {
         let path = override_dir.join(format!("{schema_id}.toml"));
         let content = std::fs::read_to_string(&path).ok()?;
-        toml::from_str(&content).ok()
+        content.parse().ok()
     }
 
     /// 混输引用图（primary / secondary 两条边）上从 `start` 出发可达的第一个环，

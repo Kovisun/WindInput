@@ -435,7 +435,7 @@ fn cmd_import(path: &str) -> i32 {
             return 1;
         }
     };
-    let root: toml::Value = match toml::from_str(&text) {
+    let root: toml::Value = match text.parse() {
         Ok(v) => v,
         Err(e) => {
             eprintln!("解析 TOML 失败: {e}");
