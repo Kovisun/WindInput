@@ -631,6 +631,16 @@ impl MobileCore {
         config_api::set(key, value)
     }
 
+    /// emoji 附加模块及当前开关（见 [`config_api::emoji_modules`]）。
+    pub fn emoji_modules(&self) -> Vec<config_api::EmojiModuleState> {
+        config_api::emoji_modules(&self.data_dir)
+    }
+
+    /// 打开 / 关闭一个 emoji 附加模块。只写盘，生效要另发 [`MobileCommand::ReloadConfig`]。
+    pub fn set_emoji_module(&self, id: &str, on: bool) -> Result<(), String> {
+        config_api::set_emoji_module(&self.data_dir, id, on)
+    }
+
     // ── 输入统计（设置页「统计」）────────────────────────────────────
     //
     // 算法与桌面设置页同一份（`wind_store::stats_report`），本层只做取句柄与形状转换。

@@ -190,6 +190,56 @@ fn to_toml(cfg: &Config) -> String {
     toml::to_string(cfg).unwrap_or_default()
 }
 
+/// 一个 emoji 附加模块与它当前的开关（设置页「附加模块」一行）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmojiModuleState {
+    pub id: String,
+    pub label: String,
+    pub description: String,
+    /// 用户自己放进 `emoji/` 目录的表（`false` = 内置模块）
+    pub user: bool,
+    pub enabled: bool,
+}
+
+/// 全部 emoji 附加模块（内置在前，其后是用户放进 `emoji/` 的表）及当前开关。
+///
+/// 单独开口而不走 [`set`]：`input.emoji.modules` 是**按模块 id 为键的表**，注册表里只登记了
+/// 表本身（条数不定，用户能自己加），逐个 id 的叶子键不在注册表里，[`set`] 会当成未知键拒掉。
+/// 用户没设过的模块取它的出厂开关（`default_on`），与核心查表时的口径一致。
+pub fn emoji_modules(data_dir: &Path) -> Vec<EmojiModuleState> {
+    let cfg = Config::load(Some(data_dir)).unwrap_or_default();
+    Config::emoji_modules(Some(data_dir))
+        .into_iter()
+        .map(|m| EmojiModuleState {
+            enabled: cfg
+                .input
+                .emoji
+                .modules
+                .get(&m.id)
+                .copied()
+                .unwrap_or(m.default_on),
+            id: m.id,
+            label: m.label,
+            description: m.description,
+            user: m.user,
+        })
+        .collect()
+}
+
+/// 打开 / 关闭一个 emoji 附加模块（写用户层 `input.emoji.modules.<id>`）。只认
+/// [`emoji_modules`] 列出的 id：写一个不存在的模块不报错的话，就是「开关点了没反应」。
+/// 同 [`set`]，只写盘，生效要另发重载。
+pub fn set_emoji_module(data_dir: &Path, id: &str, on: bool) -> Result<(), String> {
+    if !Config::emoji_modules(Some(data_dir))
+        .iter()
+        .any(|m| m.id == id)
+    {
+        return Err(format!("没有这个 emoji 模块：{id}"));
+    }
+    Config::set_user_value(&["input", "emoji", "modules", id], toml::Value::Boolean(on))
+        .map_err(|e| e.to_string())
+}
+
 /// 写一个配置键到用户层。
 ///
 /// **只写盘，不重载引擎**——重载走 [`crate::MobileCommand::ReloadConfig`]。分开是为了
@@ -221,6 +271,28 @@ mod tests {
         let cfg = apply_overrides_to(Config::default());
         assert!(!cfg.input.association.space_commits, "联想态空格不选联想");
         assert_eq!(cfg.ui.candidate.preedit_display, "candidate_top");
+    }
+
+    /// 不存在的模块 id 当场拒绝（不落盘）
+    #[test]
+    fn unknown_emoji_module_is_rejected() {
+        let dir = std::env::temp_dir();
+        assert!(set_emoji_module(&dir, "no_such_module", true).is_err());
+    }
+
+    /// 内置模块都在列表里，没设过的取出厂开关
+    #[test]
+    fn builtin_emoji_modules_listed_with_factory_defaults() {
+        let dir = std::env::temp_dir().join(format!("wind_mobile_emoji_{}", std::process::id()));
+        let mods = emoji_modules(&dir);
+        for m in wind_config::EMOJI_MODULES {
+            let got = mods
+                .iter()
+                .find(|s| s.id == m.id)
+                .expect("内置模块应在列表里");
+            assert!(!got.user);
+            assert_eq!(got.label, m.label);
+        }
     }
 
     /// 注册表里报成 enum 的键都要带值域：设置页拿空选项画不出选择器（LayoutEnum 曾漏填）。
