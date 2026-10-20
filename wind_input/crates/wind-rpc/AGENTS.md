@@ -28,7 +28,7 @@
 - **capabilities 缓存**：`DispatchState` 构造时调 `capabilities::generate()` 一次性生成并缓存，变更 `config_schema::REGISTRY` 或 `Config::default()` 后需重启才刷新。
 - **EventSink 使用**：core 在 dict 写操作后调 `event_sink().emit_dict_changed(...)`, `config.setItems` 和 `config.reload` 会自动广播 `"config.changed"`，宿主无需手动触发。
 - **`compat.*`（应用兼容规则）**：dispatch 把 `compat.` 前缀整体转发给宿主 `data_rpc`（实现在 `wind-webdata` → `wind_config::compat_admin::rpc`），方法：`list` / `schema` / `upsert` / `resetField` / `setDisabled` / `reset` / `resetAll` / `export` / `import`。写方法成功后 dispatch 自动广播 `"compat.changed"`（`{method}`），**只读方法（list/schema/export）与 `dryRun` 导入不广播**，失败也不广播——见 `compat_method_writes`。宿主不要自己再发一次。新增 `compat.*` 方法时，若它会改用户层文件，无需改这里（默认按写处理）；若是只读，必须加进 `compat_method_writes` 的只读名单，否则设置页每次读取都会触发一次刷新循环。
-- **`schema.configChanged`**：`schema.saveConfig` / `resetConfig` / `setDictEnabled` 与 `userDicts.setEnabled` 成功后 dispatch 自动广播（`{id, method}`），见 `schema_config_write_id`。新增改方案配置的写方法要加进去，否则开着的设置页不会刷新。
+- **`schema.configChanged`**：`schema.saveConfig` / `resetConfig` / `setDictEnabled` / `delete`、`userDicts.setEnabled`、`userdata.purgeSchema` 成功后 dispatch 自动广播（`{id, method}`）；`scheme.importPackage` / `importText` 与 `backup.restore` 可能动多个方案，载荷不带 `id`，订阅方按全部刷新处理。见 `schema_config_write_id`。新增改方案配置的写方法要加进去，否则开着的设置页不会刷新。
 - **平台传输**：Windows 管道路径由 `ctrl_endpoint(suffix)` / `events_endpoint(suffix)` 生成（`suffix` 来自 `variant::pipe_suffix()`）；传输实现代码以 `#[path = "transport_*.rs"]` 按平台切换，dispatch/协议层平台无关。
 - **client.rs 失败语义**：连不上（core 未运行）立即返回 `Err`，调用方应回退到离线直写配置文件，不得重试。
 
