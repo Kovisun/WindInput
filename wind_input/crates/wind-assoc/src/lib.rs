@@ -163,8 +163,8 @@ impl AssocKind {
     pub fn allows(self, src: AssocSource) -> bool {
         match self {
             AssocKind::Off => false,
-            // History 今天只记前缀延伸类的选择（整词以上文开头），与词语联想「只出上文的
-            // 延长」同形 ⇒ 词语联想档也放行它。
+            // History 里的前缀延伸行（整词以上文开头）与词语联想「只出上文的延长」同形
+            // ⇒ 词语联想档也放行它；同表的「下一词」行由读端按档位挡掉（`HistoryWords`）。
             AssocKind::Word => matches!(src, AssocSource::Prefix | AssocSource::History),
             AssocKind::Smart => true,
         }
@@ -286,6 +286,12 @@ impl AssocConfig {
     ///
     /// 档位是硬性的（词语联想里标点源根本没有语义），用户开关只在档位放行的源上生效。
     /// 两者顺序反过来会让「词语联想 + punct=true」出标点——那正是用户报的问题。
+    /// 历史源是否在用（档位放行且开关开着）。写入端据此决定要不要学习，
+    /// 关着联想的用户不默默攒数据。
+    pub fn history_enabled(&self) -> bool {
+        self.source_enabled(AssocSource::History)
+    }
+
     fn source_enabled(&self, s: AssocSource) -> bool {
         if !self.kind.allows(s) {
             return false;

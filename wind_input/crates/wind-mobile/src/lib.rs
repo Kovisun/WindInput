@@ -303,6 +303,9 @@ impl MobileCore {
         // 英文模式字母失效…），根因就是它与核心判据漂移。宿主不再自己判。
         let probe = KeyProbe::new(vk).with_modifiers(Modifiers(modifiers));
         if !self.coord.should_handle_key(&probe) {
+            // 交还宿主的键（空缓冲退格、方向键、回车…）动的是宿主里的正文，
+            // 前后两次上屏就不再相邻：下一词学习的断点
+            self.coord.note_word_boundary();
             return KeyOutcome::passthrough();
         }
         wind_coordinator::edit_ops::to_outcome(dispatch_key(&self.coord, vk, modifiers))

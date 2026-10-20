@@ -2000,6 +2000,10 @@ pub struct Coordinator {
     pub(crate) self_weak: std::sync::OnceLock<std::sync::Weak<Coordinator>>,
     /// 上屏历史环形缓冲（index 0 = 最近）：供命令栏 `last(n)` 取最近上屏文本。
     pub(crate) recent_commits: Mutex<std::collections::VecDeque<String>>,
+    /// 下一词学习的上文：最近一次**整体上屏**的词（简体）。两次上屏之间有任何打断
+    /// （焦点变化、宿主直通的按键、标点 / 原码上屏、取消）即清空——只记真正相邻的两个词，
+    /// 见 [`Self::learn_next_word`]。
+    pub(crate) next_word_prev: Mutex<Option<String>>,
     /// 撤销上屏（`ime.undo_commit`）删除量：最近一次「同步落到光标前」的字符数（UTF-16 单元，
     /// 与 TSF ShiftStart / macOS NSRange 同量纲）。**刻意与 `recent_commits` 分离**——历史队列
     /// 记「上过什么」（供 last/加词，深度 16），本值记「光标前紧邻的还是不是它、有几个字」这一
@@ -3042,6 +3046,7 @@ impl Coordinator {
             host_services: std::sync::OnceLock::new(),
             self_weak: std::sync::OnceLock::new(),
             recent_commits: Mutex::new(std::collections::VecDeque::new()),
+            next_word_prev: Mutex::new(None),
             last_commit_len: std::sync::atomic::AtomicUsize::new(1),
             preedit_display: Mutex::new(preedit_display_init),
             hide_candidate_window: Mutex::new(hide_candidate_window_init),
@@ -5819,6 +5824,7 @@ impl Coordinator {
     /// 语义；加词模式则消费全部按键。要让自定义取消键在那两处也生效，得改 `wind-ui` 的
     /// 键解释器，是另一层的事。
     pub(crate) fn cancel_session(&self, state: &mut State) -> KeyAction {
+        self.note_word_boundary();
         match state.active {
             Some(ModeKind::TempPinyin) => self.exit_temp_pinyin(state),
             Some(ModeKind::TempEnglish) => self.exit_temp_english(state),
@@ -9680,6 +9686,10 @@ impl Coordinator {
     ) {
         if text.is_empty() {
             return;
+        }
+        // 候选以外的上屏（标点、原码、临时英文…）都是下一词学习的断点
+        if source != CommitSource::Candidate {
+            self.note_word_boundary();
         }
         if let Some(log) = self
             .debug_stat_events

@@ -3757,6 +3757,16 @@ impl Coordinator {
             if from_assoc {
                 self.record_assoc_pick(cand);
             }
+            // 下一词学习：「上一个整体上屏的词 → 这个词」。选联想时上屏的整词是 `cand.text`
+            // （`out` 只是补出的那截），否则是简体域的完整文本（理由同下方上文的取法）。
+            self.learn_next_word(
+                if from_assoc {
+                    &cand.text
+                } else {
+                    &final_simplified
+                },
+                from_assoc && cand.commit_override.is_some(),
+            );
             let assoc_ctx = if from_assoc {
                 cand.text.clone()
             } else {

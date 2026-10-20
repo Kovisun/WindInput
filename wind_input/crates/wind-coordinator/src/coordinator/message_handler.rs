@@ -2564,6 +2564,7 @@ impl MessageHandler for Coordinator {
     }
 
     fn handle_focus_gained(&self, data: &FocusData) -> Option<StatusUpdateData> {
+        self.note_word_boundary();
         // 与 handle_focus_lost 的 token 日志配对：只有两边都记 token，才能从日志算出
         // 「同一实例 gained 后多久自己 lost」——区分 DocMgr 抖动与真实离开就靠这个间隔。
         tracing::debug!(
@@ -2827,6 +2828,7 @@ impl MessageHandler for Coordinator {
     }
 
     fn handle_focus_lost(&self, client_token: u64, reason: FocusLostReason) {
+        self.note_word_boundary();
         // 独立日志行：失焦此前在服务端日志里完全不可见，只能靠 TSF 日志反推 HideToolbar
         // 的来源（2026-07-26 工具栏闪隐排查即因此多绕一圈）。token 便于与 DLL 日志的
         // `Sending focus_lost token=…` 对齐到具体宿主实例。

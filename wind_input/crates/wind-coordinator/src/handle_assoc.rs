@@ -312,6 +312,9 @@ struct HistoryWords<'a> {
     word_schema: String,
     schema: String,
     profile: wind_store::freq::FreqProfile,
+    /// 是否出「下一词」行（与上文无前缀关系的词）。只有智能联想出：词语联想档的契约是
+    /// 「只出上文的延长」（见 `AssocKind::allows`），下一词混进去就成了两种东西的拼盘。
+    next_words: bool,
 }
 
 impl AssocProvider for HistoryWords<'_> {
@@ -335,16 +338,21 @@ impl AssocProvider for HistoryWords<'_> {
             // 存在性：历史表不随删词级联清理，删掉的词在这里丢掉（见类型文档）。
             .filter(|(word, _)| self.mgr.assoc_word_known(&self.word_schema, word))
             .filter_map(|(word, rec)| {
-                // 只收「上文的严格延长」：今天写入端只记前缀延伸类的选择（见
-                // `record_assoc_pick`），这里再守一道，免得导入的脏数据把「上屏补剩余部分」算错。
-                let rest = word
-                    .strip_prefix(ctx.text)
-                    .filter(|r| !r.is_empty())?
-                    .to_string();
+                // 两类行共用这张表：
+                // - **前缀延伸**（「荷」→「荷枪实弹」）：词以上文开头，上屏只补剩余部分；
+                // - **下一词**（「我们」→「一起」）：词与上文无前缀关系，整词上屏
+                //   （写入端 `learn_next_word`）。
+                // 与上文完全相同的行没有可补的，丢掉。
+                let commit = match word.strip_prefix(ctx.text) {
+                    Some("") => return None,
+                    Some(rest) => Some(rest.to_string()),
+                    None if self.next_words => None,
+                    None => return None,
+                };
                 Some(AssocHit {
                     score: (self.profile.pinyin_score(&rec, now) * 1000.0) as i64,
                     text: word,
-                    commit: Some(rest),
+                    commit,
                     source: AssocSource::History,
                 })
             })
@@ -374,6 +382,48 @@ impl Coordinator {
         if let Err(e) = store.record_assoc_pick(&self.assoc_data_schema(), context, &cand.text) {
             tracing::debug!("记联想历史失败: {e}");
         }
+    }
+
+    /// 下一词学习的写入端：整体上屏 `word` 时调用。若上一次整体上屏的词与它**相邻**
+    /// （中间没有断点，见 [`Coordinator::next_word_prev`]），记一笔「上一个词 → 这个词」，
+    /// 下次上屏那个词时联想里就有它（读端 [`HistoryWords`]，与联想历史同表）。
+    ///
+    /// `already_recorded`：选的是前缀延伸类联想候选，「上文 → 整词」已由
+    /// [`Self::record_assoc_pick`] 记过，这里只更新上文、不重复记。
+    ///
+    /// 不记的情形：
+    /// - 联想没开或关了历史源（不让关着联想的用户默默攒数据）；
+    /// - 任一侧不含非 ASCII 字符（英文方案的词另有补全，进不了中文联想，记了只是垃圾）；
+    /// - 后一个词以前一个词开头（「中」→「中国」）：读端会把它当前缀延伸，只补「国」，
+    ///   而用户打的是两个词。
+    pub(crate) fn learn_next_word(&self, word: &str, already_recorded: bool) {
+        let prev = self
+            .next_word_prev
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .replace(word.to_string());
+        let (Some(prev), Some(store)) = (prev, &self.store) else {
+            return;
+        };
+        if already_recorded
+            || !self.assoc_config().history_enabled()
+            || prev.is_ascii()
+            || word.is_ascii()
+            || word.starts_with(prev.as_str())
+        {
+            return;
+        }
+        if let Err(e) = store.record_assoc_pick(&self.assoc_data_schema(), &prev, word) {
+            tracing::debug!("记下一词失败: {e}");
+        }
+    }
+
+    /// 下一词学习的断点：清掉上文（见 [`Coordinator::next_word_prev`]）。廉价、幂等。
+    pub fn note_word_boundary(&self) {
+        *self
+            .next_word_prev
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
     }
 
     /// 退出联想态。已不在联想态时是空操作（返回 false）。
@@ -419,7 +469,8 @@ impl Coordinator {
             // 恰恰常是混输。解析规则见 `assoc_word_schema`。
             schema: self.engine_mgr.assoc_word_schema(),
         };
-        // ⚠️ 四个源里目前接了三个（History 见 `HistoryWords`，2026-09 接入）。Bigram
+        // ⚠️ 四个源里目前接了三个（History 见 `HistoryWords`，2026-09 接入；2026-10 起
+        // 也出用户自己的「下一词」，见 `learn_next_word`）。Bigram
         // （词→后继表，需离线蒸馏）尚无 provider ⇒ `associate` 对它 `continue`，
         // 配额顺延。这是有意的分期，不是漏接。
         //
@@ -432,6 +483,7 @@ impl Coordinator {
             word_schema: self.engine_mgr.assoc_word_schema(),
             schema: self.assoc_data_schema(),
             profile: self.engine_mgr.pinyin_freq_profile(),
+            next_words: cfg.kind == AssocKind::Smart,
         });
         let mut providers: Vec<(AssocSource, &dyn AssocProvider)> =
             vec![(AssocSource::Prefix, &prefix), (AssocSource::Punct, &punct)];
