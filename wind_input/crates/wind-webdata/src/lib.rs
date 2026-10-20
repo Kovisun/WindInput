@@ -1824,8 +1824,8 @@ pub trait WebDataRpc: WebDataHost {
         // setDictEnabled 再 saveConfig。快照的 dictionaries 只要与方案文件基线不同（之前
         // 翻过任一扩展库开关就是如此），`json_diff` 对数组整体比较，就会把整份**旧**数组
         // 写进 override：刚落盘的 `enabled = false` 被冲回去，还顺带冻结了整份词库定义
-        // （path/label/顺序，见 `sparse_dict_overrides`）。在入口剥掉，而不是指望每个调用方
-        // 记得先刷新快照——CLI、旧版设置端都走这里。
+        // （path/label/顺序，见 `schema_dicts_api` 的 `sparse_dict_overrides`）。在入口剥掉，
+        // 而不是指望每个调用方记得先刷新快照——CLI、旧版设置端都走这里。
         if let Some(o) = diff.as_object_mut() {
             o.remove("dictionaries");
         }
@@ -1876,31 +1876,9 @@ pub trait WebDataRpc: WebDataHost {
         Ok(json!({ "ok": true }))
     }
 
-    /// 构造 `dictionaries` 的 override 值：**每库只落 `{id, enabled}` 稀疏项**。
-    ///
-    /// 词库的 path/label/base_order/顺序等结构定义始终以方案文件为准（合并侧见
-    /// `EngineManager::merge_dict_overrides`）。若在此写入完整数组，override 就会冻结整份
-    /// 词库定义——方案后续新增的库透不过来、改过的 path 仍指向旧文件、顺序也停在写快照那一刻。
-    ///
-    /// 入参取合并后的 dictionaries：`enabled.is_some()` 即"该库有显式启用态"，逐条落盘以
-    /// 保留其它库已翻的开关。
-    fn sparse_dict_overrides(dicts: &[wind_config::schema::DictSpec]) -> toml::Value {
-        toml::Value::Array(
-            dicts
-                .iter()
-                .filter(|d| {
-                    !d.id.is_empty() && !d.id.starts_with(wind_store::user_dicts::ID_PREFIX)
-                })
-                .filter_map(|d| {
-                    let mut t = toml::value::Table::new();
-                    t.insert("id".to_string(), toml::Value::String(d.id.clone()));
-                    t.insert("enabled".to_string(), toml::Value::Boolean(d.enabled?));
-                    Some(toml::Value::Table(t))
-                })
-                .collect(),
-        )
-    }
-
+    /// 本体在 [`wind_coordinator::schema_dicts_api::set_enabled`]（与移动端共用）：
+    /// override 只落 `{id, enabled}` 稀疏项、先持久化再 live 翻（含混输扇出）、`user:` 分库
+    /// 走 `dicts.toml`，都在那里。
     fn web_schema_set_dict_enabled(&self, params: &Value) -> anyhow::Result<Value> {
         let id = str_param(params, "id")?;
         let dict_id = str_param(params, "dictId")?;
@@ -1908,41 +1886,7 @@ pub trait WebDataRpc: WebDataHost {
             .get("enabled")
             .and_then(|v| v.as_bool())
             .unwrap_or(true);
-        let mut merged = self
-            .engine_mgr()
-            .schema_merged(id)
-            .ok_or_else(|| anyhow::anyhow!("方案不存在: {}", id))?;
-        let mut found = false;
-        for d in merged.dictionaries.iter_mut() {
-            if d.id == dict_id {
-                d.enabled = Some(enabled);
-                found = true;
-            }
-        }
-        if !found {
-            anyhow::bail!("方案 {} 无附加词库 {}", id, dict_id);
-        }
-        // 用户分库的开关在 dicts.toml，不进 override
-        if dict_id.starts_with(wind_store::user_dicts::ID_PREFIX) {
-            return user_dicts::set_dict_enabled(self, id, dict_id, enabled);
-        }
-        let dicts_val = Self::sparse_dict_overrides(&merged.dictionaries);
-        let mut ov = self
-            .engine_mgr()
-            .get_schema_override(id)
-            .unwrap_or_else(|| toml::Value::Table(Default::default()));
-        if !ov.is_table() {
-            ov = toml::Value::Table(Default::default());
-        }
-        if let toml::Value::Table(t) = &mut ov {
-            t.insert("dictionaries".to_string(), dicts_val);
-        }
-        // 持久化 override（不 invalidate），再对已加载引擎 live 翻该扩展层的 enabled 标志——
-        // 扩展词库热插拔：无需重熔大词库即时生效；未加载方案下次构建按新 override 生效。
-        self.engine_mgr().persist_schema_override(id, &ov)?;
-        let live = self
-            .engine_mgr()
-            .set_dict_enabled_live(id, dict_id, enabled);
+        let live = wind_coordinator::schema_dicts_api::set_enabled(self, id, dict_id, enabled)?;
         Ok(json!({ "ok": true, "live": live }))
     }
 
@@ -9160,54 +9104,6 @@ short_code_yield_level = 2
             default_dict_sections("mixed"),
             vec![DictSection::Shadow],
             "混输仍只导出候选调整"
-        );
-    }
-
-    /// setDictEnabled 落盘的 override 每库只含 `{id, enabled}`——绝不携带 path/label/base_order
-    /// 等结构字段，否则 override 会冻结整份词库定义（方案升级后新增/改动的库透不过来）。
-    #[test]
-    fn sparse_dict_overrides_carries_only_id_and_enabled() {
-        use wind_config::schema::DictSpec;
-        let dicts = vec![
-            // 有显式启用态 → 落盘
-            DictSpec {
-                id: "ext1".into(),
-                label: "分类词库".into(),
-                path: "flypy/11_fl.dict.yaml".into(),
-                base_order: 1,
-                default_enabled: Some(true),
-                enabled: Some(false),
-                ..Default::default()
-            },
-            // 无显式启用态（用户没翻过）→ 不落盘，继承方案的 default_enabled
-            DictSpec {
-                id: "ext2".into(),
-                path: "flypy/21_yj.dict.yaml".into(),
-                default_enabled: Some(true),
-                enabled: None,
-                ..Default::default()
-            },
-            // 无 id 无法按 id 匹配回方案文件 → 丢弃
-            DictSpec {
-                id: String::new(),
-                path: "flypy/31_fh.dict.yaml".into(),
-                enabled: Some(true),
-                ..Default::default()
-            },
-        ];
-
-        let out = Coordinator::sparse_dict_overrides(&dicts);
-        let arr = out.as_array().expect("应为数组");
-        assert_eq!(arr.len(), 1, "只有 ext1 有显式启用态且带 id");
-
-        let t = arr[0].as_table().unwrap();
-        assert_eq!(t.get("id").unwrap().as_str(), Some("ext1"));
-        assert_eq!(t.get("enabled").unwrap().as_bool(), Some(false));
-        assert_eq!(
-            t.len(),
-            2,
-            "除 id/enabled 外不得携带任何结构字段，实际: {:?}",
-            t.keys().collect::<Vec<_>>()
         );
     }
 

@@ -183,6 +183,18 @@ pub struct UserWordPage {
     pub total: u64,
 }
 
+/// 方案的一个附加词库（设置页「方案 → 拼音」等二级页的开关项）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct SchemaDictInfo {
+    /// 原样回传给 [`MobileCore::set_schema_dict_enabled`]
+    pub id: String,
+    /// 方案文件的 `label`（如「成语」）；发现目录自动登记、没写名字的库可能为空
+    pub label: String,
+    pub description: String,
+    /// 当前生效的开关：用户覆盖 ?? 方案 `default_enabled` ?? 关
+    pub enabled: bool,
+}
+
 /// 候选长按菜单的一项（桌面候选右键菜单在手机上的对应物）。
 ///
 /// 只出可点的叶子：桌面菜单里的分隔线 / 标题行是绘制用的，命令项不会出现在候选菜单里；
@@ -781,6 +793,49 @@ impl MobileCore {
         Ok(n as u64)
     }
 
+    // ── 方案附加词库（设置页「方案 → 拼音」等）────────────────────────
+    //
+    // 本体与桌面 `schema.setDictEnabled` 同一份（`wind_coordinator::schema_dicts_api`）：
+    // override 只落稀疏项、先持久化再 live 翻、混输扇出都不在本层重写。改完即时生效，
+    // 不需要另发重载。
+
+    /// 列出方案的附加词库（不含主库），按方案文件顺序。未知方案记 warn 返回空。
+    pub fn schema_dicts(&self, schema_id: &str) -> Vec<SchemaDictInfo> {
+        match wind_coordinator::schema_dicts_api::list(&*self.coord, schema_id) {
+            Ok(v) => v
+                .into_iter()
+                .map(|d| SchemaDictInfo {
+                    id: d.id,
+                    label: d.label,
+                    description: d.description,
+                    enabled: d.enabled,
+                })
+                .collect(),
+            Err(e) => {
+                tracing::warn!("列方案附加词库失败: {e}");
+                Vec::new()
+            }
+        }
+    }
+
+    /// 开关方案的附加词库并持久化。未知方案 / 方案里没有这个库 / 只读模式 → Err(原因)。
+    ///
+    /// 词库文件缺失时打开不算错：开关照常落盘，重建时那一层只记 warning、主库照常出词
+    /// ——出厂包可以先不带某批扩展库文件，开关项照样能列、能点。
+    pub fn set_schema_dict_enabled(
+        &self,
+        schema_id: &str,
+        dict_id: &str,
+        on: bool,
+    ) -> Result<(), String> {
+        // 桌面扩展库开关不查只读（override 不在用户数据库里），手机上统一挡：只读模式本就
+        // 意味着「这份用户目录不归本版本写」，原因原样交给用户。
+        self.ensure_writable()?;
+        wind_coordinator::schema_dicts_api::set_enabled(&*self.coord, schema_id, dict_id, on)
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
     /// 写口的前置闸：只读模式（用户数据由更新版本写入 / meta.toml 读不出）拒绝。
     ///
     /// 桌面那边只读模式下 store 根本不打开，写 RPC 靠「无持久化存储」间接挡住；这里显式
@@ -1071,6 +1126,110 @@ mod user_words_tests {
         assert!(m.user_words_clear("pinyin").is_err());
         assert_eq!(m.user_words("pinyin", "", 0, 50), UserWordPage::default());
         let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+/// 方案附加词库门面：字段映射、错误转成原因串、只读闸、重建后仍是新值。列表口径与
+/// live 生效在 wind-coordinator 的 `tests/schema_dicts_api.rs` 验，这里只验门面这一层。
+/// 要 `build_dev/data`，缺失时打印跳过。
+#[cfg(test)]
+mod schema_dicts_tests {
+    use super::*;
+
+    fn data_dir() -> std::path::PathBuf {
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../build_dev/data")
+    }
+
+    /// 以 `root` 下的 redb 与 override 目录拼 [`MobileCore`]；同一个 `root` 再调 = 重启。
+    /// 不走 `MobileCore::new`：它改进程环境变量，与并行测试互相踩。
+    fn core_at(root: &Path) -> MobileCore {
+        let store = Arc::new(wind_store::Store::open(root.join("s.redb")).unwrap());
+        let coord = Coordinator::new_headless_with_store_override(
+            Config::default(),
+            Some(&data_dir()),
+            store,
+            Some(root.join("overrides")),
+        );
+        MobileCore {
+            coord,
+            warming: Arc::new(AtomicBool::new(false)),
+            data_dir: data_dir(),
+        }
+    }
+
+    #[test]
+    fn list_toggle_persist_and_errors() {
+        if !data_dir().join("schemas/pinyin.schema.toml").exists() {
+            eprintln!("!!! 跳过：build_dev 词库不存在");
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("wind_mobile_sd_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let idiom = |m: &MobileCore| {
+            m.schema_dicts("pinyin")
+                .into_iter()
+                .find(|d| d.id == "cell_idiom")
+        };
+
+        let m = core_at(&root);
+        assert_eq!(
+            idiom(&m),
+            Some(SchemaDictInfo {
+                id: "cell_idiom".into(),
+                label: "成语".into(),
+                description: "成语、俗语与古诗文名句".into(),
+                enabled: false,
+            })
+        );
+        assert!(
+            m.schema_dicts("pinyin")
+                .iter()
+                .all(|d| d.id != "pinyin_main"),
+            "不列主库"
+        );
+        m.set_schema_dict_enabled("pinyin", "cell_idiom", true)
+            .unwrap();
+        assert!(idiom(&m).unwrap().enabled);
+        drop(m);
+        let m = core_at(&root);
+        assert!(idiom(&m).unwrap().enabled, "重建 MobileCore 后仍开");
+
+        let err = m
+            .set_schema_dict_enabled("pinyin", "no_such_dict", true)
+            .unwrap_err();
+        assert!(err.contains("no_such_dict"), "原因要点名: {err}");
+        assert!(
+            m.set_schema_dict_enabled("nope", "cell_idiom", true)
+                .is_err()
+        );
+        assert!(m.schema_dicts("nope").is_empty(), "未知方案列空、不 panic");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 只读模式：带着原因拒绝，且先于方案校验（不论方案在不在）。
+    #[test]
+    fn readonly_rejects_with_reason() {
+        let user = std::env::temp_dir().join(format!("wind_mobile_sd_ro_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&user);
+        std::fs::create_dir_all(&user).unwrap();
+        std::fs::write(
+            user.join("meta.toml"),
+            "format_version = 99\ndir_id = \"x\"\n",
+        )
+        .unwrap();
+        let (coord, _rx) =
+            Coordinator::new_headless_with_ui_at(Config::default(), None, Some(&user));
+        let m = MobileCore {
+            coord,
+            warming: Arc::new(AtomicBool::new(false)),
+            data_dir: user.clone(),
+        };
+        let err = m
+            .set_schema_dict_enabled("pinyin", "cell_idiom", true)
+            .unwrap_err();
+        assert!(err.contains("99"), "要把只读原因交给用户: {err}");
+        let _ = std::fs::remove_dir_all(&user);
     }
 }
 

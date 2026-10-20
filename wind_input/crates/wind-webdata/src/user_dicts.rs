@@ -252,28 +252,6 @@ pub(super) fn set_enabled<H: WebDataRpc + ?Sized>(h: &H, params: &Value) -> anyh
     h.web_schema_set_dict_enabled(&p)
 }
 
-/// `schema.setDictEnabled` 对 `user:` 前缀的 id：写 `dicts.toml`，生效路径与扩展库相同。
-pub(super) fn set_dict_enabled<H: WebDataRpc + ?Sized>(
-    h: &H,
-    schema_id: &str,
-    dict_id: &str,
-    enabled: bool,
-) -> anyhow::Result<Value> {
-    if let Some(r) = h.storage_readonly_reason() {
-        anyhow::bail!("{r}");
-    }
-    let name = dict_id.strip_prefix(ID_PREFIX).unwrap_or(dict_id);
-    let store = h
-        .user_store()
-        .ok_or_else(|| anyhow::anyhow!("无持久化存储"))?;
-    let ds = h.engine_mgr().data_schema_id(schema_id);
-    store.set_user_dict_enabled(&ds, schema_id, name, enabled)?;
-    let live = h
-        .engine_mgr()
-        .set_dict_enabled_live(schema_id, dict_id, enabled);
-    Ok(json!({ "ok": true, "live": live }))
-}
-
 #[cfg(test)]
 mod tests {
     use crate::WebDataRpc;
