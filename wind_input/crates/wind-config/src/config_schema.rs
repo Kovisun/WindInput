@@ -528,10 +528,6 @@ static REGISTRY: &[ConfigField] = &[
         "input.add_word.candidate_layout",
         Enum(LAYOUT_INTENT_VALUES),
     ),
-    f(
-        "input.add_word.default_source",
-        Enum(&["recent", "clipboard"]),
-    ),
     f("input.s2t.enabled", Bool),
     f("input.s2t.variant", Str),
     f("input.t2s.enabled", Bool),

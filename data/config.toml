@@ -1156,12 +1156,8 @@ candidate_layout = "follow"
 
 # 快捷加词面板（Ctrl+= 进入，见 [keys] add_word）。
 # 默认竖排：逐字确认的面板竖排更易读。此前是硬编码强制竖排、没有开关。
-# default_source：进面板时默认取哪个来源，该来源为空时自动换到另一个，Tab 照常切换。
-#   recent    = 最近输入优先（出厂）
-#   clipboard = 剪贴板优先
 [input.add_word]
 candidate_layout = "vertical"
-default_source = "recent"
 
 # 简入繁出：打简体、上屏繁体。variant 可选 s2t / s2tw / s2twp / s2hk。
 [input.s2t]

@@ -5179,20 +5179,6 @@ pub struct AddWordConfig {
         deserialize_with = "crate::tolerant_de::tolerant"
     )]
     pub candidate_layout: LayoutIntent,
-    /// 进面板时默认落在哪个来源；为空时回落另一个，Tab 照常切换。
-    #[serde(default, deserialize_with = "crate::tolerant_de::tolerant")]
-    pub default_source: AddWordSource,
-}
-
-/// 加词面板的默认来源（`input.add_word.default_source`）。
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum AddWordSource {
-    /// 最近输入优先，不足两字时落剪贴板（出厂，保持原行为）。
-    #[default]
-    Recent,
-    /// 剪贴板优先，无可用内容时落最近输入。
-    Clipboard,
 }
 
 fn default_add_word_layout() -> LayoutIntent {
@@ -5203,7 +5189,6 @@ impl Default for AddWordConfig {
     fn default() -> Self {
         Self {
             candidate_layout: default_add_word_layout(),
-            default_source: AddWordSource::default(),
         }
     }
 }
