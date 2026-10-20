@@ -52,6 +52,11 @@ pub struct CandidateWindow {
     /// 推送帧里的 `selected` 是页内下标，滚动列表用不了——那是"第几页的第几个"，
     /// 而这里要的是"整条列表里的第几个"。
     pub selected: usize,
+    /// 与 [`Self::items`] 一一对应的候选注释（候选右侧灰字：码表的剩余编码、拼音候选的
+    /// 反查码…，模板即 `ui.candidate.comment_template_*` 横排那一份）。只有
+    /// [`Coordinator::candidate_window_with_comments`] 填它，[`Coordinator::candidate_window`]
+    /// 恒空——注释要逐条求值（反查、注释库），不要的宿主不该为它付钱。
+    pub comments: Vec<String>,
 }
 
 impl Coordinator {
@@ -60,6 +65,23 @@ impl Coordinator {
     /// `limit` 会被压到 [`MAX_WINDOW`]；`offset` 越界时返回空 `items`（但 `total`
     /// 仍然有效，宿主据此知道自己越界了而不是"候选没了"）。
     pub fn candidate_window(&self, offset: usize, limit: usize) -> CandidateWindow {
+        self.candidate_window_impl(offset, limit, false)
+    }
+
+    /// 同 [`Self::candidate_window`]，另带每条候选的注释（[`CandidateWindow::comments`]）。
+    ///
+    /// 注释与桌面候选窗同一份模板与求值上下文（[`crate::coordinator::TooltipEvalCtx`]，
+    /// 横排模板、`comment_max_chars(false)` 截断）：同一个候选，电脑上灰字写什么，手机上就写什么。
+    pub fn candidate_window_with_comments(&self, offset: usize, limit: usize) -> CandidateWindow {
+        self.candidate_window_impl(offset, limit, true)
+    }
+
+    fn candidate_window_impl(
+        &self,
+        offset: usize,
+        limit: usize,
+        with_comments: bool,
+    ) -> CandidateWindow {
         let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let total = state.candidates.len();
         let selected = self.highlighted_global_index(&state);
@@ -72,12 +94,49 @@ impl Coordinator {
                 .map(|c| self.cand_display_text(&state, c))
                 .collect()
         };
+        let comments = if with_comments && offset < total {
+            self.comments_for(&state, offset, end)
+        } else {
+            Vec::new()
+        };
         CandidateWindow {
             items,
             offset,
             total,
             selected,
+            comments,
         }
+    }
+
+    /// `state.candidates[start..end]` 的注释（纯文本）。上下文与桌面候选页组装同源。
+    fn comments_for(
+        &self,
+        state: &crate::coordinator::State,
+        start: usize,
+        end: usize,
+    ) -> Vec<String> {
+        let rt = self.rt();
+        let behavior = self.engine_mgr.active_behavior();
+        let tpl = crate::comment::Template::parse(
+            self.comment_template_for(&rt.config, state, &behavior, false),
+        );
+        let max = rt.config.ui.candidate.comment_max_chars(false);
+        let ctx = self.tooltip_eval_ctx(state, &rt.tooltip);
+        let reverse = self.reverse.read().unwrap_or_else(|e| e.into_inner());
+        state.candidates[start..end]
+            .iter()
+            .map(|c| {
+                let dict_schema = self.comment_dict_scope(
+                    state,
+                    c,
+                    ctx.mix_comment_scope,
+                    &ctx.comment_dict_schema,
+                );
+                self.comment_for(c, &tpl, max, &reverse, ctx.hint_source, &dict_schema)
+                    .as_str()
+                    .to_string()
+            })
+            .collect()
     }
 
     /// **按绝对下标选词**，返回编辑指令流。

@@ -524,6 +524,12 @@ impl MobileCore {
         self.coord.candidate_window(offset, limit)
     }
 
+    /// 同 [`Self::candidates`]，另带每条候选的注释灰字（码表剩余编码、拼音候选反查码…），
+    /// 与电脑版候选窗同一份模板。宿主开着「候选显示编码提示」才调这个——注释逐条求值，不要就别付。
+    pub fn candidates_with_comments(&self, offset: usize, limit: usize) -> CandidateWindow {
+        self.coord.candidate_window_with_comments(offset, limit)
+    }
+
     /// 按**绝对下标**选词，返回编辑指令流（与 [`Self::key_down`] 同一种形状）。
     ///
     /// 取代此前「合成数字键」的做法——那条路把选词限死在页内 1-9，第 10 个及以后
@@ -1688,6 +1694,43 @@ mod candidate_tooltip_tests {
         assert!(
             code_line.contains("wqvb"),
             "首选的编码里应有 wqvb: {code_line}"
+        );
+        let _ = std::fs::remove_dir_all(&user);
+    }
+
+    /// 候选窗带注释：五笔打 a，有剩余编码的候选注释非空；不带注释的接口恒空、文本两边一致。
+    #[test]
+    fn window_with_comments_matches_items() {
+        let data =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../build_dev/data");
+        if !data.join("schemas/wubi86/wubi86_jidian.dict.yaml").exists() {
+            eprintln!("跳过：词库不存在");
+            return;
+        }
+        let user = std::env::temp_dir().join(format!("wind_mobile_cmt_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&user);
+        std::fs::create_dir_all(&user).unwrap();
+        let mut cfg = Config::default();
+        cfg.schema.available = vec!["wubi86".into()];
+        cfg.schema.active = "wubi86".into();
+        cfg.input.default.chinese_mode = true;
+        cfg.schema.codetable.auto_commit_at_full = false;
+        let (coord, _rx) = Coordinator::new_headless_with_ui_at(cfg, Some(&data), Some(&user));
+        let m = MobileCore {
+            coord,
+            warming: Arc::new(AtomicBool::new(false)),
+            data_dir: user.clone(),
+        };
+        dispatch_key(&m.coord, 'A' as u32, 0);
+        let plain = m.candidates(0, 20);
+        let rich = m.candidates_with_comments(0, 20);
+        assert!(plain.comments.is_empty(), "不带注释的接口不该算注释");
+        assert_eq!(plain.items, rich.items, "两个接口的候选文本应一致");
+        assert_eq!(rich.comments.len(), rich.items.len(), "注释与候选一一对应");
+        assert!(
+            rich.comments.iter().any(|c| !c.is_empty()),
+            "五笔单码 a 的候选里应有带剩余编码的: {:?}",
+            rich.items.iter().zip(&rich.comments).collect::<Vec<_>>()
         );
         let _ = std::fs::remove_dir_all(&user);
     }
