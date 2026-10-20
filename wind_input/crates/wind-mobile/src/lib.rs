@@ -183,6 +183,38 @@ pub struct UserWordPage {
     pub total: u64,
 }
 
+/// 词库导入结果的一段（[`MobileCore::dict_import`]）。
+///
+/// 与桌面 `dict.import` 回的 JSON 逐段同义：用户词段给 `added` / `updated` / `unchanged`，
+/// 其余段给 `imported`；`skipped` 是未导入的总数，`rejected` / `boundary_skipped` 是其中
+/// 「为什么少」的分类（只有词条段过准入契约，其余段恒 0）。
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct DictImportSection {
+    /// `userWords` / `tempWords` / `freq` / `shadow`
+    pub key: String,
+    pub added: u64,
+    pub updated: u64,
+    pub unchanged: u64,
+    /// 实际导入条数（用户词段 = added + updated + unchanged）
+    pub imported: u64,
+    /// 未导入的总数：解析期跳过 + 准入拒收 + 不补充而跳过
+    pub skipped: u64,
+    /// 拼音准入契约判为不合法、未入库的条数
+    pub rejected: u64,
+    /// 被拒行的样例（至多 5 条，「编码 词」）——让用户看得出是不是拿错了文件
+    pub rejected_samples: Vec<String>,
+    /// 程序补上了音节边界的条数
+    pub boundary_filled: u64,
+    /// 用户选「不补充」而跳过的条数（手机端固定补充，恒 0；留着与桌面同形）
+    pub boundary_skipped: u64,
+}
+
+/// 词库导入结果。
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct DictImportResult {
+    pub sections: Vec<DictImportSection>,
+}
+
 /// 方案的一个附加词库（设置页「方案 → 拼音」等二级页的开关项）。
 #[derive(Debug, Clone, PartialEq)]
 pub struct SchemaDictInfo {
@@ -805,6 +837,80 @@ impl MobileCore {
         Ok(n as u64)
     }
 
+    // ── 词库导出 / 导入（个人词库备份）────────────────────────────────
+    //
+    // 本体与桌面 `dict.export` / `dict.import` 同一份（`wind_coordinator::dict_transfer_api`），
+    // 文件因此与电脑版互通：头部写 engine_type、跨引擎类型拒收、拼音准入契约都不在本层重写。
+    // 导入经 Store 推进结构代次（`bump_words_gen`），与加词同一条路，导完立即打得出。
+
+    /// 导出该方案的个人词库为多段 .wdict 文本（段按引擎类型取默认：码表 / 拼音四段，
+    /// 混输仅候选调整）。宿主负责把文本写到用户选的文件里。
+    pub fn dict_export(&self, schema_id: &str) -> Result<String, String> {
+        use wind_coordinator::web_host::WebDataHost;
+        let r = wind_coordinator::dict_transfer_api::export(&*self.coord, schema_id, None)
+            .map_err(|e| e.to_string());
+        // 整表扫描：标记一次，空闲后回收 redb 读缓存（同桌面 `FULL_SCAN_METHODS` 里的 dict.export）。
+        if let Some(store) = self.coord.user_store() {
+            store.mark_scan_pending();
+        }
+        r
+    }
+
+    /// 导入词库文本：.wdict（电脑版 / 本机导出，应用文件所含全部段）或 Rime / TSV（仅用户词）。
+    ///
+    /// `replace` = 先清空对应段再导入，否则合并。拼音音节边界固定由程序补充（桌面导入对话框
+    /// 的默认选项）。文件的引擎类型与方案不一致（如五笔词库导入拼音）→ Err(原因)。
+    pub fn dict_import(
+        &self,
+        schema_id: &str,
+        content: &str,
+        replace: bool,
+    ) -> Result<DictImportResult, String> {
+        use wind_coordinator::web_host::WebDataHost;
+        self.ensure_writable()?;
+        let out = wind_coordinator::dict_transfer_api::import(
+            &*self.coord,
+            schema_id,
+            content,
+            replace,
+            true,
+            None,
+        )
+        .map_err(|e| e.to_string())?;
+        // 整表规模的写，理由与失败处置同 [`Self::user_words_clear`]（桌面 `BULK_WRITE_METHODS`
+        // 里的 dict.import）。
+        if let Some(store) = self.coord.user_store()
+            && let Err(e) = store.drop_page_cache()
+        {
+            tracing::error!(
+                "导入词库之后丢弃页缓存失败：{e}。数据已写入，但存储层现处于暂停态，\
+                 后续读写都会失败，请重启输入法。"
+            );
+        }
+        Ok(DictImportResult {
+            sections: out
+                .sections
+                .into_iter()
+                .map(|s| {
+                    let w = s.words.unwrap_or_default();
+                    let c = s.contract.unwrap_or_default();
+                    DictImportSection {
+                        key: s.key.to_string(),
+                        added: w.added as u64,
+                        updated: w.updated as u64,
+                        unchanged: w.unchanged as u64,
+                        imported: s.imported as u64,
+                        skipped: s.skipped as u64,
+                        rejected: c.rejected as u64,
+                        rejected_samples: c.samples,
+                        boundary_filled: c.filled as u64,
+                        boundary_skipped: c.unfilled_skipped as u64,
+                    }
+                })
+                .collect(),
+        })
+    }
+
     // ── 方案附加词库（设置页「方案 → 拼音」等）────────────────────────
     //
     // 本体与桌面 `schema.setDictEnabled` 同一份（`wind_coordinator::schema_dicts_api`）：
@@ -1138,6 +1244,184 @@ mod user_words_tests {
         assert!(m.user_words_clear("pinyin").is_err());
         assert_eq!(m.user_words("pinyin", "", 0, 50), UserWordPage::default());
         let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+/// 词库导出 / 导入门面：往返、跨引擎类型拒收、Rime/TSV、只读闸、导完立即打得出。
+/// 段交集与准入契约的本体在 wind-coordinator 的 `dict_transfer_api`，桌面 JSON 形状在
+/// wind-webdata 的测试里验，这里只验门面这一层。要 `build_dev/data` 的用例缺失时打印跳过。
+#[cfg(test)]
+mod dict_transfer_tests {
+    use super::*;
+
+    fn data_dir() -> std::path::PathBuf {
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../build_dev/data")
+    }
+
+    fn dict_ready() -> bool {
+        data_dir()
+            .join("schemas/wubi86/wubi86_jidian.dict.yaml")
+            .exists()
+            && data_dir().join("schemas/pinyin.schema.toml").exists()
+    }
+
+    /// 带真词库的 [`MobileCore`]，当前方案五笔。⚠️ 目录名带 pid：多会话并行跑测试时固定名会互删夹具。
+    fn core(tag: &str) -> (MobileCore, std::path::PathBuf) {
+        let user =
+            std::env::temp_dir().join(format!("wind_mobile_dt_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&user);
+        std::fs::create_dir_all(&user).unwrap();
+        let mut cfg = Config::default();
+        cfg.schema.available = vec!["wubi86".into(), "pinyin".into()];
+        cfg.schema.active = "wubi86".into();
+        cfg.input.default.chinese_mode = true;
+        cfg.schema.codetable.auto_commit_at_full = false;
+        let (coord, _rx) =
+            Coordinator::new_headless_with_ui_at(cfg, Some(&data_dir()), Some(&user));
+        let core = MobileCore {
+            coord,
+            warming: Arc::new(AtomicBool::new(false)),
+            data_dir: user.clone(),
+        };
+        (core, user)
+    }
+
+    /// 打一串码，返回全部候选文本，再 Esc 清掉组合。
+    fn type_code(m: &MobileCore, code: &str) -> Vec<String> {
+        for ch in code.chars() {
+            dispatch_key(&m.coord, ch.to_ascii_uppercase() as u32, 0);
+        }
+        let items = m.candidates(0, MAX_WINDOW).items;
+        dispatch_key(&m.coord, 0x1B, 0);
+        items
+    }
+
+    /// 加词 → 导出（头部带 engine_type、含该词）→ 清空 → 导入导出的文本 → 词回来且立即打得出。
+    #[test]
+    fn export_clear_import_round_trip_is_typable() {
+        if !dict_ready() {
+            eprintln!("!!! 跳过：build_dev 词库不存在");
+            return;
+        }
+        let (m, dir) = core("rt");
+        // 先打一遍把这个码的候选算进缓存——验的正是导入后缓存会不会挡住新词。
+        assert!(
+            !type_code(&m, "aaaa").iter().any(|t| t == "风起测词"),
+            "前提：词库里没有"
+        );
+        m.user_word_add("wubi86", "aaaa", "风起测词").unwrap();
+
+        let text = m.dict_export("wubi86").unwrap();
+        assert!(
+            text.contains("engine_type: codetable"),
+            "头部要写引擎类型，导入端据此拒收跨类型文件:\n{text}"
+        );
+        assert!(text.contains("风起测词"), "导出要含刚加的词:\n{text}");
+
+        assert_eq!(m.user_words_clear("wubi86"), Ok(1));
+        assert!(!type_code(&m, "aaaa").iter().any(|t| t == "风起测词"));
+
+        let r = m.dict_import("wubi86", &text, false).unwrap();
+        let uw = r
+            .sections
+            .iter()
+            .find(|s| s.key == "userWords")
+            .expect("要有用户词段");
+        assert_eq!((uw.added, uw.skipped, uw.rejected), (1, 0, 0), "{r:?}");
+        assert_eq!(m.user_words("wubi86", "", 0, 50).total, 1);
+        let after = type_code(&m, "aaaa");
+        assert!(
+            after.iter().any(|t| t == "风起测词"),
+            "导完立即可打，实得 {after:?}"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// 五笔导出的文件导入拼音方案：按引擎类型拒收，且一条都不落库。
+    #[test]
+    fn codetable_file_rejected_by_pinyin_schema() {
+        if !dict_ready() {
+            eprintln!("!!! 跳过：build_dev 词库不存在");
+            return;
+        }
+        let (m, dir) = core("cross");
+        m.user_word_add("wubi86", "aaaa", "风起测词").unwrap();
+        let text = m.dict_export("wubi86").unwrap();
+        let err = m.dict_import("pinyin", &text, false).unwrap_err();
+        assert!(err.contains("码表") && err.contains("拼音"), "{err}");
+        assert_eq!(m.user_words("pinyin", "", 0, 50).total, 0, "拒收不落库");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// 第三方纯文本：Rime（`---`/`...` 头，`词\t编码`）与 TSV（`编码\t词`）都只进用户词。
+    #[test]
+    fn rime_and_tsv_text_import_into_user_words() {
+        if !dict_ready() {
+            eprintln!("!!! 跳过：build_dev 词库不存在");
+            return;
+        }
+        let (m, dir) = core("rime");
+        let rime = "---\nname: t\nversion: \"1\"\n...\n风起甲词\taaaa\t100\n风起乙词\taaab\n";
+        let r = m.dict_import("wubi86", rime, false).unwrap();
+        assert_eq!(r.sections.len(), 1, "{r:?}");
+        assert_eq!(
+            (r.sections[0].key.as_str(), r.sections[0].added),
+            ("userWords", 2)
+        );
+        assert!(type_code(&m, "aaab").iter().any(|t| t == "风起乙词"));
+
+        let r = m.dict_import("wubi86", "aaac\t风起丙词\n", false).unwrap();
+        assert_eq!(r.sections[0].added, 1, "{r:?}");
+
+        // replace：先清空再导入
+        let r = m.dict_import("wubi86", "aaad\t风起丁词\n", true).unwrap();
+        assert_eq!(r.sections[0].added, 1, "{r:?}");
+        let page = m.user_words("wubi86", "", 0, 50);
+        assert_eq!(
+            page.items
+                .iter()
+                .map(|w| w.text.as_str())
+                .collect::<Vec<_>>(),
+            ["风起丁词"],
+            "replace 要先清空"
+        );
+
+        // 拼音方案：无空格的码过准入契约，由程序补上音节边界（显示码带空格即证）。
+        let r = m
+            .dict_import("pinyin", "fengqihaha\t风起哈哈\n", false)
+            .unwrap();
+        assert_eq!(
+            (r.sections[0].added, r.sections[0].boundary_filled),
+            (1, 1),
+            "{r:?}"
+        );
+        let page = m.user_words("pinyin", "", 0, 50);
+        assert_eq!(page.items[0].code, "feng qi ha ha");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// 只读模式：导入带着原因拒绝（不碰数据）；导出读不到存储也报错而不是给空文件。
+    #[test]
+    fn readonly_rejects_import_with_reason() {
+        let user = std::env::temp_dir().join(format!("wind_mobile_dt_ro_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&user);
+        std::fs::create_dir_all(&user).unwrap();
+        std::fs::write(
+            user.join("meta.toml"),
+            "format_version = 99\ndir_id = \"x\"\n",
+        )
+        .unwrap();
+        let (coord, _rx) =
+            Coordinator::new_headless_with_ui_at(Config::default(), None, Some(&user));
+        let m = MobileCore {
+            coord,
+            warming: Arc::new(AtomicBool::new(false)),
+            data_dir: user.clone(),
+        };
+        let err = m.dict_import("pinyin", "aa\t工\n", false).unwrap_err();
+        assert!(err.contains("99"), "要把只读原因交给用户: {err}");
+        assert!(m.dict_export("pinyin").is_err());
+        let _ = std::fs::remove_dir_all(&user);
     }
 }
 

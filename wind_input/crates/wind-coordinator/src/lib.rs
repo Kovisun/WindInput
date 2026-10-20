@@ -18,6 +18,7 @@ pub(crate) mod construct;
 pub mod coordinator;
 pub(crate) mod data_needs;
 pub(crate) mod debug_support;
+pub mod dict_transfer_api;
 #[cfg(windows)]
 pub mod direct_switch;
 pub mod draft_window;
