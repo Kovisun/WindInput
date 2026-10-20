@@ -83,10 +83,11 @@
     <key>InputMethodServerControllerClass</key>
     <string>WindInputController</string>
 
+    <!-- 只写 Hans, 不要加 Latn: 声明了 Latn 的输入源会被视作自带罗马字母, 系统不再给
+         「大写锁定键切换 ABC」(同 Squirrel #911). 下方 mode 同理. -->
     <key>tsInputMethodCharacterRepertoireKey</key>
     <array>
         <string>Hans</string>
-        <string>Latn</string>
     </array>
 
     <!--
@@ -126,7 +127,6 @@
                 <key>tsInputModeCharacterRepertoireKey</key>
                 <array>
                     <string>Hans</string>
-                    <string>Latn</string>
                 </array>
                 <key>tsInputModeScriptKey</key>
                 <string>smUnicodeScript</string>
