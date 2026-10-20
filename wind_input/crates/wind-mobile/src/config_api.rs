@@ -29,6 +29,7 @@
 //! 宿主就能在加载清单时当场比对：清单里有而注册表没有的键，直接报出来。
 
 use std::path::Path;
+use std::sync::Mutex;
 
 use wind_config::Config;
 use wind_config::config_schema::{self, FieldType};
@@ -190,6 +191,19 @@ fn to_toml(cfg: &Config) -> String {
     toml::to_string(cfg).unwrap_or_default()
 }
 
+/// 用户层写入的进程内互斥。
+///
+/// `Config::set_user_value` 是「读整份 config.toml → 改一键 → 整份写回」，本身不加锁；
+/// [`set_tooltip_section_enabled`] 更是先 load 再整份写回段列表。宿主的设置页把各卡片的写入
+/// 各自丢到 IO 线程上，连点两个开关就是两条并发的读改写——后写的拿着旧文件覆盖先写的，
+/// 界面上表现为「刚打开的开关又弹回去」。本模块的写口一律经这把锁。
+static WRITE_LOCK: Mutex<()> = Mutex::new(());
+
+fn write_guard() -> std::sync::MutexGuard<'static, ()> {
+    // 持锁方 panic 过也照常往下写：锁里没有要保护的内存状态，只是串行化文件读改写
+    WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// 一个 emoji 附加模块与它当前的开关（设置页「附加模块」一行）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EmojiModuleState {
@@ -236,6 +250,7 @@ pub fn set_emoji_module(data_dir: &Path, id: &str, on: bool) -> Result<(), Strin
     {
         return Err(format!("没有这个 emoji 模块：{id}"));
     }
+    let _w = write_guard();
     Config::set_user_value(&["input", "emoji", "modules", id], toml::Value::Boolean(on))
         .map_err(|e| e.to_string())
 }
@@ -286,7 +301,13 @@ fn section_title(label: &str) -> String {
 
 /// 打开 / 关闭名为 `label` 的提示段：整份段列表写回用户层（改回与出厂一致时由
 /// `set_user_value` 剪掉，不留残余）。没有这一段 → Err。同 [`set`]，只写盘，生效要另发重载。
+///
+/// ⚠ 已知取舍（与电脑版设置页的段列表对话框相同）：开关过任意一段后，用户层存的是整份
+/// 列表，此后出厂对段模板的修改到不了这位用户——直到他把列表改回与出厂一致。出厂段列表
+/// 变更时由 `Config::migrate_stale_factory_tooltip_sections_value` 认出存量副本迁移。
 pub fn set_tooltip_section_enabled(data_dir: &Path, label: &str, on: bool) -> Result<(), String> {
+    // 读与写都在锁里：load 到 set_user_value 之间别处写进来的，会被这里整份写回冲掉
+    let _w = write_guard();
     let mut cfg = Config::load(Some(data_dir)).map_err(|e| e.to_string())?;
     let sec = cfg
         .ui
@@ -318,6 +339,7 @@ pub fn set(key: &str, value: ConfigValue) -> Result<(), String> {
         return Err(format!("未登记的配置键：{key}"));
     }
     let path: Vec<&str> = key.split('.').collect();
+    let _w = write_guard();
     Config::set_user_value(&path, value.into_toml()).map_err(|e| e.to_string())
 }
 
