@@ -539,7 +539,13 @@ impl Coordinator {
         // 码表自动造词：登记这个字是用哪条码打出来的（GH#181）。主输入路的选词 / 顶屏出口
         // 全都经过这里（见上），故挂在这个薄包装里而不是逐个出口。
         self.note_draft_code_hint(cand, code);
-        self.record_selection_cand_in(None, code, cand)
+        self.record_selection_cand_in(None, code, cand);
+        // ★ 混进别的方案（拼音 / 码表的「英文候选」、混输）的英文候选，词频**另记一份进英文桶**
+        // ——与英文方案、临英同一个记频口（开关也按英文方案取），在哪儿选过的英文词，三处都
+        // 受益。上面那条按主方案的记账照旧：主方案读端（`apply_freq_rerank_in`）靠它排序。
+        if cand.source == CandidateSource::English && !self.engine_mgr.active_is_english() {
+            self.record_freq_only(Some(ENGLISH_SCHEMA), code, cand.freq_text(), cand.source);
+        }
     }
 
     /// 同 [`Self::record_selection_cand`]，但可指定**归属方案**（overlay 用）。
@@ -615,7 +621,18 @@ impl Coordinator {
         // 历史先记、与词频文本空不空无关：两条通路独立（理由见 emoji 守卫）。空显示标签的
         // `$CC` 纯文本命令就是 `freq_text` 空而上屏文本非空的例子。
         self.push_commit_history(history_text);
-        let text = freq_text;
+        self.record_freq_only(schema_override, code, freq_text, source);
+    }
+
+    /// [`Self::record_selection_cased_in`] 的词频半边（不记上屏历史）：一次上屏要记进**两个**
+    /// 桶时（混入的英文候选，见 [`Self::record_selection_cand`]），历史只该记一次。
+    fn record_freq_only(
+        &self,
+        schema_override: Option<&str>,
+        code: &str,
+        text: &str,
+        source: CandidateSource,
+    ) {
         // 暂停学习：一切选词记账（主路、临拼、快捷输入、特殊模式、英文头部候选）都汇到这里。
         if text.is_empty() || self.learning_suspended() {
             return;

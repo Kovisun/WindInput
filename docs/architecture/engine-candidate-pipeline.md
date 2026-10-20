@@ -481,6 +481,12 @@ code 是 query 前缀 → 只消费前缀长度，剩余拼音继续转换；否
 查询走精确 + 前缀，候选标 `source = English`。独立方案可直接使用，更常见的是被混输懒加载
 （`schema.mix.enable_english`）。
 
+**词频名次**：上游英文主库没有权重列，前缀补全会退化成字母序。加载英文词库（`type = "english"`）
+时，权重为 0 的条目按 `schemas/english/en_freq.txt` 的名次赋权（`wind_dict::freq_rank`，值域
+`1..=799`，低于临时词初始权重 800，用户词 / 临时词与系统词的先后不变；写了权重的条目不动）。
+名次表是 wdat 的第二个指纹源（`CachedDict::load_english_at`），读英文词库的各处统一经
+`EngineManager::load_table_dict`。英文方案、临英、拼音 / 码表混英文共用这一份引擎，一致受益。
+
 ### 6.1 词组分词（`english_phrase.rs`，论坛 t42）
 
 `'` 切开各段、每段只打前缀：`bue'air` → `Buenos Aires`，`ip'max` → `iPhone 15 Pro Max`。
@@ -565,6 +571,11 @@ hen / hence / henceforth / Henderson / Hendrix，混输 `github` 曾混进 8 条
 
 收窄后英文天然只剩 1~2 条，**按比例分席的配额机制随之删除**（原 `seats_for`）。
 
+**拼音的可选前缀补全**（`schema.pinyin.english_merge.prefix_complete`，出厂关）是这条收窄的
+唯一例外：中文侧有候选时，若输入 ≥5 字母且整串任何切法都切不成完整全拼音节
+（`english_merge::prefix_complete_applies`，标准音节表 DP），在精确之外再补至多 2 条前缀词
+（`lookup_prefix_complete`，跳过精确那条）。双拼下不生效（`manager::convert` 排除）。
+
 ⚠️ **上屏否决的判据不跟着收窄**：`english_merge::has_any` 与
 `MixedEngine::english_candidates`（`auto_commit_block_on_english` 用）仍按前缀判。
 用户打到 `gith` 时精确命中尚不存在，否决若也要求精确，五笔满码就会在第 4 键把中文顶上屏。
@@ -582,6 +593,12 @@ hen / hence / henceforth / Henderson / Hendrix，混输 `github` 曾混进 8 条
 定位：插在「开头那段连续的 `source_tier <= 1` 候选」之后，即中文常用精确解之后、其余
 候选之前。采用后置定位而非新增比较键，理由见该函数文档（比较键会扰动非英文候选之间的
 既有次序，而只对英文表态的比较器不是全序）。
+
+前缀补全来的英文（code 比输入长）再往后让一段：让过紧随其后、吃满整串且非引擎合成的中文
+（`xiaom` 的「小米」是简拼残码命中，不在精确档）。
+
+选中混进来的英文候选，词频另记一份进英文桶（`"english"`，开关按英文方案取），与英文方案、
+临英同一个记频口（`Coordinator::record_selection_cand`）。
 
 ---
 
