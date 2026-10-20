@@ -121,7 +121,7 @@ impl Coordinator {
 
     /// 候选原地重建（输入没变：置顶 / 调位 / 删除）之前记下展开态的位置。
     pub(crate) fn grid_snapshot(state: &State) -> Option<GridSnapshot> {
-        Self::grid_active(state).then(|| GridSnapshot {
+        Self::grid_active(state).then_some(GridSnapshot {
             page: state.current_page,
             selected: state.selected_index,
             tab: state.grid_tab,
