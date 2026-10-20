@@ -12874,6 +12874,15 @@ scripts = { latin = 42 }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// 全仓约定用 `text.parse::<toml::Value>()` 解析整篇文档（见 AGENTS.md）。这依赖
+    /// toml 0.8 的 `FromStr for Value` 按文档解析；升级 toml 后语义若变成「单个值」，这里先红。
+    #[test]
+    fn toml_value_from_str_parses_whole_documents() {
+        let v: toml::Value = "a = 1\n[b]\nc = 2\n".parse().expect("整篇文档须能解析");
+        assert_eq!(v["a"].as_integer(), Some(1));
+        assert_eq!(v["b"]["c"].as_integer(), Some(2));
+    }
+
     /// 合法文件走的是零改动的快路径：`is_clean` 为真、一行都没跳过。
     #[test]
     fn lenient_parse_leaves_valid_toml_untouched() {
