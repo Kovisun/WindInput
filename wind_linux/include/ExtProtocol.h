@@ -80,6 +80,7 @@ inline constexpr const char* EXT_KIND_HOST_FULLSCREEN = "host.fullscreen";
 /// 首显闸门里「等权威坐标」的那段（否则首键后要等 600ms 长兜底）；caret_trusted：本端报的光标
 /// 可直接当权威（Linux 恒为真，来源字段却只能填 UNKNOWN）；inline_preedit：客户端声明了 Preedit
 /// 能力位（否则服务端把编码画进候选窗）；scale：界面缩放因子（见 protocol.rs `HOST_DISPLAY`）；output：焦点所在输出名（可缺省）；work：该输出的工作区 [左,上,右,下]（可缺省，与 output 成对报）。
+/// panels：能力声明，本 addon 能贴工具栏 / 软键盘浮层（恒报 true；旧 addon 不报 → 服务端不开软键盘）。
 inline constexpr const char* EXT_KIND_HOST_DISPLAY = "host.display";
 /// 下行：服务端问状态气泡此刻在哪（切「固定位置」时以当前位置落盘）。气泡不在屏上不答。
 inline constexpr const char* EXT_KIND_POS_STATUS_TIP_QUERY = "pos.status_tip.query";

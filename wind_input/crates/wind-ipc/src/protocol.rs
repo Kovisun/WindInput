@@ -392,6 +392,9 @@ pub mod ext_kind {
     /// - `work`：该输出的工作区 `[左,上,右,下]`（屏幕坐标，同 [`MENU_OPEN`] 的 `work`），工具栏 /
     ///   软键盘的默认落点按它算。与 `output` 成对：报了其一，工作区就按本次替换（只报 `output` = 工作区未知），
     ///   `output` 只在报了时更新。
+    /// - `panels`：能力声明，宿主能贴工具栏 / 软键盘浮层（Linux addon 恒报 `true`）。不认这两种浮层
+    ///   的旧 addon 不报，服务端据此不开软键盘、主菜单不出这两项。缺省 = 不改现值；请求连接断开时
+    ///   复位为未声明（见协调器 `host_has_panels`）。
     pub const HOST_DISPLAY: &str = "host.display";
     /// 上行（Linux addon）：请求打开自绘菜单。body =
     /// `{"target":<页内下标>|<menu_target>,"x":..,"y":..,"work":[左,上,右,下]}`——`target` ≥ 0

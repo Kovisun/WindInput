@@ -84,31 +84,31 @@ int main()
     CHECK_EQ(body, std::string(R"({"reason":"idle"})"));
     body = extBody(encodeHostDisplayFrame(true, true, true, 1.5), kind);
     CHECK_EQ(kind, std::string("host.display"));
-    CHECK_EQ(body, std::string(R"({"caret_free":true,"caret_trusted":true,"inline_preedit":true,"scale":1.50})"));
+    CHECK_EQ(body, std::string(R"({"caret_free":true,"caret_trusted":true,"inline_preedit":true,"panels":true,"scale":1.50})"));
     body = extBody(encodeHostDisplayFrame(false, true, true, 1.0), kind);
-    CHECK_EQ(body, std::string(R"({"caret_free":false,"caret_trusted":true,"inline_preedit":true,"scale":1.00})"));
+    CHECK_EQ(body, std::string(R"({"caret_free":false,"caret_trusted":true,"inline_preedit":true,"panels":true,"scale":1.00})"));
     body = extBody(encodeHostDisplayFrame(false, false, true, 1.25), kind);
-    CHECK_EQ(body, std::string(R"({"caret_free":false,"caret_trusted":false,"inline_preedit":true,"scale":1.25})"));
+    CHECK_EQ(body, std::string(R"({"caret_free":false,"caret_trusted":false,"inline_preedit":true,"panels":true,"scale":1.25})"));
     body = extBody(encodeHostDisplayFrame(false, true, true, 1.05), kind);
-    CHECK_EQ(body, std::string(R"({"caret_free":false,"caret_trusted":true,"inline_preedit":true,"scale":1.05})"));
+    CHECK_EQ(body, std::string(R"({"caret_free":false,"caret_trusted":true,"inline_preedit":true,"panels":true,"scale":1.05})"));
     body = extBody(encodeHostDisplayFrame(true, true, true, 0.0), kind); // 不知道缩放：不带该字段
-    CHECK_EQ(body, std::string(R"({"caret_free":true,"caret_trusted":true,"inline_preedit":true})"));
+    CHECK_EQ(body, std::string(R"({"caret_free":true,"caret_trusted":true,"inline_preedit":true,"panels":true})"));
     // 客户端没有 Preedit 能力位（WPS / QQ）：服务端据此把编码画进候选窗
     body = extBody(encodeHostDisplayFrame(false, true, false, 1.0), kind);
-    CHECK_EQ(body, std::string(R"({"caret_free":false,"caret_trusted":true,"inline_preedit":false,"scale":1.00})"));
+    CHECK_EQ(body, std::string(R"({"caret_free":false,"caret_trusted":true,"inline_preedit":false,"panels":true,"scale":1.00})"));
     // 焦点所在输出：名字与工作区（work 同 menu.open 的 [左,上,右,下]），各自可缺省。
     body = extBody(encodeHostDisplayFrame(false, true, true, 1.0,
                                           HostOutput{"HDMI-A-1", Rect{1920, 0, 2560, 1400}}),
                    kind);
-    CHECK_EQ(body, std::string(R"({"caret_free":false,"caret_trusted":true,"inline_preedit":true,"scale":1.00,"output":"HDMI-A-1","work":[1920,0,4480,1400]})"));
+    CHECK_EQ(body, std::string(R"({"caret_free":false,"caret_trusted":true,"inline_preedit":true,"panels":true,"scale":1.00,"output":"HDMI-A-1","work":[1920,0,4480,1400]})"));
     body = extBody(encodeHostDisplayFrame(false, true, true, 1.0, HostOutput{"", Rect{0, 0, 1280, 800}}),
                    kind);
-    CHECK_EQ(body, std::string(R"({"caret_free":false,"caret_trusted":true,"inline_preedit":true,"scale":1.00,"work":[0,0,1280,800]})"));
+    CHECK_EQ(body, std::string(R"({"caret_free":false,"caret_trusted":true,"inline_preedit":true,"panels":true,"scale":1.00,"work":[0,0,1280,800]})"));
     body = extBody(encodeHostDisplayFrame(false, true, true, 1.0, HostOutput{"DP-1", std::nullopt}),
                    kind);
-    CHECK_EQ(body, std::string(R"({"caret_free":false,"caret_trusted":true,"inline_preedit":true,"scale":1.00,"output":"DP-1"})"));
+    CHECK_EQ(body, std::string(R"({"caret_free":false,"caret_trusted":true,"inline_preedit":true,"panels":true,"scale":1.00,"output":"DP-1"})"));
     body = extBody(encodeHostDisplayFrame(false, true, true, 1.0, HostOutput{}), kind);
-    CHECK_EQ(body, std::string(R"({"caret_free":false,"caret_trusted":true,"inline_preedit":true,"scale":1.00})"));
+    CHECK_EQ(body, std::string(R"({"caret_free":false,"caret_trusted":true,"inline_preedit":true,"panels":true,"scale":1.00})"));
 
     CASE("菜单各级的 SHM 名：_MN<级>，与 Rust overlay_shm_name 对齐");
     CHECK_EQ(overlayShmName(OVERLAY_KIND_MENU), shmName() + "_MN0");

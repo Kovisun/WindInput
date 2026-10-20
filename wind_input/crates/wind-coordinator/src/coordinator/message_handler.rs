@@ -618,6 +618,16 @@ impl MessageHandler for Coordinator {
                     if let Some(scale) = d.scale {
                         wind_ui::dpi::set_host_scale(scale);
                     }
+                    // 能力声明 `panels`：能贴工具栏 / 软键盘浮层（旧 addon 不报，见字段 `host_panels`）。
+                    // 缺省同其它字段 = 不改现值；复位靠请求连接断开。
+                    #[cfg(all(target_os = "linux", ext_presenter))]
+                    if let Some(panels) = serde_json::from_slice::<serde_json::Value>(body)
+                        .ok()
+                        .and_then(|v| v.get("panels")?.as_bool())
+                    {
+                        self.host_panels
+                            .store(panels, std::sync::atomic::Ordering::Relaxed);
+                    }
                     // 焦点输出名与其工作区：工具栏 / 软键盘位置记忆的分桶键与默认落点。两者成对：
                     // 报了其一，工作区就跟着这次报告换（只报输出名 = 工作区未知），免得新输出配上旧输出的
                     // 工作区；输出名只在报了时更新；都没报 = 不改现值。
@@ -723,7 +733,8 @@ impl MessageHandler for Coordinator {
     ///
     /// 宿主上报状态的统一复位在渲染端的 `HostReconnected`（push 连接重建，见 manager_macos
     /// `reset_host_state`）。这里只先补一次面板离开，让 addon 崩溃时按住的软键盘键当场停止连发，
-    /// 不必等新 addon 连上；全屏不在这里复位——请求连接超时熔断也会断开，addon 其实还在。
+    /// 不必等新 addon 连上；面板能力声明（`host_panels`）也在这里复位。全屏不在这里复位——请求连接
+    /// 超时熔断也会断开，addon 其实还在。
     fn handle_client_disconnected(&self) {
         #[cfg(ext_presenter)]
         if self.is_menu_open() {
@@ -731,6 +742,11 @@ impl MessageHandler for Coordinator {
         }
         #[cfg(all(target_os = "linux", ext_presenter))]
         {
+            // 面板能力随 addon 实例走：下一个连上来的可能是不认面板的旧 addon（重启 fcitx5 换了
+            // 版本），得它自己重新声明。还活着的 addon 在恢复连接时会重报焦点（含 host.display）。
+            // 不挂在 push 重连钩子上：服务启动时钩子补跑晚于 addon 首报，会把刚声明的冲掉。
+            self.host_panels
+                .store(false, std::sync::atomic::Ordering::Relaxed);
             use wind_ipc::protocol::overlay::{OVERLAY_KIND_SOFTKEYBOARD, OVERLAY_KIND_TOOLBAR};
             use wind_ipc::protocol::panel_pointer::PANEL_POINTER_LEAVE;
             for kind in [OVERLAY_KIND_TOOLBAR, OVERLAY_KIND_SOFTKEYBOARD] {

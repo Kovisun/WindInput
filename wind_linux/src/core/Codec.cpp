@@ -277,7 +277,10 @@ Bytes encodeHostDisplayFrame(bool caretFree, bool caretTrusted, bool inlinePreed
 {
     std::string body = std::string("{\"caret_free\":") + (caretFree ? "true" : "false")
                        + ",\"caret_trusted\":" + (caretTrusted ? "true" : "false")
-                       + ",\"inline_preedit\":" + (inlinePreedit ? "true" : "false");
+                       + ",\"inline_preedit\":" + (inlinePreedit ? "true" : "false")
+                       // 能力声明：本 addon 能贴工具栏 / 软键盘浮层。旧 addon 不报，服务端据此不开
+                       // 软键盘（否则主键区被接管而屏上什么都没有）。
+                       + ",\"panels\":true";
     if (scale > 0.0) {
         // 两位小数足够表达 125% / 150% / 175% 这类档位；不用 std::to_string（带 locale 的小数点）。
         const long hundredths = std::lround(scale * 100.0);

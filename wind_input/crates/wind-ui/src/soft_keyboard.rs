@@ -954,6 +954,10 @@ impl SoftKeyboard {
         }
         if let Err(e) = self.window.update() {
             tracing::warn!("软键盘: 窗口更新失败: {e}");
+            // Linux：位图超出 SHM 段上限（高缩放下的大面板）时整帧送不出去，面板不显示，协调器却
+            // 仍在软键盘态接管主键区——打字全变符号。让协调器退出软键盘态，与点关闭按钮同一条路。
+            #[cfg(all(target_os = "linux", ext_presenter))]
+            let _ = self.events.send(UiEvent::SoftKeyboardClose);
             return;
         }
         // 落点每帧现算：锚右下角减去**当前**尺寸。切面会改面板尺寸（各面键数不同），

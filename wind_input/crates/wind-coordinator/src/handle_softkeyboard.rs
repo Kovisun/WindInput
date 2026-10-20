@@ -278,7 +278,14 @@ impl Coordinator {
     }
 
     /// 开启软键盘。表为空时不开——弹一个一个符号都打不出的面板只会让用户以为坏了。
+    ///
+    /// 宿主贴不了面板（Linux 旧 addon，见 [`Self::host_has_panels`]）时也不开：主键区会被接管而
+    /// 屏上什么都没有——打字全变符号。热键、菜单、工具栏都经此处，键交还宿主。
     pub(crate) fn open_softkeyboard(&self, page: Option<&str>) -> KeyAction {
+        if !self.host_has_panels() {
+            debug!("软键盘: 宿主没声明面板能力，忽略开启请求");
+            return KeyAction::PassThrough;
+        }
         if self.softkeyboard.is_empty() {
             warn!("软键盘: 映射表为空，忽略开启请求");
             return KeyAction::Consumed;

@@ -2060,14 +2060,19 @@ impl Coordinator {
             M::leaf("简入繁出", cmd(MenuCmd::ToggleS2t), true, s2t),
             M::submenu("检索范围", filter_children),
             M::separator(),
-            M::leaf(
-                TOOLBAR_MENU_LABEL,
-                cmd(MenuCmd::ToggleToolbar),
-                true,
-                toolbar_vis,
-            ),
-            self.soft_keyboard_menu_item(),
         ];
+        // 宿主贴不了面板（Linux 旧 addon）时两项都是点了没反应的死开关，不给。
+        if self.host_has_panels() {
+            items.extend([
+                M::leaf(
+                    TOOLBAR_MENU_LABEL,
+                    cmd(MenuCmd::ToggleToolbar),
+                    true,
+                    toolbar_vis,
+                ),
+                self.soft_keyboard_menu_item(),
+            ]);
+        }
         items.extend([
             M::submenu("主题", theme_children),
             M::separator(),
@@ -5024,8 +5029,11 @@ mod linux_panel_tests {
     use wind_bridge::handler::{KeyEventData, MessageHandler};
     use wind_ipc::protocol::ext_kind;
 
+    /// 已声明面板能力的 addon（当前版本的 addon 每次 `host.display` 都带 `panels`）。
     fn coord() -> (std::sync::Arc<Coordinator>, Receiver<UiCommand>) {
-        Coordinator::new_headless_with_ui(Config::default(), None)
+        let (c, rx) = Coordinator::new_headless_with_ui(Config::default(), None);
+        c.handle_ext(ext_kind::HOST_DISPLAY, br#"{"panels":true}"#);
+        (c, rx)
     }
 
     fn drain(rx: &Receiver<UiCommand>) -> Vec<UiCommand> {
@@ -5051,6 +5059,53 @@ mod linux_panel_tests {
             assert!(all.iter().any(|l| l == want), "缺「{want}」：{all:?}");
         }
         assert!(!all.iter().any(|l| l == "显示状态图标"), "{all:?}");
+    }
+
+    /// 新服务 + 旧 addon（升级 deb 后没重启 fcitx5）：旧 addon 不报 `panels`，也不认软键盘浮层。
+    /// 热键 / 菜单都不能把主键区接管走，菜单里不出两个死开关；声明后照常；addon 断线即复位，
+    /// 下一个连上来的实例得重新声明。
+    #[test]
+    fn softkeyboard_needs_panels_declared_by_host() {
+        use wind_bridge::handler::KeyAction;
+        use wind_ipc::protocol::{EVENT_KEY_DOWN, MOD_CTRL, MOD_SHIFT};
+        let (c, _rx) = Coordinator::new_headless_with_ui(Config::default(), None);
+        let ctrl_shift_k = KeyEventData {
+            key_code: 0x4B,
+            scan_code: 0,
+            modifiers: MOD_CTRL | MOD_SHIFT,
+            event_type: EVENT_KEY_DOWN,
+            toggles: 0,
+            event_seq: 0,
+            prev_char: 0,
+        };
+        let refused = |c: &Coordinator| {
+            assert!(matches!(c.open_softkeyboard(None), KeyAction::PassThrough));
+            c.handle_key_event(&ctrl_shift_k);
+            c.softkeyboard_menu_toggle(None);
+            assert!(!c.softkeyboard_is_open(), "未声明面板能力不得开软键盘");
+            let all = labels(&c.build_main_menu_items());
+            for no in ["显示工具栏", "软键盘"] {
+                assert!(!all.iter().any(|l| l == no), "不该有「{no}」：{all:?}");
+            }
+        };
+        refused(&c);
+        // 旧 addon 的 host.display 不带 panels：不改现值。
+        c.handle_ext(
+            ext_kind::HOST_DISPLAY,
+            br#"{"caret_free":false,"caret_trusted":true,"inline_preedit":true,"scale":1.00}"#,
+        );
+        refused(&c);
+
+        c.handle_ext(ext_kind::HOST_DISPLAY, br#"{"panels":true}"#);
+        assert!(matches!(c.open_softkeyboard(None), KeyAction::Consumed));
+        assert!(c.softkeyboard_is_open(), "声明后应开得出来");
+        c.close_softkeyboard();
+        c.handle_key_event(&ctrl_shift_k);
+        assert!(c.softkeyboard_is_open(), "声明后 ctrl+shift+k 应开得出来");
+        c.close_softkeyboard();
+
+        c.handle_client_disconnected();
+        refused(&c);
     }
 
     #[test]

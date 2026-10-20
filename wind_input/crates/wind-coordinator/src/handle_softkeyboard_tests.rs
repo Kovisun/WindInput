@@ -10,7 +10,18 @@ use wind_ipc::protocol::EVENT_KEY_DOWN;
 
 /// `data_dir = None` ⇒ 软键盘表回落内置兜底（一面「标点」）。
 fn coord() -> Arc<Coordinator> {
-    Coordinator::new_headless(Config::default(), None)
+    let c = Coordinator::new_headless(Config::default(), None);
+    declare_panels(&c);
+    c
+}
+
+/// Linux 外部宿主形态：面板能力要 addon 声明（见 `Coordinator::host_has_panels`），这里的用例都
+/// 假设宿主贴得出面板。未声明的那一面由 `linux_panel_tests::softkeyboard_needs_panels_declared_by_host` 测。
+fn declare_panels(c: &Coordinator) {
+    #[cfg(all(target_os = "linux", ext_presenter))]
+    c.host_panels
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    let _ = c;
 }
 
 fn kev(vk: u32, modifiers: u32) -> KeyEventData {
@@ -253,6 +264,7 @@ fn coord_with_ui() -> (
     std::sync::mpsc::Receiver<wind_ui_types::UiCommand>,
 ) {
     let (c, rx) = Coordinator::new_headless_with_ui(Config::default(), None);
+    declare_panels(&c);
     {
         let mut s = c.state.lock().unwrap_or_else(|e| e.into_inner());
         s.ime_active = true;

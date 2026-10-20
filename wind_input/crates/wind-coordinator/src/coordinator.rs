@@ -1469,6 +1469,11 @@ pub struct Coordinator {
     /// 左上角换算成右下角回报（`ToolbarMoved` / `SoftKeyboardMoved`）时作为落盘的显示器键取走。
     #[cfg(all(target_os = "linux", ext_presenter))]
     pub(crate) panel_drop_output: Mutex<std::collections::HashMap<u32, String>>,
+    /// Linux：addon 在 `host.display` 里声明过 `panels`（能贴工具栏 / 软键盘浮层）。旧 addon 不认
+    /// 这两种浮层、收到就丢——升级 deb 后 fcitx5 没重启，旧 addon 拉起的是新服务，放任软键盘
+    /// 开着会接管主键区而屏上什么都没有。请求连接断开即复位（下一个 addon 实例得重新声明）。
+    #[cfg(all(target_os = "linux", ext_presenter))]
+    pub(crate) host_panels: std::sync::atomic::AtomicBool,
     /// `state.toml` 的单点延迟写入器：合并连续微调、进程内串行化 load-modify-save。
     /// 无 `store`（headless 测试夹具）时是不写盘的空实现，见 [`state_writer::StateWriter`]。
     pub(crate) state_writer: state_writer::StateWriter,
@@ -2445,6 +2450,19 @@ impl Coordinator {
             .store(!supported, std::sync::atomic::Ordering::Relaxed);
     }
 
+    /// 宿主能否显示工具栏 / 软键盘面板。只有 Linux addon 要声明（见字段 `host_panels`），
+    /// 其它形态的面板由本进程或 `.app` 自己画，恒为真。
+    pub(crate) fn host_has_panels(&self) -> bool {
+        #[cfg(all(target_os = "linux", ext_presenter))]
+        {
+            self.host_panels.load(std::sync::atomic::Ordering::Relaxed)
+        }
+        #[cfg(not(all(target_os = "linux", ext_presenter)))]
+        {
+            true
+        }
+    }
+
     /// 退出（重启服务、注销 / 关机、SIGTERM）前把统计与待处理的用户数据落盘：`process::exit`
     /// 与系统结束进程都不跑析构。
     /// 失败只 WARN——日志还在，下次启动照样回放。
@@ -2951,6 +2969,8 @@ impl Coordinator {
             host_work: Mutex::new(None),
             #[cfg(all(target_os = "linux", ext_presenter))]
             panel_drop_output: Mutex::new(std::collections::HashMap::new()),
+            #[cfg(all(target_os = "linux", ext_presenter))]
+            host_panels: std::sync::atomic::AtomicBool::new(false),
             // 判据借 `store`：它的文档本来就写着「None = 无持久化（headless 测试）」。
             // 只看 `state_dir()` 挡不住测试夹具——那是进程外的全局路径，夹具同样取得到。
             state_writer: state_writer::StateWriter::new(persists_state, Config::state_dir()),
@@ -6736,6 +6756,8 @@ impl Coordinator {
             return;
         }
         debug!("undo_commit: 删除 {} 个 UTF-16 单元", count);
+        // 删掉的正是下一词学习的上文
+        self.note_word_boundary();
         let encoded = wind_ipc::codec::encode_replace_backward(count, "");
         let _ = self.push_server.push_commit_to_active(&encoded);
     }
@@ -6756,8 +6778,6 @@ impl Coordinator {
             let on = want.unwrap_or(!cur);
             let name = "emoji 候选".to_string();
             if on == cur {
-        // 删掉的正是下一词学习的上文
-        self.note_word_boundary();
                 return self.notify_feature_unchanged(target, &name, on);
             }
             Config::set_user_value(&["input", "emoji", "enabled"], toml::Value::Boolean(on))?;
@@ -9737,6 +9757,17 @@ impl Coordinator {
         let text = match action {
             KeyAction::InsertText { text, .. } => text.as_str(),
             KeyAction::InsertTextWithCursor { text, .. } => text.as_str(),
+            // 不进统计但同样动了宿主正文、又没经 `record_commit` 的出口：下一词学习的断点
+            KeyAction::ReplaceBackward { .. }
+            | KeyAction::HoldComposition { .. }
+            | KeyAction::CommitReplacingHeld { .. }
+            | KeyAction::CommitAndHoldComposition { .. }
+            | KeyAction::CommitThenDeferComposition { .. }
+            | KeyAction::MoveCursorRight { .. }
+            | KeyAction::DeletePair => {
+                self.note_word_boundary();
+                return;
+            }
             _ => return,
         };
         if text.is_empty() {
@@ -9757,17 +9788,6 @@ impl Coordinator {
         let has = |k: &str| changed.iter().any(|c| c == k);
         if has("phrases") {
             self.rebuild_phrases();
-            // 不进统计但同样动了宿主正文、又没经 `record_commit` 的出口：下一词学习的断点
-            KeyAction::ReplaceBackward { .. }
-            | KeyAction::HoldComposition { .. }
-            | KeyAction::CommitReplacingHeld { .. }
-            | KeyAction::CommitAndHoldComposition { .. }
-            | KeyAction::CommitThenDeferComposition { .. }
-            | KeyAction::MoveCursorRight { .. }
-            | KeyAction::DeletePair => {
-                self.note_word_boundary();
-                return;
-            }
         }
         if has("quick_format") {
             self.reload_quick_adjust();

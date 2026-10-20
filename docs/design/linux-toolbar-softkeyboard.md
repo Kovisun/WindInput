@@ -1,6 +1,6 @@
 # Linux 端工具栏与软键盘
 
-> 状态：已实现，待真机验收。分支 `feat/linux-toolbar-softkbd`。
+> 状态：已合入 main，随 0.127.0 发布。
 > 前置阅读：[linux-port.md](linux-port.md)、`wind_linux/AGENTS.md`。
 
 ## 1. 意图
