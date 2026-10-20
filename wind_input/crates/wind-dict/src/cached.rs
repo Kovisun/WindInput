@@ -857,36 +857,34 @@ enum GroupSource<'a> {
 }
 
 impl<'a> GroupSource<'a> {
-    fn next_group(&mut self, layer: usize) -> Option<(String, Vec<GroupEntry<'a>>)> {
+    /// 取下一组：条目写进 `out`（先清空），返回码；源耗尽返回 `None`。
+    fn next_group(&mut self, layer: usize, out: &mut Vec<GroupEntry<'a>>) -> Option<String> {
+        out.clear();
         match self {
             Self::Mmap(r, cur) => {
                 let (code, leaf) = cur.next()?;
-                let es = r
-                    .leaf_entries(leaf)
-                    .into_iter()
-                    .map(|(text, weight, order, boundary)| GroupEntry {
+                let r: &'a WdatReader = r;
+                r.for_each_leaf_entry(leaf, &mut |text, weight, order, boundary| {
+                    out.push(GroupEntry {
                         layer,
                         text,
                         weight,
                         order: order as i32,
                         boundary,
                     })
-                    .collect();
-                Some((code, es))
+                });
+                Some(code)
             }
             Self::Memory(it) => {
                 let (code, es) = it.next()?;
-                let es = es
-                    .iter()
-                    .map(|e| GroupEntry {
-                        layer,
-                        text: &e.text,
-                        weight: e.weight,
-                        order: e.order,
-                        boundary: e.boundary,
-                    })
-                    .collect();
-                Some((code.to_string(), es))
+                out.extend(es.iter().map(|e| GroupEntry {
+                    layer,
+                    text: &e.text,
+                    weight: e.weight,
+                    order: e.order,
+                    boundary: e.boundary,
+                }));
+                Some(code.to_string())
             }
         }
     }
@@ -921,27 +919,42 @@ pub fn for_each_code_group<'a>(
     for (i, d) in dicts.iter().enumerate() {
         push_group_sources(i, d, &mut srcs);
     }
-    let mut heads: Vec<Option<(String, Vec<GroupEntry<'a>>)>> = srcs
+    // 每个源的当前组：(码, 条目)；码为 None 即该源已耗尽。条目 Vec 逐组复用。
+    let mut heads: Vec<(Option<String>, Vec<GroupEntry<'a>>)> = srcs
         .iter_mut()
-        .map(|(layer, s)| s.next_group(*layer))
+        .map(|(layer, s)| {
+            let mut es = Vec::new();
+            (s.next_group(*layer, &mut es), es)
+        })
         .collect();
+    if let [(code, es)] = heads.as_mut_slice() {
+        // 单库（拼音合并主表的常态）：不必归并。
+        let (layer, s) = &mut srcs[0];
+        while let Some(c) = code.take() {
+            f(&c, es);
+            *code = s.next_group(*layer, es);
+        }
+        return;
+    }
     let mut buf: Vec<GroupEntry<'a>> = Vec::new();
-    while let Some(min) = heads
+    while let Some(min_i) = heads
         .iter()
-        .flatten()
-        .map(|(c, _)| c.as_str())
-        .min()
-        .map(str::to_owned)
+        .enumerate()
+        .filter_map(|(i, (c, _))| c.as_deref().map(|c| (i, c)))
+        .min_by(|a, b| a.1.cmp(b.1))
+        .map(|(i, _)| i)
     {
+        let Some(min) = heads[min_i].0.take() else {
+            break;
+        };
         buf.clear();
-        for (i, h) in heads.iter_mut().enumerate() {
-            if h.as_ref().is_some_and(|(c, _)| *c == min) {
-                if let Some((_, es)) = h.take() {
-                    buf.extend(es);
-                }
-                let (layer, s) = &mut srcs[i];
-                *h = s.next_group(*layer);
+        for (i, (c, es)) in heads.iter_mut().enumerate() {
+            if i != min_i && c.as_deref() != Some(min.as_str()) {
+                continue;
             }
+            buf.extend_from_slice(es);
+            let (layer, s) = &mut srcs[i];
+            *c = s.next_group(*layer, es);
         }
         f(&min, &buf);
     }

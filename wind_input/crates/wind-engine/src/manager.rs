@@ -14,6 +14,7 @@ use crate::encoder;
 use crate::engine::{BoundaryResolution, ConvertOptions, ConvertResult, Engine, EngineType};
 use crate::freq_rerank::ProtectPolicy;
 use crate::pinyin::{Config as PinyinConfig, PinyinEngine};
+pub use dict_stats::{DictStatsLayer, SystemDictStats};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -524,6 +525,9 @@ pub struct EngineManager {
     /// redb 查询叠加，造成可感知卡顿。缓存 `None` 同样有意义：方案文件不存在时反复尝试
     /// 读盘，还会刷出成片的 `Schema file not found` 警告。
     schema_type_cache: Mutex<HashMap<String, Option<String>>>,
+    /// 词库统计结果（方案 id → (缓存键, 结果)），见 [`Self::dict_stats`]。键含各库摘要，
+    /// 词库一变自然失效，故不接 `invalidate_schema`；只存结果（KB 级），不存中间集合。
+    dict_stats_cache: Mutex<HashMap<String, (String, Arc<dict_stats::SystemDictStats>)>>,
     /// 已建引擎所用用户分库的指纹（方案 id → [(数据方案, 指纹)]），建引擎前记下。不带路径的
     /// `dict.reload` 据此判断分库变没变（[`Self::user_dicts_changed`]）。
     user_dicts_seen: Mutex<HashMap<String, Vec<(String, String)>>>,
@@ -952,6 +956,7 @@ impl EngineManager {
             codetable_settings_cache: Mutex::new(HashMap::new()),
             codetable_settings_gen: std::sync::atomic::AtomicU64::new(0),
             schema_type_cache: Mutex::new(HashMap::new()),
+            dict_stats_cache: Mutex::new(HashMap::new()),
             user_dicts_seen: Mutex::new(HashMap::new()),
             key_actions_cache: Mutex::new(HashMap::new()),
             session_actions_cache: Mutex::new(HashMap::new()),
@@ -7289,25 +7294,25 @@ impl EngineManager {
     fn load_dicts_individually(schema: &Schema, schemas_dir: &Path) -> Vec<CachedDict> {
         Self::enabled_dict_specs(schema)
             .iter()
-            .filter_map(|e| {
-                let full = Self::resolve_dict_file(&e.path, schemas_dir);
-                let dtype = if e.dict_type.is_empty() {
-                    "rime_codetable"
-                } else {
-                    e.dict_type.as_str()
-                };
-                match dtype {
-                    // rime 主表须经 import_tables 展开，否则只读到头部元数据。
-                    "rime_pinyin" => Self::load_rime_pinyin_dict(&full),
-                    // english：code 列小写化，与 load_codetable_layers 的缓存 tag 一致，
-                    // 否则会另建一份大小写不同的 wdat。
-                    t => {
-                        CachedDict::load_at_with(&full, &cache_path(&full, "wdat"), t == "english")
-                            .ok()
-                    }
-                }
-            })
+            .filter_map(|e| Self::load_dict_individually(e, schemas_dir))
             .collect()
+    }
+
+    /// [`Self::load_dicts_individually`] 的单库那一步；词库统计要逐库对上 spec，单独开口。
+    fn load_dict_individually(e: &DictSpec, schemas_dir: &Path) -> Option<CachedDict> {
+        let full = Self::resolve_dict_file(&e.path, schemas_dir);
+        let dtype = if e.dict_type.is_empty() {
+            "rime_codetable"
+        } else {
+            e.dict_type.as_str()
+        };
+        match dtype {
+            // rime 主表须经 import_tables 展开，否则只读到头部元数据。
+            "rime_pinyin" => Self::load_rime_pinyin_dict(&full),
+            // english：code 列小写化，与 load_codetable_layers 的缓存 tag 一致，
+            // 否则会另建一份大小写不同的 wdat。
+            t => CachedDict::load_at_with(&full, &cache_path(&full, "wdat"), t == "english").ok(),
+        }
     }
 
     /// 全部**已启用方案**声明的**已启用词库**文件，按 `rel` 去重。
@@ -8481,6 +8486,8 @@ fn misplaced_dict_font_keys(schema: &toml::Value) -> Vec<String> {
         })
         .collect()
 }
+
+mod dict_stats;
 
 #[cfg(test)]
 mod tests {

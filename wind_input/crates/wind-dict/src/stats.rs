@@ -19,6 +19,7 @@
 //!   各码中 (序位, 码长) 最小者；平均码长 = Σ f(c)·len(最优码) / Σ f(c)。
 
 use std::collections::{BTreeMap, BinaryHeap, HashMap, HashSet};
+use std::hash::{BuildHasherDefault, Hasher};
 
 use serde::Serialize;
 
@@ -249,6 +250,24 @@ fn bucket_map(counts: &[u64; 5], keep_zero: bool) -> BTreeMap<String, u64> {
         .collect()
 }
 
+/// 去重集合用的轻量哈希（FxHash 同式）：拼音全表要往集合里塞 60 万个词，默认的 SipHash
+/// 在这里占了可观的一截；键都是词库里的文字，不涉及抗碰撞攻击。
+#[derive(Default)]
+struct FxHasher(u64);
+
+impl Hasher for FxHasher {
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.0 = (self.0.rotate_left(5) ^ b as u64).wrapping_mul(0x51_7c_c1_b7_27_22_0a_95);
+        }
+    }
+    fn finish(&self) -> u64 {
+        self.0
+    }
+}
+
+type FxBuild = BuildHasherDefault<FxHasher>;
+
 /// 同码内的排序键（越小越靠前）：权重模式 `(−w, 档位, 自然序)`，自然模式 `(0, 档位, 自然序)`。
 type RankKey = (i64, i32, i32);
 
@@ -286,14 +305,16 @@ pub struct StatsBuilder<'a, 'o> {
     by_len: [u64; 5],
     code_len_char: [u64; 5],
     code_len_word: [u64; 5],
-    chars: HashMap<&'a str, CharInfo>,
-    words: HashSet<&'a str>,
+    chars: HashMap<&'a str, CharInfo, FxBuild>,
+    words: HashSet<&'a str, FxBuild>,
     dup: DupStats,
     top: BinaryHeap<std::cmp::Reverse<TopItem>>,
-    syllables: HashSet<String>,
+    syllables: HashSet<String, FxBuild>,
     zero_weight: u64,
-    /// 组内去重 / 排序的复用缓冲：(文字, 排序键, 原始权重)。
-    buf: Vec<(&'a str, RankKey, i32)>,
+    /// 组内去重 / 排序的复用缓冲：(文字, 排序键, 原始权重, 分类)。
+    buf: Vec<(&'a str, RankKey, i32, TextClass)>,
+    /// 组内已处理过的音节边界（同码各条的边界通常相同）。
+    seen_boundaries: Vec<u64>,
 }
 
 impl<'a, 'o> StatsBuilder<'a, 'o> {
@@ -306,13 +327,14 @@ impl<'a, 'o> StatsBuilder<'a, 'o> {
             by_len: [0; 5],
             code_len_char: [0; 5],
             code_len_word: [0; 5],
-            chars: HashMap::new(),
-            words: HashSet::new(),
+            chars: HashMap::default(),
+            words: HashSet::default(),
             dup: DupStats::default(),
             top: BinaryHeap::new(),
-            syllables: HashSet::new(),
+            syllables: HashSet::default(),
             zero_weight: 0,
             buf: Vec::new(),
+            seen_boundaries: Vec::new(),
         }
     }
 
@@ -325,24 +347,30 @@ impl<'a, 'o> StatsBuilder<'a, 'o> {
         (primary, layer.base_order, e.order)
     }
 
+    /// 预留去重集合的容量（`n` 取词库条目数的估计即可），省掉大词库上逐级扩容的重哈希。
+    pub fn reserve(&mut self, n: usize) {
+        self.words.reserve(n);
+    }
+
     /// 送入一个编码的全部条目（各库合在一起）。同一编码只能送一次。
     pub fn push_group(&mut self, code: &str, entries: &[GroupEntry<'a>]) {
         let kind = self.opts.kind;
+        let mut buf = std::mem::take(&mut self.buf);
+        buf.clear();
         for e in entries {
+            let class = classify(kind, e.text);
             if let Some(l) = self.layers.get_mut(e.layer) {
                 l.entries += 1;
-                match classify(kind, e.text) {
+                match class {
                     TextClass::Char => l.chars += 1,
                     TextClass::Word(_) => l.words += 1,
                     TextClass::Other => l.other += 1,
                 }
             }
+            buf.push((e.text, self.rank_key(e), e.weight, class));
         }
 
         // 组内按文字去重（跨库同 (码, 文字) 只算一条，取排序最靠前的那条），再按序位排。
-        let mut buf = std::mem::take(&mut self.buf);
-        buf.clear();
-        buf.extend(entries.iter().map(|e| (e.text, self.rank_key(e), e.weight)));
         buf.sort_by(|a, b| a.0.cmp(b.0).then(a.1.cmp(&b.1)));
         buf.dedup_by(|b, a| a.0 == b.0);
         buf.sort_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(b.0)));
@@ -350,11 +378,11 @@ impl<'a, 'o> StatsBuilder<'a, 'o> {
         let code_len = code.chars().count();
         let n = buf.len();
         self.total.entries += n as u64;
-        for (rank, &(text, _, raw_w)) in buf.iter().enumerate() {
+        for (rank, &(text, _, raw_w, class)) in buf.iter().enumerate() {
             if raw_w == 0 {
                 self.zero_weight += 1;
             }
-            match classify(kind, text) {
+            match class {
                 TextClass::Char => {
                     self.by_len[0] += 1;
                     self.code_len_char[bucket(code_len)] += 1;
@@ -373,8 +401,12 @@ impl<'a, 'o> StatsBuilder<'a, 'o> {
         }
 
         if kind == StatsKind::Pinyin {
+            self.seen_boundaries.clear();
             for e in entries {
-                self.add_syllables(code, e.boundary);
+                if e.boundary != 0 && !self.seen_boundaries.contains(&e.boundary) {
+                    self.seen_boundaries.push(e.boundary);
+                    self.add_syllables(code, e.boundary);
+                }
             }
         }
 
@@ -392,17 +424,18 @@ impl<'a, 'o> StatsBuilder<'a, 'o> {
     }
 
     fn add_syllables(&mut self, code: &str, boundary: u64) {
-        if boundary == 0 {
-            return;
-        }
-        let bytes = code.as_bytes();
-        let starts: Vec<usize> = (0..bytes.len().min(64))
-            .filter(|i| boundary & (1u64 << i) != 0)
-            .collect();
-        for (k, &s) in starts.iter().enumerate() {
-            let end = starts.get(k + 1).copied().unwrap_or(bytes.len());
+        let len = code.len().min(64);
+        let mut start = None;
+        for i in 0..=len {
+            if i < len && boundary & (1u64 << i) == 0 {
+                continue;
+            }
+            let Some(s) = start.replace(i) else { continue };
+            let end = if i == len { code.len() } else { i };
+            // 只认小写字母段：拼音词库里夹带的大写字母码（「A股」那类）不是音节。
             if let Some(syl) = code.get(s..end)
                 && !syl.is_empty()
+                && syl.bytes().all(|b| b.is_ascii_lowercase())
                 && !self.syllables.contains(syl)
             {
                 self.syllables.insert(syl.to_string());
@@ -410,7 +443,7 @@ impl<'a, 'o> StatsBuilder<'a, 'o> {
         }
     }
 
-    fn offer_top(&mut self, code: &str, buf: &[(&'a str, RankKey, i32)]) {
+    fn offer_top(&mut self, code: &str, buf: &[(&'a str, RankKey, i32, TextClass)]) {
         let top_n = self.opts.top_n;
         if top_n == 0 {
             return;
@@ -432,7 +465,7 @@ impl<'a, 'o> StatsBuilder<'a, 'o> {
             texts: buf
                 .iter()
                 .take(TOP_MEMBERS_MAX)
-                .map(|(t, _, _)| t.to_string())
+                .map(|(t, ..)| t.to_string())
                 .collect(),
         })));
     }
@@ -952,6 +985,7 @@ mod tests {
             (0, "xian", "西安", 60, 5, 0b101),
             (0, "zhong", "中", 0, 6, 0b1),
             (0, "zhong", "种", 0, 7, 0b1),
+            (0, "Agu", "A股", 1, 8, 0b11),
         ];
         let cs = vec![Charset {
             key: "s".into(),
@@ -976,7 +1010,7 @@ mod tests {
         assert_eq!(
             s.pinyin,
             Some(PinyinExtra {
-                syllables: 8,
+                syllables: 9, // a e ni hao xian xi an zhong gu：「A股」的 A 不算音节
                 zero_weight: 2
             })
         );

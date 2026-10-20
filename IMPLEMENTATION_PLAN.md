@@ -10,7 +10,7 @@
 **Goal**: 复用 `enabled_dict_specs` / `split_codetable_dicts` 的选库口径逐库加载；字频（白霜 8105+41448）、通规字集；缓存键 = 各层 digest + 字频源摘要 + 算法版本。
 **Success Criteria**: 夹具方案出精确数；缓存命中/失效；真实五笔86/白霜冒烟与原型对照（有 build_dev/data 时）。
 **Tests**: `cargo test -p wind-engine dict_stats`。
-**Status**: Not Started
+**Status**: Complete
 
 ## Stage 3: RPC `dict.systemStats`
 **Goal**: `wind-coordinator/src/dict_stats_api.rs`（混输并排两成员、用户词/临时词实时计数），webdata 分派转发。
