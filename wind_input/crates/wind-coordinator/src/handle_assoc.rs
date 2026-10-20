@@ -384,29 +384,33 @@ impl Coordinator {
         }
     }
 
-    /// 下一词学习的写入端：整体上屏 `word` 时调用。若上一次整体上屏的词与它**相邻**
-    /// （中间没有断点，见 [`Coordinator::next_word_prev`]），记一笔「上一个词 → 这个词」，
-    /// 下次上屏那个词时联想里就有它（读端 [`HistoryWords`]，与联想历史同表）。
+    /// 下一词学习的写入端：`commit_selected` 整体上屏 `word` 时调用。`prev` 是这次选词
+    /// 记账前取出的上文（见 [`Self::take_next_word_prev`]）：上一次整体上屏的词，其间有任何
+    /// 断点就是 `None`（见 [`Coordinator::next_word_prev`]）。有上文就记一笔「上一个词 →
+    /// 这个词」，下次上屏那个词时联想里就有它（读端 [`HistoryWords`]，与联想历史同表）。
     ///
     /// `already_recorded`：选的是前缀延伸类联想候选，「上文 → 整词」已由
     /// [`Self::record_assoc_pick`] 记过，这里只更新上文、不重复记。
     ///
+    /// `word` 里没有一个字母或汉字（标点联想、符号候选）就是断点：不记、也不当下一次的上文。
+    ///
     /// 不记的情形：
-    /// - 联想没开或关了历史源（不让关着联想的用户默默攒数据）；
+    /// - 不在智能联想档或关了历史源（读端只在智能联想出下一词，见
+    ///   [`wind_assoc::AssocConfig::learns_next_words`]；不让用不上的用户默默攒数据）；
     /// - 任一侧不含非 ASCII 字符（英文方案的词另有补全，进不了中文联想，记了只是垃圾）；
     /// - 后一个词以前一个词开头（「中」→「中国」）：读端会把它当前缀延伸，只补「国」，
     ///   而用户打的是两个词。
-    pub(crate) fn learn_next_word(&self, word: &str, already_recorded: bool) {
-        let prev = self
-            .next_word_prev
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .replace(word.to_string());
+    pub(crate) fn learn_next_word(&self, prev: Option<String>, word: &str, already_recorded: bool) {
+        if !word.chars().any(char::is_alphabetic) {
+            self.note_word_boundary();
+            return;
+        }
+        self.restore_next_word_prev(Some(word.to_string()));
         let (Some(prev), Some(store)) = (prev, &self.store) else {
             return;
         };
         if already_recorded
-            || !self.assoc_config().history_enabled()
+            || !self.assoc_config().learns_next_words()
             || prev.is_ascii()
             || word.is_ascii()
             || word.starts_with(prev.as_str())
@@ -418,12 +422,26 @@ impl Coordinator {
         }
     }
 
-    /// 下一词学习的断点：清掉上文（见 [`Coordinator::next_word_prev`]）。廉价、幂等。
-    pub fn note_word_boundary(&self) {
+    /// 取出下一词学习的上文（随之清空）。`commit_selected` 在 `record_commit`（会清上文）
+    /// 之前调用，见那里。
+    pub(crate) fn take_next_word_prev(&self) -> Option<String> {
+        self.next_word_prev
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+    }
+
+    /// 放回 / 设定下一词学习的上文。
+    pub(crate) fn restore_next_word_prev(&self, prev: Option<String>) {
         *self
             .next_word_prev
             .lock()
-            .unwrap_or_else(|e| e.into_inner()) = None;
+            .unwrap_or_else(|e| e.into_inner()) = prev;
+    }
+
+    /// 下一词学习的断点：清掉上文（见 [`Coordinator::next_word_prev`]）。廉价、幂等。
+    pub fn note_word_boundary(&self) {
+        self.restore_next_word_prev(None);
     }
 
     /// 退出联想态。已不在联想态时是空操作（返回 false）。

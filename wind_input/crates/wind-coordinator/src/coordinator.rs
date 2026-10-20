@@ -2000,9 +2000,9 @@ pub struct Coordinator {
     pub(crate) self_weak: std::sync::OnceLock<std::sync::Weak<Coordinator>>,
     /// 上屏历史环形缓冲（index 0 = 最近）：供命令栏 `last(n)` 取最近上屏文本。
     pub(crate) recent_commits: Mutex<std::collections::VecDeque<String>>,
-    /// 下一词学习的上文：最近一次**整体上屏**的词（简体）。两次上屏之间有任何打断
-    /// （焦点变化、宿主直通的按键、标点 / 原码上屏、取消）即清空——只记真正相邻的两个词，
-    /// 见 [`Self::learn_next_word`]。
+    /// 下一词学习的上文：最近一次**选词整体上屏**的词（简体）。默认断开：任何上屏记账
+    /// （`record_commit`）、焦点变化、宿主自行出字 / 挪光标、取消、撤销上屏都清空，只有
+    /// `commit_selected` 接得上——只记真正相邻的两个词，见 [`Self::learn_next_word`]。
     pub(crate) next_word_prev: Mutex<Option<String>>,
     /// 撤销上屏（`ime.undo_commit`）删除量：最近一次「同步落到光标前」的字符数（UTF-16 单元，
     /// 与 TSF ShiftStart / macOS NSRange 同量纲）。**刻意与 `recent_commits` 分离**——历史队列
@@ -6756,6 +6756,8 @@ impl Coordinator {
             let on = want.unwrap_or(!cur);
             let name = "emoji 候选".to_string();
             if on == cur {
+        // 删掉的正是下一词学习的上文
+        self.note_word_boundary();
                 return self.notify_feature_unchanged(target, &name, on);
             }
             Config::set_user_value(&["input", "emoji", "enabled"], toml::Value::Boolean(on))?;
@@ -9687,10 +9689,9 @@ impl Coordinator {
         if text.is_empty() {
             return;
         }
-        // 候选以外的上屏（标点、原码、临时英文…）都是下一词学习的断点
-        if source != CommitSource::Candidate {
-            self.note_word_boundary();
-        }
+        // 下一词学习**默认断开**：任何上屏（标点、原码、顶码、满码自动上屏…）都清上文。
+        // 只有 `commit_selected` 记账前先暂存上文、记账后再学习，见那里。
+        self.note_word_boundary();
         if let Some(log) = self
             .debug_stat_events
             .lock()
@@ -9756,6 +9757,17 @@ impl Coordinator {
         let has = |k: &str| changed.iter().any(|c| c == k);
         if has("phrases") {
             self.rebuild_phrases();
+            // 不进统计但同样动了宿主正文、又没经 `record_commit` 的出口：下一词学习的断点
+            KeyAction::ReplaceBackward { .. }
+            | KeyAction::HoldComposition { .. }
+            | KeyAction::CommitReplacingHeld { .. }
+            | KeyAction::CommitAndHoldComposition { .. }
+            | KeyAction::CommitThenDeferComposition { .. }
+            | KeyAction::MoveCursorRight { .. }
+            | KeyAction::DeletePair => {
+                self.note_word_boundary();
+                return;
+            }
         }
         if has("quick_format") {
             self.reload_quick_adjust();

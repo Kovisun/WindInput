@@ -12,11 +12,12 @@ use wind_ipc::protocol::TOGGLE_PASSTHROUGH_KEY;
 impl Coordinator {
     /// 光标前最后一段已不是我们上屏的那段（宿主自己出了字、重放了键，或用户挪了光标）：撤销上屏
     /// 计数退化为 1（否则「你好」后打个 0 再撤销删的是「好0」），草稿滑窗断流（否则「你」「0」
-    /// 「好」连打会登记「你好」）。
+    /// 「好」连打会登记「你好」），下一词学习断开（前后两次上屏已不相邻）。
     pub(crate) fn note_host_wrote_text(&self, reason: &str) {
         self.last_commit_len
             .store(1, std::sync::atomic::Ordering::Relaxed);
         self.terminate_auto_phrase(reason);
+        self.note_word_boundary();
     }
 
     /// 仍挂在组合里的智能符号（HoldComposition）。超出时限的视为没有：C++ 定时器到点已自行提交，

@@ -173,10 +173,13 @@ count +1（`from_assoc` 不走造词 / 临时词记账），它在其他上文�
 **下一词（2026-10，移动端 v0.3 起用）。** 同一张表再记一类行：用户**相邻两次整体上屏**的词
 「我们」→「一直」（上文 = 前一个词，整词 = 后一个词，二者无前缀关系）。写入端
 `Coordinator::learn_next_word`，接在 `commit_selected` 的整体上屏分支：上一个整体上屏的词存在
-`next_word_prev`，两次上屏之间有任何断点就清空——非候选上屏（标点 / 原码 / 临时英文…，在
-`record_commit` 里按来源判）、取消（`cancel_session`）、焦点得失、移动端交还宿主的按键
-（`wind-mobile` 的 `key_down` 直通分支）。不记：联想关着或历史源关着；任一侧纯 ASCII；后词以前词
-开头（读端会误当前缀延伸只补后半）。选前缀延伸类联想候选时那一笔已由 `record_assoc_pick` 记过，
+`next_word_prev`，**默认断开**：任何上屏记账（`record_commit`，含顶码 / 带高亮顶屏）、满码自动
+上屏（`commit_candidate`）、顶层兜底统计里没记账的写屏动作、取消（`cancel_session`）、撤销上屏、
+焦点得失、宿主自行出字 / 重放 / 挪光标（`note_host_wrote_text`）、移动端交还宿主的按键
+（`wind-mobile` 的 `key_down` 直通分支）都清空；只有 `commit_selected` 在记账前取出上文、整体
+上屏时交给 `learn_next_word`（分步选的前段放回去）。选中的词不含任何字母或汉字（标点联想、
+符号候选）也是断点。不记：不在智能联想档或历史源关着（与读端同口径，
+`AssocConfig::learns_next_words`）；任一侧纯 ASCII；后词以前词开头（读端会误当前缀延伸只补后半）。选前缀延伸类联想候选时那一笔已由 `record_assoc_pick` 记过，
 只更新上文。读端 `HistoryWords` 对无前缀关系的行整词上屏（`commit = None`），且**只在智能联想档
 出**——词语联想档的契约是「只出上文的延长」。用例 `tests/assoc_next_word.rs`。
 

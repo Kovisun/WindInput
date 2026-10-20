@@ -3211,6 +3211,9 @@ impl Coordinator {
         source: CandidateSource,
         freq_code: &str,
     ) -> String {
+        // 满码 / 唯一候选自动上屏不经选词：下一词学习的断点。不能只靠顶层兜底统计
+        // （`record_input_stats`）去清——移动端直调 `handle_key_event`，不走那道兜底。
+        self.note_word_boundary();
         self.record_selection_cased_in(None, freq_code, freq_text, text, source);
         let mut out = match s2t_override {
             Some(t) => t.to_string(),
@@ -3639,6 +3642,9 @@ impl Coordinator {
         if !from_assoc {
             self.record_selection_cand(&self.main_freq_code(&state.input_buffer, cand), cand);
         }
+        // 下一词学习的上文：`record_commit` 一律清上文（默认断开），选词是唯一接得上的
+        // 出口，故先取出来——分步选的前段放回去，整体上屏交给 `learn_next_word`。
+        let next_word_prev = self.take_next_word_prev();
         // 输入统计：每次选词记一段（分段逐字选各段各记一次，不重复整串）；
         // 在 partial 分支之前，两分支都经此处一次。
         self.record_commit(
@@ -3649,6 +3655,7 @@ impl Coordinator {
         );
         let raw_code = Self::raw_consumed_code(&state.input_buffer, consumed, partial);
         if partial {
+            self.restore_next_word_prev(next_word_prev);
             state.committed_segs.push(CommittedSeg {
                 raw_code,
                 code,
@@ -3760,6 +3767,7 @@ impl Coordinator {
             // 下一词学习：「上一个整体上屏的词 → 这个词」。选联想时上屏的整词是 `cand.text`
             // （`out` 只是补出的那截），否则是简体域的完整文本（理由同下方上文的取法）。
             self.learn_next_word(
+                next_word_prev,
                 if from_assoc {
                     &cand.text
                 } else {

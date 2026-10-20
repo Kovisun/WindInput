@@ -282,16 +282,16 @@ impl AssocConfig {
         }
     }
 
+    /// 是否学用户的「下一词」（写入端据此决定记不记）。与读端同口径：下一词只在智能联想档出
+    /// （词语联想只出上文的延长），且要历史源开着——用不上的用户不默默攒数据。
+    pub fn learns_next_words(&self) -> bool {
+        self.kind == AssocKind::Smart && self.source_enabled(AssocSource::History)
+    }
+
     /// 该源是否启用：**先过档位、再过开关**。
     ///
     /// 档位是硬性的（词语联想里标点源根本没有语义），用户开关只在档位放行的源上生效。
     /// 两者顺序反过来会让「词语联想 + punct=true」出标点——那正是用户报的问题。
-    /// 历史源是否在用（档位放行且开关开着）。写入端据此决定要不要学习，
-    /// 关着联想的用户不默默攒数据。
-    pub fn history_enabled(&self) -> bool {
-        self.source_enabled(AssocSource::History)
-    }
-
     fn source_enabled(&self, s: AssocSource) -> bool {
         if !self.kind.allows(s) {
             return false;
@@ -613,6 +613,21 @@ mod tests {
             ["中国", "，"],
             "智能档两个源都出，且 Prefix 优先级更高"
         );
+    }
+
+    /// 下一词只在智能联想档读出（词语联想只出上文的延长），写入端须同口径：
+    /// 词语联想档开着历史源也不学，否则只写不读、白攒数据。
+    #[test]
+    fn learns_next_words_only_in_smart_with_history() {
+        let with = |kind, history| AssocConfig {
+            kind,
+            history,
+            ..Default::default()
+        };
+        assert!(with(AssocKind::Smart, true).learns_next_words());
+        assert!(!with(AssocKind::Smart, false).learns_next_words());
+        assert!(!with(AssocKind::Word, true).learns_next_words());
+        assert!(!with(AssocKind::Off, true).learns_next_words());
     }
 
     #[test]
