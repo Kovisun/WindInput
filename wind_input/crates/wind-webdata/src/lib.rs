@@ -352,14 +352,6 @@ fn parse_sort<'a>(params: &'a Value, valid_fields: &[&str]) -> Option<(&'a str, 
     Some((by, desc))
 }
 
-/// 本地今天日期 "YYYY-MM-DD"（统计摘要的参照点）。
-fn today_str() -> String {
-    chrono::Local::now()
-        .date_naive()
-        .format("%Y-%m-%d")
-        .to_string()
-}
-
 /// `system.memoryStats` 的回包：进程私有内存 + 已加载方案 + 各懒建结构的自报大小。
 ///
 /// 数据源与 `Coordinator::debug_memory_report` 相同（[`wind_engine::EngineManager::memory_report`]
@@ -4011,115 +4003,30 @@ pub trait WebDataRpc: WebDataHost {
     }
 
     fn web_stats_summary(&self) -> anyhow::Result<Value> {
-        use chrono::Datelike;
         let (collector, store) = match (self.stat_collector(), self.user_store()) {
             (Some(c), Some(s)) => (c, s),
             _ => return Ok(Self::empty_stats_summary()),
         };
-        // 当日数据来自采集器内存（始终最新、完整）；历史从 store 读。
-        let today_stat = collector.get_today_stat();
-        let meta = collector.get_meta();
-        let today = today_str();
-        let today_total = today_stat.total();
-
-        // 活跃天数（DB 天数；今天有数据但未 flush 时 +1）+ 日均。
-        let all = store
-            .daily_stats("0000-01-01", "9999-12-31")
-            .unwrap_or_default();
-        let mut active_days = all.iter().filter(|(_, r)| r.total() > 0).count();
-        let today_in_db = all.iter().any(|(d, _)| d == &today);
-        if today_total > 0 && !today_in_db {
-            active_days += 1;
-        }
-        let daily_avg = if active_days > 0 {
-            meta.total_chars / active_days as u64
-        } else {
-            0
-        };
-
-        // 周（周日起）/ 月统计（YYYY-MM-DD 字典序），今天用内存值。
-        let now = chrono::Local::now().date_naive();
-        let week_start = now - chrono::Duration::days(now.weekday().num_days_from_sunday() as i64);
-        let month_start = now.with_day(1).unwrap_or(now);
-        let week_chars: u64 = Self::daily_with_today_mem(
-            store,
-            &week_start.format("%Y-%m-%d").to_string(),
-            &today,
-            &today_stat,
-        )
-        .iter()
-        .map(|(_, r)| r.total() as u64)
-        .sum();
-        let month_chars: u64 = Self::daily_with_today_mem(
-            store,
-            &month_start.format("%Y-%m-%d").to_string(),
-            &today,
-            &today_stat,
-        )
-        .iter()
-        .map(|(_, r)| r.total() as u64)
-        .sum();
-
-        // 近 90 天：最高日 / 平均码长 / 首选率 / 平均速度。
-        let recent_from = (now - chrono::Duration::days(90))
-            .format("%Y-%m-%d")
-            .to_string();
-        let recent = Self::daily_with_today_mem(store, &recent_from, &today, &today_stat);
-        let (mut max_day_chars, mut max_day_date) = (0u32, String::new());
-        let (mut cl_sum, mut cl_cnt, mut first_sel, mut cand_sel) = (0u64, 0u64, 0u64, 0u64);
-        let (mut sp_chars, mut sp_millis) = (0u64, 0u64);
-        for (d, r) in &recent {
-            let t = r.total();
-            if t > max_day_chars {
-                max_day_chars = t;
-                max_day_date = d.clone();
-            }
-            cl_sum += r.code_len_sum as u64;
-            cl_cnt += r.code_len_count as u64;
-            first_sel += r.cand_pos_dist[0] as u64;
-            cand_sel += r.cand_pos_dist.iter().map(|&v| v as u64).sum::<u64>();
-            // 区间速度：两个分量分别累加后再除一次。逐日算速度再平均是错的——
-            // 那会给只打了几十字的日子和整天码字的日子同样的权重。
-            let (c, ms) = r.speed_parts();
-            sp_chars += c as u64;
-            sp_millis += ms;
-        }
-        let avg_code_len = if cl_cnt > 0 {
-            cl_sum as f64 / cl_cnt as f64
-        } else {
-            0.0
-        };
-        let first_select_rate = if cand_sel > 0 {
-            first_sel as f64 / cand_sel as f64
-        } else {
-            0.0
-        };
-        // 系数取自采集器而非配置：`max_speed` 是采集器在 flush 时算好落库的成品值，
-        // 两处若各读各的，热改配置后「历史最快」与「今日速度」会差出一个恒定倍数。
-        let factor = collector.speed_factor();
-        let (today_sp_chars, today_sp_ms) = today_stat.speed_parts();
-        let today_speed =
-            wind_store::stats::speed_per_minute_ms(today_sp_chars as u64, today_sp_ms, factor);
-        let overall_speed = wind_store::stats::speed_per_minute_ms(sp_chars, sp_millis, factor);
-
+        // 算法在 wind-store（与移动端共用一份），这里只管序列化
+        let s = wind_store::stats_report::summary(store, collector);
         Ok(json!({
-            "today_chars": today_total,
-            "today_chinese": today_stat.chinese,
-            "today_english": today_stat.english,
-            "total_chars": meta.total_chars,
-            "active_days": active_days,
-            "daily_avg": daily_avg,
-            "streak_current": meta.streak_current,
-            "streak_max": meta.streak_max,
-            "week_chars": week_chars,
-            "month_chars": month_chars,
-            "max_day_chars": max_day_chars,
-            "max_day_date": max_day_date,
-            "avg_code_len": avg_code_len,
-            "first_select_rate": first_select_rate,
-            "today_speed": today_speed,
-            "overall_speed": overall_speed,
-            "max_speed": meta.max_speed,
+            "today_chars": s.today_chars,
+            "today_chinese": s.today_chinese,
+            "today_english": s.today_english,
+            "total_chars": s.total_chars,
+            "active_days": s.active_days,
+            "daily_avg": s.daily_avg,
+            "streak_current": s.streak_current,
+            "streak_max": s.streak_max,
+            "week_chars": s.week_chars,
+            "month_chars": s.month_chars,
+            "max_day_chars": s.max_day_chars,
+            "max_day_date": s.max_day_date,
+            "avg_code_len": s.avg_code_len,
+            "first_select_rate": s.first_select_rate,
+            "today_speed": s.today_speed,
+            "overall_speed": s.overall_speed,
+            "max_speed": s.max_speed,
         }))
     }
 
@@ -4130,41 +4037,17 @@ pub trait WebDataRpc: WebDataHost {
             Some(s) => s,
             None => return Ok(json!([])),
         };
-        // 真实数据按日期索引；今天用采集器内存最新值覆盖（DB 可能未 flush）。
-        let mut by_date: std::collections::HashMap<String, wind_store::stats::DailyStats> =
-            store.daily_stats(&from, &to)?.into_iter().collect();
-        let today = today_str();
-        if let Some(c) = self.stat_collector() {
-            let ts = c.get_today_stat();
-            if today.as_str() >= from.as_str() && today.as_str() <= to.as_str() && ts.total() > 0 {
-                by_date.insert(today.clone(), ts);
-            }
-        }
         // 区间内连续日期补零值，输出完整 DailyStatItem（便于前端绘图）。
-        let mut out = Vec::new();
-        if let (Ok(f), Ok(t)) = (
-            chrono::NaiveDate::parse_from_str(&from, "%Y-%m-%d"),
-            chrono::NaiveDate::parse_from_str(&to, "%Y-%m-%d"),
-        ) {
-            let mut cur = f;
-            while cur <= t {
-                let key = cur.format("%Y-%m-%d").to_string();
-                let rec = by_date.get(&key).cloned().unwrap_or_default();
-                out.push(Self::daily_item_json(&key, &rec));
-                cur += chrono::Duration::days(1);
-            }
-        }
-        Ok(json!(out))
+        let days = wind_store::stats_report::daily_range(store, self.stat_collector(), &from, &to)?;
+        Ok(json!(
+            days.iter()
+                .map(|(d, r)| Self::daily_item_json(d, r))
+                .collect::<Vec<_>>()
+        ))
     }
 
     fn web_stats_clear(&self) -> anyhow::Result<Value> {
-        if let Some(store) = self.user_store() {
-            store.clear_stats()?;
-        }
-        // 同步清空采集器内存（今日 + 元数据），否则 summary 仍读到旧内存值。
-        if let Some(c) = self.stat_collector() {
-            c.reset();
-        }
+        wind_store::stats_report::clear(self.user_store().map(|s| &**s), self.stat_collector())?;
         Ok(json!({ "ok": true }))
     }
 
@@ -4193,27 +4076,6 @@ pub trait WebDataRpc: WebDataHost {
             store.recalculate_stats_meta(1.0)?;
         }
         Ok(json!({ "pruned": n }))
-    }
-
-    /// 取 [from, today] 的每日统计，今天用采集器内存值替换/追加（对齐 Go GetSummary 用内存今天）。
-    fn daily_with_today_mem(
-        store: &wind_store::Store,
-        from: &str,
-        today: &str,
-        today_stat: &wind_store::stats::DailyStats,
-    ) -> Vec<(String, wind_store::stats::DailyStats)> {
-        let mut days = store.daily_stats(from, today).unwrap_or_default();
-        let mut has = false;
-        for (d, r) in days.iter_mut() {
-            if d == today {
-                *r = today_stat.clone();
-                has = true;
-            }
-        }
-        if !has && today >= from && today_stat.total() > 0 {
-            days.push((today.to_string(), today_stat.clone()));
-        }
-        days
     }
 
     /// 组装前端 DailyStatItem JSON（紧凑字段名，含按方案 bs / 按来源 src）。
@@ -7109,7 +6971,7 @@ outside: rare
     #[test]
     fn stats_summary_daily_shape() {
         let c = coord("stats");
-        let today = today_str();
+        let today = wind_store::stats_report::today_str();
         // 采集器记录今日：中文 2（码长 4，首选）。
         c.debug_record_commit("你好", 4, 0, wind_store::stats::CommitSource::Candidate);
 
@@ -9249,7 +9111,7 @@ short_code_yield_level = 2
         let c = coord("stats_daily_rich");
         c.debug_record_commit("你好", 4, 0, CommitSource::Candidate);
         c.stat_collector().unwrap().flush(); // 落库才能被 daily 区间读到
-        let today = today_str();
+        let today = wind_store::stats_report::today_str();
         let r = c
             .web_data_rpc("stats.daily", &json!({ "from": today, "to": today }))
             .unwrap();

@@ -72,6 +72,7 @@ pub use wind_host::{EditOp, KeyOutcome, TimingHint};
 /// [`MAX_WINDOW`] 要跟着透出而不是让宿主自己记一份：宿主传的 `limit` 超过它会被
 /// 核心静默截断，宿主若按自记的数字判断「还有没有更多」，就会在边界上反复拉空窗口。
 pub use wind_coordinator::candidate_pull::{CandidateWindow, MAX_WINDOW};
+pub use wind_store::stats_report::StatsSummary;
 
 /// 候选帧：编码栏与候选栏一次渲染所需的全部数据。
 ///
@@ -151,6 +152,16 @@ pub struct LayoutEntry {
     /// 显示名（布局文件 `[meta].name`），如「小鹤双拼」
     pub name: String,
     pub active: bool,
+}
+
+/// 某一天的输入字数（设置页「统计」的每日图）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct DailyTotal {
+    /// `YYYY-MM-DD`
+    pub date: String,
+    pub total: u32,
+    pub chinese: u32,
+    pub english: u32,
 }
 
 /// 宿主可下达的引擎命令。
@@ -497,6 +508,51 @@ impl MobileCore {
     /// [`MobileCommand::ReloadConfig`]——分开是为了让宿主把连改若干项合成一次重载。
     pub fn config_set(&self, key: &str, value: config_api::ConfigValue) -> Result<(), String> {
         config_api::set(key, value)
+    }
+
+    // ── 输入统计（设置页「统计」）────────────────────────────────────
+    //
+    // 算法与桌面设置页同一份（`wind_store::stats_report`），本层只做取句柄与形状转换。
+
+    /// 概览汇总。没有用户库（只读降级、无库的测试壳）时为 `None`。
+    pub fn stats_summary(&self) -> Option<StatsSummary> {
+        use wind_coordinator::web_host::WebDataHost;
+        let store = self.coord.user_store()?;
+        let collector = self.coord.stat_collector()?;
+        Some(wind_store::stats_report::summary(store, collector))
+    }
+
+    /// `[from, to]`（`YYYY-MM-DD`，含首尾）每一天的字数，缺的日子补零，今天取内存最新值。
+    pub fn stats_daily(&self, from: &str, to: &str) -> Vec<DailyTotal> {
+        use wind_coordinator::web_host::WebDataHost;
+        let Some(store) = self.coord.user_store() else {
+            return Vec::new();
+        };
+        match wind_store::stats_report::daily_range(store, self.coord.stat_collector(), from, to) {
+            Ok(days) => days
+                .into_iter()
+                .map(|(date, r)| DailyTotal {
+                    total: r.total(),
+                    chinese: r.chinese,
+                    english: r.english,
+                    date,
+                })
+                .collect(),
+            Err(e) => {
+                tracing::warn!("读每日统计失败: {e}");
+                Vec::new()
+            }
+        }
+    }
+
+    /// 清空全部输入统计（历史 + 今日内存）。
+    pub fn stats_clear(&self) -> Result<(), String> {
+        use wind_coordinator::web_host::WebDataHost;
+        wind_store::stats_report::clear(
+            self.coord.user_store().map(|s| &**s),
+            self.coord.stat_collector(),
+        )
+        .map_err(|e| e.to_string())
     }
 
     /// 可选双拼布局。清单由核心扫描目录得出，**宿主不要硬编码**——

@@ -2369,6 +2369,7 @@ dependencies = [
  "wind-host",
  "wind-ipc",
  "wind-keys",
+ "wind-store",
  "wind-ui-types",
 ]
 
