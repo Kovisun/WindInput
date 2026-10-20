@@ -349,6 +349,8 @@ impl MobileCore {
 
         // 自绘候选条，不提供光标坐标——关掉桌面用的首显闸门等待
         coord.set_caret_independent(true);
+        // 强制改写项在每次重载配置后也要再套上（设置页每改一项就重载一次）
+        coord.set_config_overlay(config_api::apply_mobile_overrides);
         // ⚠ 这里**保持开启**启动预热（`set_eager_prewarm(true)` 是默认值）。
         //
         // 曾经关掉过，理由是「手机上编译所有方案要几秒 CPU、会撞上用户打字」——那个

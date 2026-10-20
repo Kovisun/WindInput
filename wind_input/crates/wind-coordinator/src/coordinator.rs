@@ -1602,6 +1602,9 @@ pub struct Coordinator {
     /// 合成坐标去骗过闸门（Android 一度就是这么做的，`height` 写 0 还会被判为「宿主
     /// 尚未 reflow」整帧丢弃，候选一次都不下发）。
     caret_independent: std::sync::atomic::AtomicBool,
+    /// 宿主对配置的**强制改写**（见 [`Self::set_config_overlay`]），每次从磁盘重载配置后
+    /// 重新套上。只设一次（构造后），故用 `OnceLock` 而不加锁。
+    config_overlay: std::sync::OnceLock<fn(&mut Config)>,
     /// 暂停学习（隐私 / 无痕输入）：置位期间上屏照常、候选照常，但**不把这次输入写进任何
     /// 用户数据**（词频、自动造词 / 草稿、联想历史与下一词、英文造词、输入统计、快捷输入 /
     /// 网址 / 邮箱历史、上屏历史）。见 [`Coordinator::set_learning_suspended`]。
@@ -2470,6 +2473,17 @@ impl Coordinator {
             .store(value, std::sync::atomic::Ordering::Relaxed);
     }
 
+    /// 登记宿主对配置的强制改写（移动端：编码区归候选区、联想态空格不选词…），
+    /// [`Self::reload_user_config`] 从磁盘重读后会再套一遍。
+    ///
+    /// 宿主在构造前已经改写过一次传进来的 `Config`，但那只管到第一次重载：设置页每改一项
+    /// 就发一次重载，`Config::load` 读回的是盘上的值，强制项随之悄悄回到桌面默认——
+    /// 表现为「改了任意一个设置之后，联想态空格又开始选词」，而且与改的那一项毫无关系。
+    /// 只能设一次：第二次调用被忽略（返回 false），防止两处各登记一份互相覆盖。
+    pub fn set_config_overlay(&self, overlay: fn(&mut Config)) -> bool {
+        self.config_overlay.set(overlay).is_ok()
+    }
+
     /// 暂停 / 恢复学习（隐私 / 无痕输入，见字段 `learning_suspended`）。
     ///
     /// 判断收口在各条**学习入口**（`record_selection_cased_in`、`learn_phrase_on_commit_in`、
@@ -3065,6 +3079,7 @@ impl Coordinator {
             pair_tracker: Mutex::new(wind_transform::pair_tracker::PairTracker::new()),
             last_valid_caret: Mutex::new((0, 0, 0)),
             caret_independent: std::sync::atomic::AtomicBool::new(false),
+            config_overlay: std::sync::OnceLock::new(),
             learning_suspended: std::sync::atomic::AtomicBool::new(false),
             host_caret_trusted: std::sync::atomic::AtomicBool::new(false),
             host_no_inline_preedit: std::sync::atomic::AtomicBool::new(false),
@@ -4950,7 +4965,10 @@ impl Coordinator {
 
     pub fn reload_user_config(&self) -> bool {
         match Config::load(Config::data_dir().as_deref()) {
-            Ok(cfg) => {
+            Ok(mut cfg) => {
+                if let Some(overlay) = self.config_overlay.get() {
+                    overlay(&mut cfg);
+                }
                 // 方案相关项（活跃/可用方案、全局上屏策略）是否变化：变了才热重建引擎，
                 // 避免每次保存都丢词典缓存（拼音合并/unigram 重建开销大）。
                 let old = self.rt();
@@ -11984,6 +12002,25 @@ mod caret_compat_tests {
     /// 造一个开了 `show_on_focus` 的协调器，并**保留 UI 通道接收端**——「气泡有没有真的发出去」
     /// 只能从 `ui_tx` 上观察。用 debug 方法「按同样规则再算一遍」是假测试：决策函数写对但
     /// 生产路径没接上时，那种测试照样全绿。
+    /// 宿主登记的配置改写在**从磁盘重载**之后仍然生效（移动端设置页每改一项就重载一次，
+    /// 改写若只在构造时套一次，之后就悄悄回到桌面默认）。用一个盘上不可能出现的哨兵值，
+    /// 不受本机用户配置影响；对照组证明「不登记就没有」。
+    #[test]
+    fn config_overlay_survives_reload() {
+        fn sentinel(cfg: &mut Config) {
+            cfg.input.association.max_count = 4242;
+        }
+        let (c, _rx) = Coordinator::new_headless_with_ui(Config::default(), None);
+        assert!(c.set_config_overlay(sentinel));
+        assert!(!c.set_config_overlay(sentinel), "只能登记一次");
+        c.reload_user_config();
+        assert_eq!(c.rt().config.input.association.max_count, 4242);
+
+        let (plain, _rx) = Coordinator::new_headless_with_ui(Config::default(), None);
+        plain.reload_user_config();
+        assert_ne!(plain.rt().config.input.association.max_count, 4242);
+    }
+
     fn coord_focus_tip(
         show_on_focus: bool,
         position_mode: &str,
