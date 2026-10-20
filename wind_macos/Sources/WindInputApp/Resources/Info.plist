@@ -97,6 +97,11 @@
     <key>tsInputMethodIconFileKey</key>
     <string>menu_icon.pdf</string>
 
+    <!-- 声明支持「大写锁定键切换 ABC」: 系统设置的该勾选项只在已启用输入源中有人声明此键时
+         才出现 (未公开键, 同 Squirrel). 切换由系统完成, 不经本进程按键处理. -->
+    <key>TICapsLockLanguageSwitchCapable</key>
+    <true/>
+
     <!--
         ComponentInputModeDict (sub-mode) 结构: 系统设置 UI 只显示带 mode 的 IME
         (Apple 自带 + 主流第三方都是 ModeEnabled+Mode, 不显示 WithoutModes 类型).
