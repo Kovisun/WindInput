@@ -2278,6 +2278,9 @@ mod tests {
                 "量子纠缠",
             ),
             ("dsclipfb", Clipboard, &["你", "好"][..], "", false, "你好"),
+            // 两边都空：停在优先的那一侧，显示该侧空态
+            ("dsrecentnone", Recent, &[][..], "", false, ""),
+            ("dsclipnone", Clipboard, &[][..], "", true, ""),
         ];
         for (tag, source, recent, clip, want_clip, want_word) in cases {
             let mut cfg = Config::default();
