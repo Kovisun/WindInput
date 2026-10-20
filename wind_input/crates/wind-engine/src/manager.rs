@@ -3859,14 +3859,32 @@ impl EngineManager {
                 if schema_id == ENGLISH_SCHEMA {
                     return true;
                 }
-                Self::read_schema(id, self.data_dir.as_deref(), self.override_dir.as_deref())
-                    .map(|s| {
-                        s.engine.mixed.primary_schema == schema_id
-                            || s.engine.mixed.secondary_schema == schema_id
-                    })
-                    .unwrap_or(false)
+                // 沿 primary / secondary 传递：混输把另一个混输当成员时，叶子成员也被它捧着。
+                self.mixed_members_closure(id)
+                    .iter()
+                    .any(|m| m == schema_id)
             })
             .collect()
+    }
+
+    /// 混输方案沿 primary / secondary **传递**可达的全部成员（不含自身）；非混输为空。
+    /// 已访问集合防环（成环的方案建不起来，但这里读的是方案文件，环照样会出现）。
+    fn mixed_members_closure(&self, schema_id: &str) -> Vec<String> {
+        let Some(data_dir) = self.data_dir.as_deref() else {
+            return Vec::new();
+        };
+        let mut seen = vec![schema_id.to_string()];
+        let mut stack = vec![schema_id.to_string()];
+        while let Some(id) = stack.pop() {
+            for m in Self::mixed_edges_of(&id, data_dir, self.override_dir.as_deref()) {
+                if !seen.contains(&m) {
+                    seen.push(m.clone());
+                    stack.push(m);
+                }
+            }
+        }
+        seen.remove(0);
+        seen
     }
 
     /// 运行时启停某方案的扩展词库。**禁用与启用不对称**（t107 之后）：
@@ -4088,26 +4106,12 @@ impl EngineManager {
             .unwrap_or_else(|e| e.into_inner()) = None;
     }
 
-    /// 混输方案的成员（primary / secondary）；非混输为空。
+    /// 混输方案的成员（primary / secondary，传递闭包）；非混输为空。
     fn user_dict_mixed_members(&self, schema_id: &str) -> Vec<String> {
         if self.schema_engine_type(schema_id).as_deref() != Some("mixed") {
             return Vec::new();
         }
-        Self::read_schema(
-            schema_id,
-            self.data_dir.as_deref(),
-            self.override_dir.as_deref(),
-        )
-        .map(|s| {
-            [
-                s.engine.mixed.primary_schema,
-                s.engine.mixed.secondary_schema,
-            ]
-            .into_iter()
-            .filter(|m| !m.is_empty() && m != schema_id)
-            .collect()
-        })
-        .unwrap_or_default()
+        self.mixed_members_closure(schema_id)
     }
 
     /// 删除某方案 override 层并使其引擎缓存失效。返回是否删除了文件。
@@ -11739,5 +11743,92 @@ input_chars = \"a-z;\"
             EngineManager::disabled_dict_layers(&schema, Path::new("/nonexistent"), Vec::new())
                 .is_none()
         );
+    }
+
+    /// 混输代际测试的自造方案：码表 `{t}c`（单库，`a` → `word`）、混输 `{t}b`（primary = `{t}c`）、
+    /// 混输 `{t}a`（primary = `{t}b`），以及一份码表类型的 `english`（词库目录带标签，
+    /// 不与真英文方案的缓存撞路径）。返回 (data 目录, override 目录)。
+    fn mixgen_fixture(t: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        let root = std::env::temp_dir().join(format!("wind_eng_mixgen_{}_{t}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let schemas = root.join("data/schemas");
+        for (id, word) in [(format!("{t}c"), "甲"), (format!("{t}en"), "乙")] {
+            std::fs::create_dir_all(schemas.join(&id)).unwrap();
+            std::fs::write(
+                schemas.join(format!("{id}/{id}.dict.yaml")),
+                format!("---\nname: {id}\nversion: \"1\"\n...\n{word}\ta\n"),
+            )
+            .unwrap();
+        }
+        let codetable = |id: &str, dict: &str| {
+            format!(
+                "[schema]\nid = \"{id}\"\nname = \"{id}\"\n[engine]\ntype = \"codetable\"\n\
+                 [engine.codetable]\nmax_code_length = 4\n\
+                 [[dictionaries]]\nid = \"main\"\npath = \"{dict}/{dict}.dict.yaml\"\ndefault = true\n"
+            )
+        };
+        let mixed = |id: &str, primary: &str| {
+            format!(
+                "[schema]\nid = \"{id}\"\nname = \"{id}\"\n[engine]\ntype = \"mixed\"\n\
+                 [engine.mixed]\nprimary_schema = \"{primary}\"\nsecondary_schema = \"\"\n"
+            )
+        };
+        let files = [
+            (
+                format!("{t}c"),
+                codetable(&format!("{t}c"), &format!("{t}c")),
+            ),
+            (format!("{t}b"), mixed(&format!("{t}b"), &format!("{t}c"))),
+            (format!("{t}a"), mixed(&format!("{t}a"), &format!("{t}b"))),
+            (
+                ENGLISH_SCHEMA.to_string(),
+                codetable(ENGLISH_SCHEMA, &format!("{t}en")),
+            ),
+        ];
+        for (id, body) in files {
+            std::fs::write(schemas.join(format!("{id}.schema.toml")), body).unwrap();
+        }
+        (root.join("data"), root.join("ov"))
+    }
+
+    fn mixgen_manager(data: &Path, ov: &Path, active: &str, available: &[&str]) -> EngineManager {
+        let mut cfg = Config::default();
+        cfg.schema.active = active.into();
+        cfg.schema.available = available.iter().map(|s| s.to_string()).collect();
+        cfg.schema.mix.enable_english = false;
+        cfg.input.temp_pinyin.enabled = false;
+        cfg.input.temp_english.show_candidates = false;
+        EngineManager::with_store_override(&cfg, Some(data), None, Some(ov.to_path_buf()))
+    }
+
+    /// 扇出要沿 primary / secondary **传递**：A 的 primary 是混输 B、B 的 primary 是码表 C，
+    /// 改 C 之后 A 手里捧着的是旧 C，必须连带摘掉。
+    #[test]
+    fn invalidating_leaf_member_drops_mixed_two_levels_up() {
+        let (data, ov) = mixgen_fixture("fan");
+        let mgr = mixgen_manager(&data, &ov, "fana", &["fana", "fanb", "fanc"]);
+        assert!(mgr.is_loaded("fana"), "夹具：混输 A 应能建起来");
+        let v: toml::Value = "[engine.codetable]\nmax_code_length = 3\n".parse().unwrap();
+        mgr.write_schema_override("fanc", &v).unwrap();
+        assert!(
+            !mgr.is_loaded("fana"),
+            "C 是 A 的间接成员，改 C 必须连带失效 A"
+        );
+        let _ = std::fs::remove_dir_all(data.parent().unwrap());
+    }
+
+    /// 用户分库扇出同理：可用列表里只有 A 时，C 的分库变了也要沿 A → B → C 找到 C 并失效 A。
+    #[test]
+    fn user_dict_invalidation_reaches_indirect_member() {
+        let (data, ov) = mixgen_fixture("udm");
+        let mgr = mixgen_manager(&data, &ov, "udma", &["udma"]);
+        assert!(mgr.is_loaded("udma"), "夹具：混输 A 应能建起来");
+        assert_eq!(mgr.data_schema_id("udmc"), "udmc");
+        mgr.invalidate_user_dicts("udmc");
+        assert!(
+            !mgr.is_loaded("udma"),
+            "C 的分库变了，间接引用它的混输 A 必须失效"
+        );
+        let _ = std::fs::remove_dir_all(data.parent().unwrap());
     }
 }
