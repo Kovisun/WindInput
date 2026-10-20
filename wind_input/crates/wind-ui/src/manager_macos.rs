@@ -391,6 +391,7 @@ impl Forwarder {
                 hover,
                 page,
                 total_pages,
+                grid,
                 caret_x,
                 caret_y,
                 caret_height,
@@ -415,6 +416,7 @@ impl Forwarder {
                 } else {
                     preedit
                 };
+                self.win.set_grid(grid);
                 self.win.update(
                     &preedit,
                     preedit_caret,
@@ -1156,6 +1158,7 @@ mod tests {
             hover: -1,
             page: 1,
             total_pages: 1,
+            grid: None,
             caret_x: 100,
             caret_y: 200,
             caret_height: 20,
@@ -1202,6 +1205,7 @@ mod tests {
             hover: -1,
             page: 1,
             total_pages: 1,
+            grid: None,
             caret_x: 100,
             caret_y: 200,
             caret_height: 20,
@@ -1292,6 +1296,7 @@ mod tests {
             hover: -1,
             page: 1,
             total_pages: 1,
+            grid: None,
             caret_x: 100,
             caret_y: 200,
             caret_height: 20,
@@ -1419,6 +1424,7 @@ mod tests {
             hover: -1,
             page: 1,
             total_pages: 1,
+            grid: None,
             caret_x: 10,
             caret_y: 20,
             caret_height: 20,
@@ -2186,6 +2192,7 @@ mod tests {
                 hover,
                 page: 1,
                 total_pages: 1,
+                grid: None,
                 caret_x: 100,
                 caret_y: 200,
                 caret_height: 20,

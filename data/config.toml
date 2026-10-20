@@ -1371,6 +1371,20 @@ min_window_height_vertical = 0
 # 只稳住候选区：翻页栏/编码栏的出现消失不在其量程内，要连这些一并罩住用
 # min_window_height_vertical（两项可同时配，取较大者）。
 min_rows = 0
+# 候选展开（卷轴）：候选多于一页时按翻页键，候选窗原地展开成多行网格，一行就是原来的一页。
+# 展开后 ↑↓ 换行、←→ 行内移动、翻页键一次滚一屏，数字键选高亮行；Esc 收起、再按一次取消。
+# 只对横排生效。
+grid_expand = false
+# 展开态的可见行数（2~10）。
+grid_rows = 5
+# 展开态每格最多显示几个字（0 = 只受 max_chars 约束）。超出部分在悬停提示里看全文。
+grid_cell_max_chars = 6
+# 展开态下序号（与数字键）从高亮行往下怎么顺延：rows = 只补整行（每页 5 个时下一行 6~0）、
+# cells = 逐格编到 0（可以停在半行）、off = 只编高亮行。
+grid_index_fill = "rows"
+# 展开态的分类标签（Tab / Shift+Tab 或鼠标点击切换）：all 全部、single 单字、phrase 词组、
+# rare 生僻、symbol 符号。只决定有哪些，顺序固定按这个次序；少于两个时不显示标签栏。
+grid_categories = ["all", "single", "phrase", "rare"]
 # 候选注释总开关。关掉后候选不再显示注释（含上方注释条），下面三层注释模板（全局 / 方案 /
 # 模式）一律不生效；关掉后不再计算注释，也不再为它预载反查编码、拆字等数据，省内存。
 # 此时 input.alt_commit = "comment" 按 "off" 处理（Alt+数字照常归程序）。

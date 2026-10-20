@@ -5699,6 +5699,23 @@ impl Default for OverflowConfig {
 fn default_per_page() -> usize {
     7
 }
+fn default_grid_rows() -> usize {
+    5
+}
+fn default_grid_cell_max_chars() -> usize {
+    6
+}
+fn default_grid_index_fill() -> String {
+    "rows".to_string()
+}
+fn default_grid_categories() -> Vec<String> {
+    ["all", "single", "phrase", "rare"]
+        .into_iter()
+        .map(String::from)
+        .collect()
+}
+/// 展开态可见行数的合法范围（[`UiCandidateConfig::grid_rows`]）。
+pub const GRID_ROWS_RANGE: std::ops::RangeInclusive<usize> = 2..=10;
 fn default_first_show_settle_ratio() -> f32 {
     0.8
 }
@@ -6579,6 +6596,32 @@ pub struct UiCandidateConfig {
     /// 要连这些一并罩住用 [`Self::min_window_height_vertical`]（两项可同时配，取较大者）。
     #[serde(default)]
     pub min_rows: usize,
+    /// 候选展开（卷轴，出厂关）：候选多于一页时按翻页键，候选窗原地展开成多行网格，
+    /// 一行就是原来的一页。设计见 `docs/design/candidate-grid-expand.md`。
+    ///
+    /// 只对横排生效：竖排 / 旋转态的自然形态是「多列并排」，不在本项范围内。
+    #[serde(default)]
+    pub grid_expand: bool,
+    /// 展开态的可见行数（出厂 5）。生效值夹在 [`GRID_ROWS_RANGE`] 内。
+    #[serde(default = "default_grid_rows")]
+    pub grid_rows: usize,
+    /// 展开态每格最多显示几个字（出厂 6，0 = 只受 [`Self::max_chars`] 约束）。
+    ///
+    /// 网格按列对齐，一个长词会把整列撑宽，故比单行的 `max_chars` 收得更紧。被截掉的
+    /// 部分由悬停提示的 `${full_text}` 段补齐。
+    #[serde(default = "default_grid_cell_max_chars")]
+    pub grid_cell_max_chars: usize,
+    /// 展开态下序号（与数字键）从高亮行起怎么往下顺延（1–0 共 10 个）：
+    /// - `"rows"`（出厂）：只补整行——每页 5 个时高亮行 1–5、下一行 6–0；每页 7 个时只编高亮行。
+    /// - `"cells"`：逐格编到 0 为止，可以停在半行。
+    /// - `"off"`：只编高亮行。
+    #[serde(default = "default_grid_index_fill")]
+    pub grid_index_fill: String,
+    /// 展开态的分类标签：`all` 全部 / `single` 单字 / `phrase` 词组 / `rare` 生僻 / `symbol` 符号。
+    /// 只决定**有哪些**，顺序固定按上面这个次序（「全部」恒在首位）。少于两个时不显示标签栏。
+    /// 未知名字忽略。
+    #[serde(default = "default_grid_categories")]
+    pub grid_categories: Vec<String>,
     /// 候选注释总开关（默认开）。关掉后不渲染注释段（含上方注释条与 `${code_hint}`），
     /// 注释模板也不再计入按需加载的需求（反查索引、用户层编码索引、拆字表随之可卸）。
     ///
@@ -6800,6 +6843,11 @@ impl Default for UiCandidateConfig {
             min_window_height_horizontal: 0,
             min_window_height_vertical: 0,
             min_rows: 0,
+            grid_expand: false,
+            grid_rows: default_grid_rows(),
+            grid_cell_max_chars: default_grid_cell_max_chars(),
+            grid_index_fill: default_grid_index_fill(),
+            grid_categories: default_grid_categories(),
             comment_enabled: true,
             comment_template_vertical: default_comment_template(),
             comment_template_horizontal: default_comment_template(),
@@ -6884,11 +6932,33 @@ impl UiCandidateConfig {
     /// 「字」按**字素簇**计（口径同悬停提示的截断与折行）：按码位切会把 emoji ZWJ 序列、
     /// 组合符、变体选择符拦腰切开，屏上冒出半个字形。
     pub fn truncate_display(&self, text: &str) -> String {
-        use unicode_segmentation::UnicodeSegmentation;
-        match text.grapheme_indices(true).nth(self.max_chars) {
-            Some((cut, _)) if self.max_chars > 0 => format!("{}{TRUNCATION_MARK}", &text[..cut]),
-            _ => text.to_string(),
-        }
+        truncate_graphemes(text, self.max_chars)
+    }
+
+    /// 展开态网格单格的显示截断：取 `max_chars` 与 `grid_cell_max_chars` 中更紧的那个
+    /// （0 表示该项不限）。
+    pub fn truncate_grid_cell(&self, text: &str) -> String {
+        let limit = match (self.max_chars, self.grid_cell_max_chars) {
+            (0, g) => g,
+            (m, 0) => m,
+            (m, g) => m.min(g),
+        };
+        truncate_graphemes(text, limit)
+    }
+
+    /// 展开态的生效可见行数（夹进 [`GRID_ROWS_RANGE`]）。
+    pub fn grid_rows(&self) -> usize {
+        self.grid_rows
+            .clamp(*GRID_ROWS_RANGE.start(), *GRID_ROWS_RANGE.end())
+    }
+}
+
+/// 按字素簇截断到 `limit` 个（0 = 不截），超出时追加 [`TRUNCATION_MARK`]。
+fn truncate_graphemes(text: &str, limit: usize) -> String {
+    use unicode_segmentation::UnicodeSegmentation;
+    match text.grapheme_indices(true).nth(limit) {
+        Some((cut, _)) if limit > 0 => format!("{}{TRUNCATION_MARK}", &text[..cut]),
+        _ => text.to_string(),
     }
 }
 
@@ -13516,6 +13586,30 @@ scripts = { latin = 42 }
                 "{v} 解析结果与自身不符"
             );
         }
+    }
+
+    #[test]
+    fn grid_expand_defaults_off_and_cell_truncation_takes_the_tighter_limit() {
+        let cfg = Config::default();
+        assert!(
+            !cfg.ui.candidate.grid_expand,
+            "出厂关：只有设置里打开的用户才会展开"
+        );
+        assert_eq!(cfg.ui.candidate.grid_rows(), 5);
+        let mut c = cfg.ui.candidate.clone();
+        c.max_chars = 16;
+        c.grid_cell_max_chars = 3;
+        assert_eq!(c.truncate_grid_cell("一二三四"), "一二三…");
+        assert_eq!(c.truncate_grid_cell("一二三"), "一二三");
+        c.grid_cell_max_chars = 0;
+        c.max_chars = 2;
+        assert_eq!(
+            c.truncate_grid_cell("一二三"),
+            "一二…",
+            "0 = 只受 max_chars 约束"
+        );
+        c.grid_rows = 99;
+        assert_eq!(c.grid_rows(), 10, "可见行数夹进合法范围");
     }
 
     #[test]

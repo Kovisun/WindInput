@@ -33,14 +33,15 @@ STATE_CTRL = 1 << 2
 KEYSYM = {c: ord(c) for c in "abcdefghijklmnopqrstuvwxyz0123456789 "}
 KEYSYM.update({"BackSpace": 0xFF08, "Return": 0xFF0D, "Escape": 0xFF1B, "Shift_L": 0xFFE1,
                "Caps_Lock": 0xFFE5,
-               "Left": 0xFF51, "Up": 0xFF52, "Right": 0xFF53, "Down": 0xFF54})
+               "Left": 0xFF51, "Up": 0xFF52, "Right": 0xFF53, "Down": 0xFF54,
+               "equal": 0x3D, "Tab": 0xFF09})
 KEYCODE = {
     **dict(zip("qwertyuiop", range(24, 34))),
     **dict(zip("asdfghjkl", range(38, 47))),
     **dict(zip("zxcvbnm", range(52, 59))),
     **dict(zip("1234567890", range(10, 20))),
     " ": 65, "Return": 36, "Escape": 9, "BackSpace": 22, "Shift_L": 50, "Caps_Lock": 66,
-    "Left": 113, "Up": 111, "Right": 114, "Down": 116,
+    "Left": 113, "Up": 111, "Right": 114, "Down": 116, "equal": 21, "Tab": 23,
 }
 
 
@@ -2039,6 +2040,139 @@ async def set_config(key, value):
     return r
 
 
+async def grid_cases(bus, im):
+    """候选展开（卷轴）：开关打开后按 `=` 原地展开成多行网格；鼠标点第 3 行的格子，上屏的
+    与键盘走到同一格（↓↓ + 空格）的是同一个词。
+
+    展开态的命中下标是网格平铺下标，宿主原样回传、由服务端换算——这条把这个约定钉在真实
+    Fcitx5 宿主上（Windows / macOS 宿主同样不解释下标）。"""
+    r = await set_config("ui.candidate.grid_expand", "true")
+    check("展开：config set grid_expand=true", r.returncode == 0,
+          f"rc={r.returncode} {r.stderr.strip()[:200]}")
+    # 下面拿键盘上屏的词当鼠标那一下的对照：调频开着的话，第一次上屏就把那个词提前了，
+    # 第二次同一格已经换了人。
+    await set_config("schema.pinyin.frequency.enabled", "false")
+    c = await new_ctx(bus, im, "e2e-grid")
+    await c.ic.call_set_cursor_rect(300, 200, 2, 20)
+
+    # 键盘：展开 → ↓↓ 到第 3 行 → 空格，记下上屏的词。
+    await c.type("yi")
+    await asyncio.sleep(0.3)
+    one = candidate_window()
+    await c.key("equal")
+    await asyncio.sleep(0.4)
+    grid = candidate_window()
+    tall = bool(one and grid and one[5] and grid[5] and grid[4] >= one[4] * 2.5)
+    check("展开：按 = 后候选窗原地变高（多行网格）", tall, f"单行={one} 展开={grid}")
+    if grid and grid[5]:
+        screenshot("candidate_grid", grid[0])
+    await c.key("Down")
+    await c.key("Down")
+    c.take()
+    await c.key(" ")
+    await asyncio.sleep(0.3)
+    by_key = c.take()
+    check("展开：↓↓ + 空格上屏第 3 行的词", by_key != "", "没有上屏")
+
+    # 鼠标：同一个位置点下去。行高按「展开后比单行多出的高度 / 5」估——多出来的是 4 行候选
+    # 加独立成行的翻页栏，与候选行等高。
+    await c.type("yi")
+    await asyncio.sleep(0.3)
+    await c.key("equal")
+    await asyncio.sleep(0.4)
+    win = candidate_window()
+    by_mouse = ""
+    if one and win and win[5]:
+        _, x, y, _w, h, _ = win
+        row_h = (h - one[4]) / 5
+        pad_t = (one[4] - row_h) / 2
+        cy = int(y + pad_t + 2.5 * row_h)
+        sh("xdotool", "mousemove", str(x + 30), str(cy), "click", "1")
+        await asyncio.sleep(0.4)
+        by_mouse = c.take()
+    check("展开：鼠标点第 3 行首格 = 键盘走到的同一格", by_mouse != "" and by_mouse == by_key,
+          f"鼠标={by_mouse!r} 键盘={by_key!r}")
+    sh("xdotool", "mousemove", "5", "5")
+
+    # 悬停提示：展开态停靠在整个候选窗外侧的顶端，不盖住任何格子；悬停第 3 行也不跟着下移。
+    await c.type("yi")
+    await asyncio.sleep(0.3)
+    await c.key("equal")
+    await asyncio.sleep(0.4)
+    win = candidate_window()
+    tip = None
+    if one and win and win[5]:
+        _, x, y, _w, h, _ = win
+        row_h = (h - one[4]) / 5
+        cy = int(y + (one[4] - row_h) / 2 + 2.5 * row_h)
+        for dx in (30, 60, 90):
+            sh("xdotool", "mousemove", str(x + dx), str(cy))
+            tip = await wait_window("wind-tooltip", True, timeout=0.8)
+            if tip and tip[5]:
+                break
+    shown = bool(tip and tip[5])
+    check("展开：悬停格子后 tooltip 出现", shown, f"tooltip={tip} candidate={win}")
+    if shown:
+        _, tx, ty, tw, _th, _ = tip
+        outside = tx >= win[1] + win[3] or tx + tw <= win[1]
+        check("展开：tooltip 在候选窗外侧、不盖格子", outside,
+              f"tooltip x={tx}..{tx + tw} 候选窗 x={win[1]}..{win[1] + win[3]}")
+        check("展开：tooltip 停靠在候选窗顶端、不随悬停行下移", abs(ty - win[2]) <= row_h,
+              f"tooltip y={ty} 候选窗 y={win[2]} 行高≈{row_h:.0f}")
+        screenshot("grid_tooltip_screen")
+    sh("xdotool", "mousemove", "5", "5")
+    await c.key("Escape")
+    await c.key("Escape")
+    await asyncio.sleep(0.3)
+    c.take()
+
+    # 分类标签：Tab 切到「单字」，窗口高度不变（标签栏恒在），数字键在筛过的列表里选。
+    # 用 yi：单字一选即上屏（shijian 里选单字只消耗 shi，按分步转换留在组合区）。
+    await c.type("yi")
+    await asyncio.sleep(0.3)
+    await c.key("equal")
+    await asyncio.sleep(0.4)
+    all_win = candidate_window()
+    await c.key("Tab")
+    await asyncio.sleep(0.4)
+    single_win = candidate_window()
+    if single_win and single_win[5]:
+        screenshot("candidate_grid_single", single_win[0])
+    check("展开：Tab 切分类后候选窗高度不变",
+          bool(all_win and single_win and single_win[5] and single_win[4] == all_win[4]),
+          f"全部={all_win} 单字={single_win}")
+    c.take()
+    await c.key("1")
+    await asyncio.sleep(0.3)
+    got = c.take()
+    check("展开：「单字」里按 1 上屏一个字", len(got) == 1, f"上屏={got!r}")
+    await c.key("Escape")
+    await c.key("Escape")
+    await asyncio.sleep(0.2)
+    c.take()
+
+    # Esc 两段式：先收起（候选窗回到单行高度），再按才取消。
+    await c.type("yi")
+    await asyncio.sleep(0.3)
+    await c.key("equal")
+    await asyncio.sleep(0.3)
+    await c.key("Escape")
+    await asyncio.sleep(0.3)
+    back = candidate_window()
+    check("展开：Esc 先收起、候选窗仍在且回到单行高度",
+          bool(one and back and back[5] and back[4] == one[4]), f"单行={one} 收起后={back}")
+    await c.key("Escape")
+    await asyncio.sleep(0.3)
+    gone = candidate_window()
+    check("展开：再按 Esc 取消输入", gone is not None and not gone[5], f"window={gone}")
+    c.take()
+
+    await set_config("schema.pinyin.frequency.enabled", "true")
+    r = await set_config("ui.candidate.grid_expand", "false")
+    check("展开：config set grid_expand=false（复原）", r.returncode == 0,
+          f"rc={r.returncode} {r.stderr.strip()[:200]}")
+
+
 async def preedit_display_cases(bus, im):
     """编码显示在候选窗里（非嵌入，`preedit_display = candidate_top`）：服务端照旧给宿主一段单
     空格的占位组合（Windows 靠它取光标坐标），addon 不把它写进应用——应用里既看不到编码、也
@@ -2475,6 +2609,7 @@ async def main():
     await keysynth_cases(bus, im)
     if os.environ.get("DISPLAY"):
         await x11_cases(bus, im)
+        await grid_cases(bus, im)
         await overlay_cases(bus, im)
         await menu_cases(bus, im)
         await menu_idle_ignores_motion_cases(bus, im)

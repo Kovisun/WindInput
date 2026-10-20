@@ -2364,6 +2364,28 @@ impl Coordinator {
     /// - 无词库落点者（临拼/临英/混输/网址，以及特殊模式的空码浏览态）：仅提供复制。
     pub(crate) fn show_candidate_menu(&self, page_local: usize, x: i32, y: i32) {
         use wind_ui_types::MenuItemSpec as M;
+        // 右键落在分类标签上：不是候选，没有候选菜单。
+        if self.grid_tab_of_event(page_local).is_some() {
+            return;
+        }
+        // 悬停落到被右键的这一格：菜单开着时鼠标消息到不了候选窗，悬停停在上一次右键的那格，
+        // 在另一格上再右键（关旧菜单开新菜单）时，旧格的悬停底色就留在原处，看上去像高亮没跟过来。
+        let ui_idx = page_local as i32;
+        let hover_moved = self
+            .hover_index
+            .swap(ui_idx, std::sync::atomic::Ordering::Relaxed)
+            != ui_idx;
+        // 展开态下右键的是网格里的某一格：先把高亮切过去（菜单操作的就是高亮那一格），
+        // 再按页内下标走下面的原有逻辑。悬停变了而高亮没变时，下面单独补一帧。
+        let Some(page_local) = self.resolve_event_index(page_local, !hover_moved) else {
+            return;
+        };
+        if hover_moved {
+            let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            if !st.candidates.is_empty() {
+                self.notify_ui_update(&st);
+            }
+        }
         let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if state.candidates.is_empty() {
             return;
@@ -2375,7 +2397,7 @@ impl Coordinator {
         }
         let cand = state.candidates[idx].clone();
         let word = cand.text.clone();
-        let total = state.candidates.len();
+        let pos = self.reorder_positions(&state, idx);
         let scope = self.candidate_op_scope(&state);
         // 快捷输入的格式候选：判据独立于 candidate_op_scope（后者问「有没有词库落点」，
         // 混输没有，返回 None 是对的）。与写端 `candidate_or_quick_format_op` 同源。
@@ -2480,12 +2502,23 @@ impl Coordinator {
             let has_rule = has_rule && !emoji;
 
             vec![
-                M::leaf("置顶", op(CandidateOp::MoveTop), can_pin && idx > 0, false),
-                M::leaf("前移", op(CandidateOp::MoveUp), movable && idx > 0, false),
+                // 位置按完整列表计（分类筛选中 `idx` 只是子集下标），与写端同源。
+                M::leaf(
+                    "置顶",
+                    op(CandidateOp::MoveTop),
+                    can_pin && pos.here > 0,
+                    false,
+                ),
+                M::leaf(
+                    "前移",
+                    op(CandidateOp::MoveUp),
+                    movable && pos.here > 0,
+                    false,
+                ),
                 M::leaf(
                     "后移",
                     op(CandidateOp::MoveDown),
-                    movable && idx + 1 < total,
+                    movable && pos.here < pos.last,
                     false,
                 ),
                 M::leaf(delete_label, op(CandidateOp::Delete), delete_enabled, false),

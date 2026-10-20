@@ -528,7 +528,14 @@ impl MessageHandler for Coordinator {
         }
         let mut changed = false;
         for _ in 0..notches {
-            let moved = if up {
+            // 展开态滚一行（同 `mouse_page`）：网格里逐个移动高亮，滚一格只挪一个字，太慢。
+            let moved = if Self::grid_active(&state) {
+                if up {
+                    state.current_page > 0 && self.grid_move_row(&mut state, false)
+                } else {
+                    self.grid_scroll_down(&mut state)
+                }
+            } else if up {
                 self.move_up(&mut state)
             } else {
                 self.move_down(&mut state)
@@ -1012,6 +1019,14 @@ impl MessageHandler for Coordinator {
         // 别让上一键的登记漏到这一键。
         self.commit_code_pending
             .store(false, std::sync::atomic::Ordering::Relaxed);
+        // 按下时已没有输入会话（或只剩联想）= 上一次组合已经结束（出口有几十处），「本次展开过」
+        // 随之作废。不看「候选为空」：码表空码、拼音分步上屏后删空余码时组合还在。
+        if data.event_type == EVENT_KEY_DOWN {
+            let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            if !Self::has_input_session(&st) || st.assoc_active() {
+                st.grid_keep = false;
+            }
+        }
 
         // 方案级行为覆盖的**兜底**同步点：代际未变时是一次 atomic load + 比较，可忽略。
         // 它保证「切方案后 [punct] 没落地」最迟在下一次按键收敛——其余三个调用点
@@ -1946,7 +1961,7 @@ impl MessageHandler for Coordinator {
                     && !self.assoc_yields_select_key(&state)
                     && let Some(offset) = self.select_key_offset(data.key_code)
                 {
-                    let (start, end) = self.page_range(&state);
+                    let (start, end) = self.select_range(&state);
                     let idx = start + offset;
                     if idx < end {
                         let cand = state.candidates[idx].clone();
@@ -2158,7 +2173,7 @@ impl MessageHandler for Coordinator {
                     if !self.assoc_yields_select_key(&state)
                         && let Some(offset) = self.select_key_offset(data.key_code)
                     {
-                        let (start, end) = self.page_range(&state);
+                        let (start, end) = self.select_range(&state);
                         let idx = start + offset;
                         if idx < end {
                             let cand = state.candidates[idx].clone();

@@ -650,6 +650,30 @@ pub(crate) struct State {
     /// 上一批的翻页史与新的这批无关）。**别在别处清**——`current_page` 归零的地方就是
     /// 它该归零的地方，两者分家就会漂移。
     pub(crate) paged: bool,
+    /// 候选展开态（多行网格）的可见区首行：`Some(p)` = 已展开，第 `p` 页在可见区第一行。
+    ///
+    /// 网格的**一行就是一页**，高亮行就是 `current_page`。于是页模型的一切——数字键、空格、
+    /// 扩容、末页放宽——原样适用，这里只多记一个滚动位置。设计见
+    /// `docs/design/candidate-grid-expand.md`。
+    ///
+    /// 清零在 [`Coordinator::reset_candidate_view`]：候选重新装填（打字、退格、分步上屏后续查）
+    /// 即收起，与 `paged` 同一个时机、同一个理由；本次组合展开过的话，装填完再由
+    /// [`Self::grid_keep`] 展开回来。
+    pub(crate) grid_top: Option<usize>,
+    /// 本次组合展开过：候选重新装填后（继续打字、分步上屏）自动再展开，直到 Esc 收起或组合结束。
+    ///
+    /// 组合结束的出口有几十处，不逐个清：每次按键开头若已没有候选，就说明是一次新组合，在
+    /// `handle_key_event` 开头清掉。
+    pub(crate) grid_keep: bool,
+    /// 展开态当前的分类标签（P3）。非 `All` 时 `candidates` 是**筛过的子集**，完整列表暂存在
+    /// [`Self::grid_full`]——下标在几十处调用里按 `candidates` 解释，就地换成子集，选词、序号、
+    /// 右键、置顶删除就都不用知道筛选的存在。重建候选的几处（扩容、末页放宽）之后要重新套一次
+    /// 筛选，见 `Coordinator::grid_reapply_filter`。
+    ///
+    /// 与 `grid_top` 同一个清零点（`reset_candidate_view`）。
+    pub(crate) grid_tab: wind_ui_types::GridTab,
+    /// 筛选期间的完整候选列表；`grid_tab == All` 时为空。
+    pub(crate) grid_full: Vec<Candidate>,
     /// 动态分级加载：当前候选对应的输入码
     pub(crate) candidate_input: String,
     /// 动态分级加载：当前加载上限
@@ -2916,6 +2940,10 @@ impl Coordinator {
                 candidates: Vec::new(),
                 selected_index: 0,
                 current_page: 0,
+                grid_top: None,
+                grid_keep: false,
+                grid_tab: wind_ui_types::GridTab::All,
+                grid_full: Vec::new(),
                 paged: false,
                 candidate_input: String::new(),
                 candidate_limit: 0,
@@ -5533,6 +5561,8 @@ impl Coordinator {
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = hidden;
         if hidden {
+            // 看不见的网格里 ←→ 还会移高亮而不移编码光标：随候选窗一起收起（§5.5）。
+            self.collapse_grid(&mut self.state.lock().unwrap_or_else(|e| e.into_inner()));
             self.clear_hover();
             let _ = self.ui_tx.send(UiCommand::HideCandidates);
         }
@@ -5653,6 +5683,14 @@ impl Coordinator {
         data: &KeyEventData,
         include_printable: bool,
     ) -> Option<KeyAction> {
+        // 展开态专属键（←→ / Esc）先于绑定表：它们在网格里另有含义，且必须赶在各模式的
+        // 光标移动臂与 Esc 臂之前截下——本函数恰好是所有模式都先经过的那一处。
+        if let Some(changed) = self.grid_key(state, data) {
+            if changed && let Some(act) = self.after_nav_changed(state) {
+                return Some(act);
+            }
+            return Some(KeyAction::Consumed);
+        }
         let shift = data.modifiers & MOD_SHIFT != 0;
         let action = self.session_action_for(data.key_code, shift, include_printable)?;
         if action.requires_candidates() && state.candidates.is_empty() {
@@ -5673,6 +5711,11 @@ impl Coordinator {
                 // 判据与 `cancel_session` 的适用范围一致，见那里。
                 if !Self::has_input_session(state) {
                     return None;
+                }
+                // 展开态下取消键先收起（与 Esc 同一条两段式，见 `grid_key`）。
+                if Self::grid_active(state) && self.collapse_grid(state) {
+                    self.notify_ui_update(state);
+                    return Some(KeyAction::Consumed);
                 }
                 return Some(self.cancel_session(state));
             }
@@ -5792,36 +5835,29 @@ impl Coordinator {
         let flipped = self
             .candidate_flipped
             .load(std::sync::atomic::Ordering::Relaxed);
-        let changed = match nav {
-            keymap::NavAction::HighlightUp if flipped => self.move_down(state),
-            keymap::NavAction::HighlightDown if flipped => self.move_up(state),
-            keymap::NavAction::HighlightUp => self.move_up(state),
-            keymap::NavAction::HighlightDown => self.move_down(state),
-            keymap::NavAction::PagePrev => self.page_prev(state),
-            keymap::NavAction::PageNext => self.page_next(state),
+        //
+        // 展开态（`grid_top` 有值）整组改写：高亮上下 = 换行、翻页 = 滚一屏，见 `candidate_grid`。
+        // 网格只在横排出现，`flipped`（竖排专属）在这里恒为 false，两支不会相遇。
+        // 收起态按下翻页先试展开：展开了就只展开、不翻页（设计 D3）。
+        let changed = if Self::grid_active(state) {
+            match nav {
+                keymap::NavAction::HighlightUp => self.grid_move_row(state, false),
+                keymap::NavAction::HighlightDown => self.grid_move_row(state, true),
+                keymap::NavAction::PagePrev => self.grid_page(state, false),
+                keymap::NavAction::PageNext => self.grid_page(state, true),
+            }
+        } else {
+            match nav {
+                keymap::NavAction::HighlightUp if flipped => self.move_down(state),
+                keymap::NavAction::HighlightDown if flipped => self.move_up(state),
+                keymap::NavAction::HighlightUp => self.move_up(state),
+                keymap::NavAction::HighlightDown => self.move_down(state),
+                keymap::NavAction::PagePrev => self.page_prev(state),
+                keymap::NavAction::PageNext => self.try_expand_grid(state) || self.page_next(state),
+            }
         };
         if changed {
-            // 混输高亮跟随：普通模式下高亮在五笔↔拼音候选间移动可能切换 preedit 形态
-            // （原始码 ↔ 音节拆分）。重算 preedit；若形态变化且嵌入编码（app_inline），须回传
-            // 组合串使宿主内联编码同步；候选窗模式仅 notify_ui_update 刷新即可。
-            // 门控：仅普通模式（active==None）且存在拆分形态——纯五笔(无拆分)/纯拼音(全拼音
-            // 候选→形态恒定)均不触发，零回归。
-            let mut composed: Option<KeyAction> = None;
-            if state.active.is_none() && !state.preedit_split_body.is_empty() {
-                let before = state.preedit.clone();
-                self.sync_preedit_to_highlight(state);
-                if state.preedit != before {
-                    // ★ 必须用**有效**归属而不是配置原值：压制态下候选窗不下发，编码只剩组合区
-                    // 这一条出口，这里不回传就等于让游戏聊天框里的编码停在旧形态。
-                    if self.preedit_in_app_effective() {
-                        let text = state.preedit.clone();
-                        let caret_pos = text.chars().count() as u32;
-                        composed = Some(KeyAction::UpdateComposition { text, caret_pos });
-                    }
-                }
-            }
-            self.notify_ui_update(state);
-            if let Some(act) = composed {
+            if let Some(act) = self.after_nav_changed(state) {
                 return Some(act);
             }
         } else if is_page_action && self.page_key_overflow_to_punct(state, data) {
@@ -5831,6 +5867,35 @@ impl Coordinator {
             return None;
         }
         Some(KeyAction::Consumed)
+    }
+
+    /// 高亮 / 页码变了之后的收尾：混输按新高亮重算组合区形态，再重绘候选窗。
+    ///
+    /// 返回 `Some` = 组合区形态变了且编码嵌在宿主里，须把新组合串回传给宿主。
+    /// 收进一处，是因为网格专属键（←→）与绑定表里的导航动作都要走它——少走一处，
+    /// 混输下用 ←→ 移到拼音候选时组合区就不跟着变形。
+    fn after_nav_changed(&self, state: &mut State) -> Option<KeyAction> {
+        // 混输高亮跟随：普通模式下高亮在五笔↔拼音候选间移动可能切换 preedit 形态
+        // （原始码 ↔ 音节拆分）。重算 preedit；若形态变化且嵌入编码（app_inline），须回传
+        // 组合串使宿主内联编码同步；候选窗模式仅 notify_ui_update 刷新即可。
+        // 门控：仅普通模式（active==None）且存在拆分形态——纯五笔(无拆分)/纯拼音(全拼音
+        // 候选→形态恒定)均不触发，零回归。
+        let mut composed: Option<KeyAction> = None;
+        if state.active.is_none() && !state.preedit_split_body.is_empty() {
+            let before = state.preedit.clone();
+            self.sync_preedit_to_highlight(state);
+            if state.preedit != before {
+                // ★ 必须用**有效**归属而不是配置原值：压制态下候选窗不下发，编码只剩组合区
+                // 这一条出口，这里不回传就等于让游戏聊天框里的编码停在旧形态。
+                if self.preedit_in_app_effective() {
+                    let text = state.preedit.clone();
+                    let caret_pos = text.chars().count() as u32;
+                    composed = Some(KeyAction::UpdateComposition { text, caret_pos });
+                }
+            }
+        }
+        self.notify_ui_update(state);
+        composed
     }
 
     /// 翻页键翻不动时是否按 `keys.overflow.page_key = "commit_and_input"` 交给标点臂。
@@ -7002,6 +7067,14 @@ impl Coordinator {
         self.show_tip(mode.label());
     }
 
+    /// 用户是否隐藏了候选窗（candwin 切换 / `ui.candidate.hide_window`）。
+    pub(crate) fn candidate_window_hidden(&self) -> bool {
+        *self
+            .hide_candidate_window
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
+
     /// 切换候选窗显隐（运行时态）。隐藏时下次刷新即不显示候选。
     fn cmd_toggle_candwin(&self) {
         let hidden = {
@@ -7013,6 +7086,8 @@ impl Coordinator {
             *h
         };
         if hidden {
+            // 看不见的网格里 ←→ 还会移高亮而不移编码光标：随候选窗一起收起（§5.5）。
+            self.collapse_grid(&mut self.state.lock().unwrap_or_else(|e| e.into_inner()));
             self.clear_hover();
             let _ = self.ui_tx.send(UiCommand::HideCandidates);
         }
@@ -7282,8 +7357,21 @@ impl Coordinator {
             );
         }
         let t_nu = std::time::Instant::now();
-        // 仅推送当前页候选（窗口按 1..N 编号，翻页后重新编号）
-        let (start, end) = self.page_range(state);
+        // 仅推送当前页候选（窗口按 1..N 编号，翻页后重新编号）。
+        // 展开态推送可见区内的几页、逐行平铺（一行一页），见 `candidate_grid`。
+        let grid_range = self.grid_visible_range(state);
+        let (start, end) = grid_range.unwrap_or_else(|| self.page_range(state));
+        let per_page = self.per_page(state.active);
+        // 展开态一帧有好几页候选，悬停气泡**只为鼠标下的那一格**渲染——每格各渲染一份会把
+        // 持锁热路径上的开销放大成行数倍，而 UI 本来就只显示悬停那一格的气泡（悬停一变，
+        // `mouse_hover` 就会重新下发）。
+        let hover_now = self.hover_target();
+        // 展开态带序号的格子（平铺下标区间）：从高亮行行首起，按 `grid_index_fill` 往下顺延，
+        // 与数字键的选择范围 `select_range` 同源。
+        let grid_index = grid_range.map(|(vis_start, _)| {
+            let (sel_start, sel_end) = self.select_range(state);
+            (sel_start.saturating_sub(vis_start), sel_end - sel_start)
+        });
         // 候选序号标签：
         //  - 数字透镜：数字键正在录表达式 → 选词改用字母标签 a/b/c
         //  - 其余（含自由输入）：正常序号
@@ -7394,7 +7482,13 @@ impl Coordinator {
                 let full = self.cand_display_text(state, c);
                 // 显示截断（超长加 …）：短语与普通候选统一按用户可配的 ui.candidate.max_chars。
                 // 短语 text 在生成层已存完整原文（仅一行化），此处仅裁显示——上屏仍用完整原文。
-                let disp = cand_cfg.truncate_display(&full);
+                // 展开态按列对齐，一个长词会撑宽整列，另有更紧的格宽上限。
+                let disp = if grid_range.is_some() {
+                    cand_cfg.truncate_grid_cell(&full)
+                } else {
+                    cand_cfg.truncate_display(&full)
+                };
+                let tip_skipped = grid_range.is_some() && i as i32 != hover_now;
                 // 悬停提示按段列表渲染（见 `crate::tooltip`）。逐字段遍历**截断后**的显示文本、
                 // 且不含截断追加的 `…`：超长候选（如长短语）逐字展开会撑爆气泡，只提示实际
                 // 显示出的字；被截掉的部分由「完整原文」段（`${full_text}`）整段给出。
@@ -7410,6 +7504,7 @@ impl Coordinator {
                 // Some("")）。此时本段不显示，并已在循环外触发后台构建，建好后自动补上。
                 let word_code = code_schema
                     .as_deref()
+                    .filter(|_| !tip_skipped)
                     .and_then(|sid| {
                         #[cfg(test)]
                         WORD_CODE_LOOKUPS.with(|n| n.set(n.get() + 1));
@@ -7450,7 +7545,11 @@ impl Coordinator {
                     crate::tooltip::char_var(name, arg, ch, &reverse)
                         .or_else(|| self.eval_text_var(name, arg, &ch.to_string(), &reverse))
                 };
-                let rendered = tip.render(&disp, &full, &cand_eval, &char_eval);
+                let rendered = if tip_skipped {
+                    Default::default()
+                } else {
+                    tip.render(&disp, &full, &cand_eval, &char_eval)
+                };
                 let tooltip = rendered.doc.clone();
                 tip_page.push(crate::handle_tooltip::TooltipPageEntry {
                     text: c.text.clone(),
@@ -7495,6 +7594,14 @@ impl Coordinator {
                     code: c.code.clone(),
                     label: if alpha {
                         ((b'a' + i as u8) as char).to_string()
+                    } else if let Some((from, count)) = grid_index {
+                        // 带序号的格子从高亮行行首起顺延编号；其余格子的序号渲染端画成透明，
+                        // 这里照列号给一个，只为占住同样的宽度。
+                        if (from..from + count).contains(&i) {
+                            self.resolve_index_label(cand_cfg, i - from)
+                        } else {
+                            self.resolve_index_label(cand_cfg, i % per_page)
+                        }
                     } else {
                         self.resolve_index_label(cand_cfg, i)
                     },
@@ -7508,7 +7615,23 @@ impl Coordinator {
         *self.tooltip_page.lock().unwrap_or_else(|e| e.into_inner()) = tip_page;
         // 翻页信息改为结构化字段传给候选窗（窗口内渲染独立的页码指示）
         let total_pages = self.total_pages(state);
-        let selected = state.selected_index.min(items.len().saturating_sub(1));
+        let grid = state.grid_top.zip(grid_index).map(|(top, (from, count))| {
+            wind_ui_types::CandidateGrid {
+                cols: per_page as u16,
+                rows: self.grid_rows() as u16,
+                highlight_row: state.current_page.saturating_sub(top) as u16,
+                index_start: from as u16,
+                index_count: count as u16,
+                tabs: self.grid_tabs(state).iter().fold(0, |m, t| m | t.bit()),
+                active_tab: state.grid_tab as u8,
+            }
+        });
+        // 展开态的选中项是平铺下标：高亮行之前的整行都算进去。
+        let selected_flat = match grid {
+            Some(g) => g.highlight_row as usize * per_page + state.selected_index,
+            None => state.selected_index,
+        };
+        let selected = selected_flat.min(items.len().saturating_sub(1));
         // 悬停目标独立于选中项：候选越界视为无悬停，翻页器 tag 原样透传
         let hover =
             match self.hover_target() {
@@ -7609,6 +7732,7 @@ impl Coordinator {
             hover,
             page: state.current_page + 1,
             total_pages,
+            grid,
             caret_x,
             caret_y,
             caret_height,
@@ -7704,7 +7828,13 @@ impl Coordinator {
             UiEvent::SoftKeyboardMoved { right, bottom } => {
                 self.save_softkeyboard_anchor(right, bottom)
             }
-            UiEvent::CandidateOp { op, page_local } => self.candidate_op(op, page_local),
+            // 只在这里换算平铺下标：`candidate_op` 的另一批调用方（Ctrl+数字热键等）传的
+            // 本来就是页内下标。
+            UiEvent::CandidateOp { op, page_local } => {
+                if let Some(page_local) = self.resolve_event_index(page_local, false) {
+                    self.candidate_op(op, page_local)
+                }
+            }
             UiEvent::RequestCandidateMenu { page_local, x, y } => {
                 self.show_candidate_menu(page_local, x, y)
             }
@@ -8106,15 +8236,24 @@ impl Coordinator {
     }
 
     /// 滚轮翻页：dir<0 上一页，dir>0 下一页；仅重绘候选窗，不上屏。
+    ///
+    /// 展开态下滚一行（翻页箭头同此）；收起态往下翻与翻页键同语义——先试展开。
     fn mouse_page(&self, dir: i32) {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if state.candidates.is_empty() {
             return;
         }
-        let changed = if dir < 0 {
+        let changed = if Self::grid_active(&state) {
+            // 鼠标往上滚到第一行就停住，不像 ↑ 那样收起：滚轮滚过头是常事。
+            if dir > 0 {
+                self.grid_scroll_down(&mut state)
+            } else {
+                state.current_page > 0 && self.grid_move_row(&mut state, false)
+            }
+        } else if dir < 0 {
             self.page_prev(&mut state)
         } else {
-            self.page_next(&mut state)
+            self.try_expand_grid(&mut state) || self.page_next(&mut state)
         };
         if changed {
             self.notify_ui_update(&state);
@@ -8137,7 +8276,10 @@ impl Coordinator {
         {
             target // 翻页器悬停
         } else if target >= 0 {
-            let (start, end) = self.page_range(&state);
+            // 展开态下悬停的是平铺下标，校验范围是整个可见区。
+            let (start, end) = self
+                .grid_visible_range(&state)
+                .unwrap_or_else(|| self.page_range(&state));
             if (target as usize) < end - start {
                 target
             } else {
@@ -9170,7 +9312,12 @@ impl Coordinator {
         }
         let mut guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let state: &mut State = &mut guard;
-        if state.active.is_some() || state.input_buffer.is_empty() || state.sentence_pool.len() < 2
+        // 展开态按分类筛选中：`candidates` 是子集，整句窗口按完整列表的位置滚，两者对不上。
+        // 筛选时把键让回原语义（多半是单字 / 词组标签里本就没有整句）。
+        if state.active.is_some()
+            || state.input_buffer.is_empty()
+            || state.sentence_pool.len() < 2
+            || state.grid_tab != wind_ui_types::GridTab::All
         {
             return None;
         }
@@ -9186,6 +9333,8 @@ impl Coordinator {
         let per_page = self.per_page(state.active);
         state.current_page = first / per_page;
         state.selected_index = first % per_page;
+        // 展开态下页码变了，可见区要跟上，否则高亮行落在可见区外（屏幕上高亮错格）。
+        self.grid_follow(state);
         self.clear_hover();
         // 高亮换了 ⇒ 组合区按高亮候选重算（双拼下简拼 / 整句的切法不同，审查查出漏了这步）。
         // 回传写法同方向键移动高亮（`handle_nav_key`）：只有形态真变了、且编码显示在宿主里时

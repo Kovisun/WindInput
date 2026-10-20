@@ -203,8 +203,9 @@ private:
     void refreshActiveWindow();
     void checkFullscreen();
     bool ownsWindow(xcb_window_t w) const;
-    /// 候选窗上的悬停变化：悬停提示正显示时按 `hoverDeferMs` 延后，给挪进提示留时间。
-    void candidateHover(int32_t raw);
+    /// 候选窗上的悬停变化：悬停提示正显示时按 `hoverDeferMs` 延后，给挪进提示留时间；
+    /// `at` 是指针的根窗口坐标，正朝提示去时顺延（`headingToTip`）。
+    void candidateHover(int32_t raw, std::optional<std::pair<int32_t, int32_t>> at = std::nullopt);
     void onHoverDeferred();
     void onTipLeaveGrace();
     void cancelTipTimers();
@@ -254,6 +255,9 @@ private:
     ClickGate click_;    // 左键点选：按下记命中，松开同一项才选
     int32_t pendingHover_ = -1;
     std::unique_ptr<fcitx::EventSourceTime> hoverDefer_; // 延后报的悬停变化
+    uint64_t hoverDue_ = 0;                              // hoverDefer_ 的到期时刻（微秒）
+    std::optional<std::pair<int32_t, int32_t>> lastPointer_; // 上一次移动的根窗口坐标
+    std::optional<int32_t> tipBest_; // 本次宽限里离提示最近的距离（tipGap），刷新新低才顺延
     std::unique_ptr<fcitx::EventSourceTime> tipLeave_;   // 离开悬停提示后的宽限
 
     struct Drag {

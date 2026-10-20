@@ -413,6 +413,7 @@ impl UiManager {
                         hover,
                         page,
                         total_pages,
+                        grid,
                         caret_x,
                         caret_y,
                         caret_height,
@@ -438,6 +439,7 @@ impl UiManager {
                         } else {
                             preedit
                         };
+                        candidate_window.set_grid(grid);
                         candidate_window.update(
                             &preedit,
                             preedit_caret,
