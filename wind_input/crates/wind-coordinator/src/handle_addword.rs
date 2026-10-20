@@ -6,6 +6,7 @@ use crate::coordinator::{CommittedSeg, Coordinator, LEARN_ADD_WEIGHT, State};
 use tracing::{debug, warn};
 use wind_bridge::handler::{KeyAction, KeyEventData};
 use wind_candidate::CandidateSource;
+use wind_config::config::AddWordSource;
 use wind_ipc::protocol::MOD_CTRL;
 use wind_keys::keymap;
 use wind_ui_types::CandidateItem;
@@ -1027,15 +1028,21 @@ impl Coordinator {
         state.add_word_chars = self.add_word_recent_chars(ADD_WORD_MAX_LEN);
         // 剪贴板池**不在这里预读**——那 40ms 会摊在每一次 Ctrl+= 上（见 add_word_clip_pool）。
         state.add_word_clip = None;
-        // 默认来源是最近输入：Ctrl+= 是带面板的连续加词，接着刚打的字最顺手（与
-        // Ctrl+Shift+= 刻意相反，见 open_add_word_from_history）。
+        // 默认来源由 `input.add_word.default_source` 定，优先的一侧为空时落另一侧——否则
+        // 开面板第一眼是空态，而唯一有用的下一步就是 Tab，不如替用户按了。
         //
-        // **例外：最近输入为空而剪贴板有内容时直接落在剪贴板一侧**——否则开面板第一眼是
-        // 「无最近输入」，而唯一有用的下一步就是 Tab，不如替用户按了。反向不做：最近输入
-        // 有内容就按它来，剪贴板可不可用都不改变默认——**这也是惰性读取的前提**：短路求值
-        // 使得有最近输入时右边整个不求值，即不读剪贴板。
-        state.add_word_from_clip = state.add_word_chars.len() < ADD_WORD_MIN_LEN
-            && self.add_word_clip_pool(state).len() >= ADD_WORD_MIN_LEN;
+        // 出厂 recent：Ctrl+= 是带面板的连续加词，接着刚打的字最顺手。最近输入有内容就按它
+        // 来，剪贴板可不可用都不改变默认——**这也是惰性读取的前提**：短路求值使得有最近输入
+        // 时右边整个不求值，即不读剪贴板。clipboard 是用户选的，进面板就读那 40ms 是他要的。
+        let recent_ok = state.add_word_chars.len() >= ADD_WORD_MIN_LEN;
+        state.add_word_from_clip = match self.rt().config.input.add_word.default_source {
+            AddWordSource::Recent => {
+                !recent_ok && self.add_word_clip_pool(state).len() >= ADD_WORD_MIN_LEN
+            }
+            AddWordSource::Clipboard => {
+                self.add_word_clip_pool(state).len() >= ADD_WORD_MIN_LEN || !recent_ok
+            }
+        };
         state.add_word_active = true;
 
         // 候选布局（input.add_word.candidate_layout，出厂竖排）由 show_add_word_preview
@@ -1265,9 +1272,9 @@ impl Coordinator {
     /// Ctrl+Shift+=：不进加词模式，直接预填并拉起加词界面
     /// （对齐 Go openAddWordDialogFromHistory）。
     ///
-    /// 来源优先级与 Ctrl+= 的默认**刻意相反**：剪贴板优先，不可用才回退最近输入。这条路
-    /// 一按就把词交给设置端、不给调长度的机会，用户按它多半是「我刚复制了一个词，收进
-    /// 词库」；而 Ctrl+= 是带面板的连续加词，接着刚打的字更顺。
+    /// 恒为剪贴板优先，不可用才回退最近输入，**不随** `input.add_word.default_source`。
+    /// 这条路一按就把词交给设置端、不给调长度的机会，用户按它多半是「我刚复制了一个词，
+    /// 收进词库」；而 Ctrl+= 是带面板的连续加词，出厂接着刚打的字更顺。
     pub(crate) fn open_add_word_from_history(&self, state: &mut State) -> KeyAction {
         // 清理未上屏输入/候选/独占残留，避免残留 composition
         self.reset_exclusive_modes(state);
@@ -1689,10 +1696,18 @@ mod tests {
         tag: &str,
         clip: &str,
     ) -> (Arc<Coordinator>, Arc<std::sync::atomic::AtomicUsize>) {
+        coord_counting_clip_cfg(tag, clip, Config::default())
+    }
+
+    fn coord_counting_clip_cfg(
+        tag: &str,
+        clip: &str,
+        cfg: Config,
+    ) -> (Arc<Coordinator>, Arc<std::sync::atomic::AtomicUsize>) {
         let path = std::env::temp_dir().join(format!("wind_addword_{tag}.redb"));
         let _ = std::fs::remove_file(&path);
         let store = Arc::new(Store::open(&path).unwrap());
-        let c = Coordinator::new_headless_with_store(Config::default(), None, store);
+        let c = Coordinator::new_headless_with_store(cfg, None, store);
         let reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         c.set_host_services(Arc::new(MockClip(clip.to_string(), reads.clone())));
         (c, reads)
@@ -2237,6 +2252,60 @@ mod tests {
             c.enter_add_word_mode(&mut st);
             assert!(!st.add_word_from_clip, "{tag}: 有最近输入就该停在最近输入");
         }
+    }
+
+    /// `input.add_word.default_source` 两档 × 优先一侧有/无内容：优先侧可用就落它，否则落另一侧。
+    #[test]
+    fn default_source_picks_preferred_then_falls_back() {
+        use wind_config::config::AddWordSource::{Clipboard, Recent};
+        // (标签, 档位, 最近上屏, 剪贴板, 期望落剪贴板, 期望词)
+        let cases = [
+            (
+                "dsrecent",
+                Recent,
+                &["你", "好"][..],
+                "量子纠缠",
+                false,
+                "你好",
+            ),
+            ("dsrecentfb", Recent, &[][..], "量子纠缠", true, "量子纠缠"),
+            (
+                "dsclip",
+                Clipboard,
+                &["你", "好"][..],
+                "量子纠缠",
+                true,
+                "量子纠缠",
+            ),
+            ("dsclipfb", Clipboard, &["你", "好"][..], "", false, "你好"),
+        ];
+        for (tag, source, recent, clip, want_clip, want_word) in cases {
+            let mut cfg = Config::default();
+            cfg.input.add_word.default_source = source;
+            let (c, _) = coord_counting_clip_cfg(tag, clip, cfg);
+            push_commits(&c, recent);
+            let mut st = c.state.lock().unwrap();
+            c.enter_add_word_mode(&mut st);
+            assert_eq!(st.add_word_from_clip, want_clip, "{tag}: 落点");
+            assert_eq!(c.add_word_current_word(&st), want_word, "{tag}: 默认词");
+        }
+    }
+
+    /// 剪贴板优先只改进入时的落点，Tab 照常切回最近输入。
+    #[test]
+    fn clipboard_first_still_toggles_back() {
+        let mut cfg = Config::default();
+        cfg.input.add_word.default_source = wind_config::config::AddWordSource::Clipboard;
+        let (c, reads) = coord_counting_clip_cfg("dstoggle", "量子纠缠", cfg);
+        push_commits(&c, &["你", "好"]);
+        let mut st = c.state.lock().unwrap();
+        c.enter_add_word_mode(&mut st);
+        assert!(st.add_word_from_clip);
+        c.toggle_add_word_source(&mut st);
+        assert!(!st.add_word_from_clip);
+        assert_eq!(c.add_word_current_word(&st), "你好");
+        c.toggle_add_word_source(&mut st);
+        assert_eq!(reads.load(Ordering::Relaxed), 1, "本轮剪贴板只读一次");
     }
 
     /// 剪贴板不可用时 Tab **照样切得过去**，切过去是剪贴板侧的空态（不是原地不动）。
