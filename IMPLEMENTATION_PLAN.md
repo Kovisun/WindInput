@@ -16,7 +16,7 @@
 **Goal**: `wind-coordinator/src/dict_stats_api.rs`（混输并排两成员、用户词/临时词实时计数），webdata 分派转发。
 **Success Criteria**: RPC 回包形状测试；分派表测试；不入 FULL_SCAN_METHODS。
 **Tests**: `cargo test -p wind-coordinator -p wind-webdata`。
-**Status**: Not Started
+**Status**: Complete
 
 ## Stage 4: 设置端对话框
 **Goal**: 中栏末行「词库统计」+ 左栏右键菜单 → 同一对话框；基础区 + 可展开高级区 + 重码 Top；加载中/失败态；mock。
