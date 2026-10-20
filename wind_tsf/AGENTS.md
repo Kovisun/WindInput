@@ -91,7 +91,10 @@ cmake --build . --config Release      # → build/Release/wind_tsf.dll
 - 服务重启后主管道句柄是旧连接（`IsConnected()` 仍为真，写入报 232）：收到 SERVICE_READY 时
   `DiscardStaleConnection` 先丢掉它（Peek 失败才丢，活连接不动）；没经过 SERVICE_READY 的，
   `_SendBinaryMessage` 在**写过的**连接上遇到对端已断类错误时重连重写一次，不计熔断
-- focus_gained 仍发不出去时 `ScheduleStateSyncRetry` 挂上同一套就绪重试，到点做全量同步并补发焦点
+- focus_gained 仍发不出去时 `ScheduleFocusRecoveryRetry` 另起定时器（`TIMER_ID_FOCUS_RECOVERY`，
+  次数与间隔同就绪重试、计数分开），到点**只补 focus_gained**、不发 IME_ACTIVATED——补发窗口里
+  用户可能已手切中英，重置它比工具栏晚出更糟。判据 `DecideFocusRecovery`；本连接上有过按键
+  （`SendKeyEvent` 也置 `_stateEstablished`）或焦点 / 激活往来就停
 - 回归测试 `tests/win/ipc_reconnect_test.cpp`：链接真实 IPCClient.cpp + 测试专用管道名的服务端，
   模拟重启；`make -C wind_tsf/tests/win run`（wine），exe 也可拷到 Windows 直接跑。
   放子目录是因为 CI 会拿 g++ 编 `tests/` 顶层的 `*_test.cpp`

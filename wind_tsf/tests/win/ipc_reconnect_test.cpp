@@ -294,6 +294,9 @@ void TestKeyEventAfterRestart()
     ServiceResponse resp;
     Expect(client.ReceiveResponse(resp) == TRUE, "key_event response read on the new connection");
     Expect(server.CountAfterSettle(CMD_KEY_EVENT) == 1, "new server got key_event exactly once");
+#ifndef IPC_TEST_LEGACY
+    Expect(client.StateEstablished() == TRUE, "key traffic on the new connection marks state established");
+#endif
     server.Stop();
 }
 

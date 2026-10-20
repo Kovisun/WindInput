@@ -48,6 +48,7 @@ const UINT CLangBarItemButton::WM_TITLE_MATCH_RESYNC = WM_USER + 109;
 
 static const UINT_PTR TIMER_ID_CARET_RETRY    = 0xC401;
 static const UINT_PTR TIMER_ID_SERVICE_READY  = 0xC402;
+static const UINT_PTR TIMER_ID_FOCUS_RECOVERY = 0xC403;
 
 CLangBarItemButton::CLangBarItemButton(CTextService* pTextService)
     : _refCount(1)
@@ -65,6 +66,7 @@ CLangBarItemButton::CLangBarItemButton(CTextService* pTextService)
     , _bIconLoading(TRUE)
     , _bLoggedLoading(FALSE)
     , _serviceReadyFailures(0)
+    , _focusRecoveryFailures(0)
 {
     // Default input type label
     wcscpy_s(_inputTypeLabel, L"中");
@@ -843,6 +845,14 @@ LRESULT CALLBACK CLangBarItemButton::_MsgWndProc(HWND hwnd, UINT msg, WPARAM wPa
     }
     else if (msg == WM_TIMER)
     {
+        if (wParam == TIMER_ID_FOCUS_RECOVERY)
+        {
+            KillTimer(hwnd, wParam);
+            CLangBarItemButton* pThis = reinterpret_cast<CLangBarItemButton*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+            if (pThis != nullptr && pThis->_pTextService != nullptr)
+                pThis->_RunFocusRecoveryRetry(hwnd);
+            return 0;
+        }
         if (wParam == TIMER_ID_SERVICE_READY)
         {
             CLangBarItemButton* pThis = reinterpret_cast<CLangBarItemButton*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
@@ -1382,19 +1392,41 @@ void CLangBarItemButton::CancelServiceReadyRetry()
         WIND_LOG_INFO_FMT(L"SERVICE_READY pending sync cancelled (state synced by key/focus path, failures=%u)\n",
                           _serviceReadyFailures);
     _serviceReadyFailures = 0;
+    if (KillTimer(_hMsgWnd, TIMER_ID_FOCUS_RECOVERY))
+        WIND_LOG_INFO(L"Focus resend retry cancelled (state synced by key/focus path)\n");
+    _focusRecoveryFailures = 0;
 }
 
-void CLangBarItemButton::ScheduleStateSyncRetry()
+void CLangBarItemButton::ScheduleFocusRecoveryRetry()
 {
     if (_hMsgWnd == NULL)
         return;
-    // 与 SERVICE_READY 的失败重试共用定时器与判决：到点时有焦点就做全量同步，
-    // 其末尾的 TryRecoverFocusState 补发 focus_gained。
-    if (_serviceReadyFailures == 0)
-        _serviceReadyFailures = 1;
-    const UINT delay = wind::svcready::RetryDelayMs(GetCurrentThreadId(), _serviceReadyFailures);
-    WIND_LOG_INFO_FMT(L"FocusGained failed, state sync retry in %ums\n", delay);
-    SetTimer(_hMsgWnd, TIMER_ID_SERVICE_READY, delay, nullptr);
+    // 每次 focus_gained 失败都重新起一轮；与就绪重试各用各的定时器和计数。
+    _focusRecoveryFailures = 1;
+    const UINT delay = wind::svcready::RetryDelayMs(GetCurrentThreadId(), _focusRecoveryFailures);
+    WIND_LOG_INFO_FMT(L"FocusGained failed, focus resend retry in %ums\n", delay);
+    SetTimer(_hMsgWnd, TIMER_ID_FOCUS_RECOVERY, delay, nullptr);
+}
+
+void CLangBarItemButton::_RunFocusRecoveryRetry(HWND hwnd)
+{
+    if (_pTextService->RetryFocusRecovery())
+    {
+        _focusRecoveryFailures = 0;
+        return;
+    }
+    ++_focusRecoveryFailures;
+    if (wind::svcready::ShouldRetry(_focusRecoveryFailures))
+    {
+        const UINT delay = wind::svcready::RetryDelayMs(GetCurrentThreadId(), _focusRecoveryFailures);
+        WIND_LOG_INFO_FMT(L"Focus resend failed, retry %u/%u in %ums\n", _focusRecoveryFailures,
+                          wind::svcready::kMaxRetries, delay);
+        SetTimer(hwnd, TIMER_ID_FOCUS_RECOVERY, delay, nullptr);
+        return;
+    }
+    WIND_LOG_WARN_FMT(L"Focus resend gave up after %u retries, toolbar waits for next key or focus\n",
+                      wind::svcready::kMaxRetries);
+    _focusRecoveryFailures = 0;
 }
 
 void CLangBarItemButton::PostServiceReady()

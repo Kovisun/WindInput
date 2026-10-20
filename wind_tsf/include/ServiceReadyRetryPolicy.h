@@ -71,5 +71,34 @@ inline Action Decide(bool isRetry, bool hasFocus, bool hasThreadFocus, bool comp
     return Action::Sync;
 }
 
+/// focus_gained 发不出去后的定时补发（与上面的就绪重试分开计数、分开定时器）该怎么做。
+///
+/// 只补 focus_gained，**没有**退回全量同步这一档：IME_ACTIVATED 会让服务端按初始模式重置
+/// 中英 / 全半角 / 标点，而补发窗口里用户可能已手动切过。工具栏晚出比重置用户状态好接受。
+enum class FocusAction
+{
+    StopRecovered,       ///< 已没有待补的焦点（别的路径补上了，或焦点已换）
+    StopNoFocus,         ///< 无输入焦点
+    StopBackground,      ///< 本线程不在前台：补发会冒充前台焦点
+    StopAlreadySynced,   ///< 本连接上已有 IME_ACTIVATED / FOCUS_GAINED / 按键往来
+    Resend,              ///< 连上（必要时新建）后补发 focus_gained
+};
+
+/// - `needsRecovery`：焦点同步仍欠着（TextService 的 _needsFocusRecovery）。
+/// - `connected` / `stateEstablished`：同 Decide；按键发出去也算已建立。
+inline FocusAction DecideFocusRecovery(bool needsRecovery, bool hasFocus, bool hasThreadFocus,
+                                       bool connected, bool stateEstablished)
+{
+    if (!needsRecovery)
+        return FocusAction::StopRecovered;
+    if (!hasFocus)
+        return FocusAction::StopNoFocus;
+    if (!hasThreadFocus)
+        return FocusAction::StopBackground;
+    if (connected && stateEstablished)
+        return FocusAction::StopAlreadySynced;
+    return FocusAction::Resend;
+}
+
 } // namespace svcready
 } // namespace wind

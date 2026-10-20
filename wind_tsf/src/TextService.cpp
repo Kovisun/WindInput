@@ -12,6 +12,7 @@
 #include "MultilineCommit.h"        // 多行文本粘贴上屏：CRLF 规范化 + 下发值判读
 #include "CompositionPlaceholder.h" // 组合占位识别 + 兜底取值（空格 / ZWSP / 盲文空白，由 core 按应用决定，GH#175）
 #include "WindowTitlePolicy.h" // 窗口标题采集判据（开关 / 截断；compat 的 title 条件）
+#include "ServiceReadyRetryPolicy.h" // focus_gained 补发判决
 #include <vector>
 #include <algorithm>
 #include <shellscalingapi.h>
@@ -3168,7 +3169,7 @@ STDAPI CTextService::OnSetFocus(ITfDocumentMgr* pDocMgrFocus, ITfDocumentMgr* pD
                 WIND_LOG_WARN_FMT(L"FocusGained IPC send failed focusSession=%llu", _focusSessionId);
                 _needsFocusRecovery = TRUE;
                 if (_pLangBarItemButton != nullptr)
-                    _pLangBarItemButton->ScheduleStateSyncRetry();
+                    _pLangBarItemButton->ScheduleFocusRecoveryRetry();
             }
         }
 
@@ -4487,6 +4488,46 @@ void CTextService::TryRecoverFocusState()
         WIND_LOG_WARN_FMT(L"Deferred focus recovery send failed focusSession=%llu", _focusSessionId);
         _needsFocusRecovery = FALSE;
     }
+}
+
+BOOL CTextService::RetryFocusRecovery()
+{
+    using wind::svcready::FocusAction;
+    if (_pIPCClient == nullptr)
+        return TRUE;
+    const FocusAction action = wind::svcready::DecideFocusRecovery(
+        _needsFocusRecovery != FALSE, HasFocus() != FALSE, _hasThreadFocus != FALSE,
+        _pIPCClient->IsConnected() != FALSE, _pIPCClient->StateEstablished() != FALSE);
+    switch (action)
+    {
+    case FocusAction::StopRecovered:
+        return TRUE;
+    case FocusAction::StopNoFocus:
+    case FocusAction::StopBackground:
+        WIND_LOG_INFO_FMT(L"Focus resend retry stopped (%ls)\n",
+                          action == FocusAction::StopNoFocus ? L"no focus" : L"background");
+        _needsFocusRecovery = FALSE;
+        return TRUE;
+    case FocusAction::StopAlreadySynced:
+        // 按键路径会在下次按键时 TryRecoverFocusState 补上，这里不抢。
+        WIND_LOG_INFO(L"Focus resend retry stopped (connection already has traffic)\n");
+        return TRUE;
+    case FocusAction::Resend:
+        break;
+    }
+
+    // 只补 focus_gained，不走 _DoFullStateSync：IME_ACTIVATED 会把用户在窗口期里切过的中英重置。
+    if (!_pIPCClient->IsConnected() && !_pIPCClient->Connect())
+        return FALSE;
+    if (!_ResendFocusGained(L"retry"))
+        return FALSE;
+    _needsFocusRecovery = FALSE;
+    _pIPCClient->ClearNeedsSyncFlag();
+    _EndFocusGap();
+    CancelServiceReadyRetry();
+    SendCaretPositionUpdate();
+    WIND_LOG_INFO(L"Focus resend retry succeeded\n");
+    return TRUE;
 }
 
 void CTextService::SetTitleMatchEnabled(BOOL bEnabled)

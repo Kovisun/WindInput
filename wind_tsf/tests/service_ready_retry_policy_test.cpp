@@ -70,6 +70,31 @@ int main()
     Expect(Decide(true, true, true, true, false, false) == Action::DeferComposition, "重试遇组合态推迟");
     Expect(Decide(false, true, false, true, false, false) == Action::DeferComposition, "首次遇组合态推迟");
 
+    // DecideFocusRecovery(needsRecovery, hasFocus, hasThreadFocus, connected, stateEstablished)
+    Expect(DecideFocusRecovery(true, true, true, false, false) == FocusAction::Resend,
+           "焦点补发：断开着就连上补发 focus_gained");
+    Expect(DecideFocusRecovery(true, true, true, true, false) == FocusAction::Resend,
+           "焦点补发：连上了但本连接还没往来，照常补发");
+    Expect(DecideFocusRecovery(true, true, true, true, true) == FocusAction::StopAlreadySynced,
+           "焦点补发：窗口期内按键已在本连接往来过，停手（不得再发任何会重置状态的消息）");
+    Expect(DecideFocusRecovery(false, true, true, false, false) == FocusAction::StopRecovered,
+           "焦点补发：别的路径已补上就停");
+    Expect(DecideFocusRecovery(true, false, true, false, false) == FocusAction::StopNoFocus,
+           "焦点补发：焦点没了就停");
+    Expect(DecideFocusRecovery(true, true, false, false, false) == FocusAction::StopBackground,
+           "焦点补发：后台线程不补");
+
+    // 焦点补发的判决里没有「全量同步」这一档：穷举输入，结果只可能是补发或停，
+    // 且只要本连接已有往来（含按键）就绝不补发。
+    bool neverResendAfterTraffic = true;
+    for (int m = 0; m < 32; ++m)
+    {
+        const bool needs = m & 1, focus = m & 2, thread = m & 4, conn = m & 8, est = m & 16;
+        if (conn && est && DecideFocusRecovery(needs, focus, thread, conn, est) == FocusAction::Resend)
+            neverResendAfterTraffic = false;
+    }
+    Expect(neverResendAfterTraffic, "焦点补发：本连接已有往来时任何输入组合都不补发");
+
     if (g_failures == 0)
         std::printf("service_ready_retry_policy_test: all passed\n");
     return g_failures == 0 ? 0 : 1;

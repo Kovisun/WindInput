@@ -881,7 +881,11 @@ BOOL CIPCClient::SendKeyEvent(uint32_t keyCode, uint32_t scanCode, uint32_t modi
     _LogDebug(L"Sending key event: keyCode=0x%X, mods=0x%X, type=%d, toggles=0x%X, seq=%d, prevChar=0x%X",
               keyCode, modifiers, eventType, toggles, eventSeq, prevChar);
 
-    return _SendBinaryMessage(CMD_KEY_EVENT, &payload, sizeof(payload));
+    if (!_SendBinaryMessage(CMD_KEY_EVENT, &payload, sizeof(payload)))
+        return FALSE;
+    // 按键已在本连接往来（含陈旧句柄自愈后的新连接）：之后的过期重试不得再发 IME_ACTIVATED。
+    _stateEstablished = TRUE;
+    return TRUE;
 }
 
 BOOL CIPCClient::SendCommitRequest(const uint8_t* payload, uint32_t payloadSize)
