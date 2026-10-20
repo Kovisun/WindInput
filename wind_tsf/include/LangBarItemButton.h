@@ -97,6 +97,9 @@ public:
     // Triggers _DoFullStateSync() on the TSF thread so the toolbar appears
     // after service restart without waiting for a focus/key event.
     void PostServiceReady();
+    // 按键 / 焦点路径已建立服务端状态时调（TSF 线程）：停掉 SERVICE_READY 的待发同步，
+    // 免得它晚到一步再发 IME_ACTIVATED、把用户刚切的中英状态重置。
+    void CancelServiceReadyRetry();
 
     // Thread-safe activation status from async reader thread.
     // 触发时机：Go 收到异步化后的 CmdIMEActivated / CmdFocusGained 完成 handler 后通过

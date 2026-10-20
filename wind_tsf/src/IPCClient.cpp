@@ -19,6 +19,8 @@ CIPCClient::CIPCClient()
     , _hEvent(NULL)
     , _serviceStartAttempted(FALSE)
     , _needsStateSync(TRUE)
+    , _stateEstablished(FALSE)
+    , _pipeBusyExempt(FALSE)
     , _circuitState(CircuitState::Closed)
     , _consecutiveFailures(0)
     , _lastFailureTime(0)
@@ -658,6 +660,7 @@ BOOL CIPCClient::Connect()
                      PROTOCOL_VERSION >> 12, PROTOCOL_VERSION & 0xFFF);
             _RecordSuccess();
             _needsStateSync = TRUE;
+            _stateEstablished = FALSE;
 
             return TRUE;
         }
@@ -682,16 +685,20 @@ BOOL CIPCClient::Connect()
         break;
     }
 
-    _LogError(L"Failed to connect to Service (pipe=%s, lastErr=%d)", PIPE_NAME, GetLastError());
+    // 管道忙在服务就绪时是 N 个宿主 × 多次重试的常态，不按 ERROR 刷屏。
+    if (lastError == ERROR_PIPE_BUSY)
+        _LogInfo(L"Failed to connect to Service: pipe busy (pipe=%s)", PIPE_NAME);
+    else
+        _LogError(L"Failed to connect to Service (pipe=%s, lastErr=%d)", PIPE_NAME, GetLastError());
     {
         WindHostProcessInfo currentHost;
         if (WindQueryCurrentProcessInfo(&currentHost))
             WindLogHostProcessInfo(4, L"compat.ipc_connect_failed.current_host", currentHost);
         WindLogForegroundProcessInfo(4, L"compat.ipc_connect_failed.foreground_host");
     }
-    // 管道忙说明服务活着、只是监听实例被别的宿主抢走（服务就绪时各线程同时来连），
-    // 不算服务不可用：计入熔断会让 SERVICE_READY 的重试在熔断窗口里全部空转。
-    if (lastError != ERROR_PIPE_BUSY)
+    // SERVICE_READY 同步期间管道忙说明服务活着、只是监听实例被别的宿主抢走，
+    // 计入熔断会让重试在熔断窗口里全部空转。其余路径照旧计数。
+    if (!(_pipeBusyExempt && lastError == ERROR_PIPE_BUSY))
         _RecordFailure();
     return FALSE;
 }
@@ -703,6 +710,7 @@ void CIPCClient::Disconnect()
         CancelIo(_hPipe);
         CloseHandle(_hPipe);
         _hPipe = INVALID_HANDLE_VALUE;
+        _stateEstablished = FALSE;
         _LogDebug(L"Disconnected from Service");
     }
 }
@@ -1055,6 +1063,7 @@ BOOL CIPCClient::SendFocusGained(int caretX, int caretY, int caretHeight, UINT64
     {
         return FALSE;
     }
+    _stateEstablished = TRUE;
 
     ServiceResponse response;
     if (ReceiveResponse(response))
@@ -1174,7 +1183,10 @@ BOOL CIPCClient::SendIMEActivated()
     // 异步化（见 BinaryProtocol.h::CMD_ACTIVATION_STATUS_PUSH 注释）：
     // Go 端 server.go::handleClient 收到 IME_ACTIVATED 立即回 Ack，HandleIMEActivated
     // 在 Ack 之后才执行，结果通过 push pipe 回送 CMD_ACTIVATION_STATUS_PUSH。
-    return _SendBinaryMessage(CMD_IME_ACTIVATED, &payload, sizeof(payload), true /* async */);
+    if (!_SendBinaryMessage(CMD_IME_ACTIVATED, &payload, sizeof(payload), true /* async */))
+        return FALSE;
+    _stateEstablished = TRUE;
+    return TRUE;
 }
 
 BOOL CIPCClient::SendHostRenderRequest(ServiceResponse& response)

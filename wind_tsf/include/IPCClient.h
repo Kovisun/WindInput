@@ -407,6 +407,13 @@ public:
     BOOL NeedsStateSync() const { return _needsStateSync; }
     void ClearNeedsSyncFlag() { _needsStateSync = FALSE; }
 
+    // 本连接上 IME_ACTIVATED 或 FOCUS_GAINED 是否已发出去过（新连接 / 断开时清零）。
+    // SERVICE_READY 的过期重试据此停手：服务端收到 IME_ACTIVATED 会按初始模式重置中英。
+    BOOL StateEstablished() const { return _stateEstablished; }
+
+    // SERVICE_READY 同步期间置 TRUE：管道忙（各宿主同时来连）不计入熔断。按键路径照旧计数。
+    void SetPipeBusyExempt(BOOL exempt) { _pipeBusyExempt = exempt; }
+
 private:
     // Pipe handle
     HANDLE _hPipe;
@@ -419,6 +426,9 @@ private:
 
     // State sync flag: set TRUE on new connection, cleared after full sync
     BOOL _needsStateSync;
+
+    BOOL _stateEstablished;
+    BOOL _pipeBusyExempt;
 
     // Circuit breaker state
     CircuitState _circuitState;

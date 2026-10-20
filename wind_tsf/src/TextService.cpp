@@ -3156,6 +3156,7 @@ STDAPI CTextService::OnSetFocus(ITfDocumentMgr* pDocMgrFocus, ITfDocumentMgr* pD
                                    _focusSessionId, focusIpcMs);
                 _needsFocusRecovery = FALSE;
                 _focusLostSent = FALSE; // 新会话开始，下次离开文档时须再发一次 focus_lost
+                CancelServiceReadyRetry();
                 // 服务端此刻已知「焦点在可编辑控件里」。置位后，焦点离开时
                 // _ReportEditContextLost 才会在翻转沿补一条 CTX_LOST。
                 _editCtxReported = TRUE;
@@ -4359,15 +4360,19 @@ BOOL CTextService::_SetConversionMode(BOOL bChinese)
     return SUCCEEDED(hr);
 }
 
-BOOL CTextService::_DoFullStateSync()
+BOOL CTextService::_DoFullStateSync(BOOL fromServiceReady)
 {
     if (_pIPCClient == nullptr)
         return FALSE;
 
+    const int failLevel = fromServiceReady ? 3 /* info */ : 2 /* warn */;
+    _pIPCClient->SetPipeBusyExempt(fromServiceReady);
+
     // Lazy connect: push pipe may reconnect before main pipe is established (service restart).
     if (!_pIPCClient->IsConnected() && !_pIPCClient->Connect())
     {
-        WIND_LOG_INFO(L"_DoFullStateSync: main pipe not connected, skipping\n");
+        _pIPCClient->SetPipeBusyExempt(FALSE);
+        WindLog::Output(failLevel, L"_DoFullStateSync: main pipe not connected, skipping\n");
         return FALSE;
     }
 
@@ -4387,8 +4392,9 @@ BOOL CTextService::_DoFullStateSync()
         // Stale pipe: write failed and Disconnect() was called; retry after fresh connect.
         sent = _pIPCClient->Connect() && _pIPCClient->SendIMEActivated();
         if (!sent)
-            WIND_LOG_INFO(L"_DoFullStateSync: SendIMEActivated failed\n");
+            WindLog::Output(failLevel, L"_DoFullStateSync: SendIMEActivated failed\n");
     }
+    _pIPCClient->SetPipeBusyExempt(FALSE);
 
     // 注：清除 _needsStateSync 提前到此处，让后续 KeyEventSink 路径不再触发重复 state sync。
     // 即便 push 暂时未到，下一次焦点切换会重新拉起 activation 流程。
@@ -4408,6 +4414,12 @@ BOOL CTextService::_DoFullStateSync()
     // 先前发不出去的 focus_gained（服务没连上）在此补发，带上窗口类名 / 标题。
     TryRecoverFocusState();
     return sent;
+}
+
+void CTextService::CancelServiceReadyRetry()
+{
+    if (_pLangBarItemButton != nullptr)
+        _pLangBarItemButton->CancelServiceReadyRetry();
 }
 
 // ApplyActivationStatusResponse 在 TSF 线程上把 push pipe 接收到的 activation status 落地。

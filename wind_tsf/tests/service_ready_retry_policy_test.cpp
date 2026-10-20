@@ -54,6 +54,22 @@ int main()
         perAttempt.insert(RetryDelayMs(12345, n));
     Expect(perAttempt.size() >= 5, "同一线程各次重试间隔要变化");
 
+    // Decide(isRetry, hasFocus, hasThreadFocus, composing, connected, stateEstablished)
+    Expect(Decide(false, false, true, false, false, false) == Action::StopNoFocus, "无焦点不同步");
+    Expect(Decide(true, false, true, false, false, false) == Action::StopNoFocus, "重试时无焦点也停");
+    Expect(Decide(false, true, false, false, false, false) == Action::Sync, "首次同步不看前台");
+    Expect(Decide(false, true, true, false, true, true) == Action::Sync,
+           "首次同步不看已同步标记（服务重启后旧连接的标记不可信）");
+    Expect(Decide(true, true, true, false, true, true) == Action::StopAlreadySynced,
+           "按键路径已在本连接发过 IME_ACTIVATED：过期重试不得再发（会重置用户刚切的中英）");
+    Expect(Decide(true, true, true, false, true, false) == Action::Sync,
+           "连上了但还没同步：照常重试");
+    Expect(Decide(true, true, true, false, false, true) == Action::Sync,
+           "未连接时已同步标记无意义：照常重试");
+    Expect(Decide(true, true, false, false, false, false) == Action::StopBackground, "后台线程不重试");
+    Expect(Decide(true, true, true, true, false, false) == Action::DeferComposition, "重试遇组合态推迟");
+    Expect(Decide(false, true, false, true, false, false) == Action::DeferComposition, "首次遇组合态推迟");
+
     if (g_failures == 0)
         std::printf("service_ready_retry_policy_test: all passed\n");
     return g_failures == 0 ? 0 : 1;

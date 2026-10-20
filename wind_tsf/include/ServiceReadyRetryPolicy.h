@@ -44,5 +44,32 @@ inline uint32_t RetryDelayMs(uint32_t seed, uint32_t failures)
     return kBaseDelayMs + h % (kJitterMs + 1);
 }
 
+/// 本轮（首次或定时器到点）该怎么做。
+enum class Action
+{
+    StopNoFocus,         ///< 无输入焦点：不弹工具栏，等 OnSetFocus 建立服务端状态
+    StopAlreadySynced,   ///< 重试时发现本连接已由按键 / 焦点路径同步过：再发会重置中英状态
+    StopBackground,      ///< 重试时本线程不在前台：后台宿主不值得反复阻塞 UI 线程
+    DeferComposition,    ///< 组合进行中：推迟，免得清掉服务端输入缓冲（不计失败次数）
+    Sync,                ///< 发 IME_ACTIVATED
+};
+
+/// - `isRetry`：之前已失败过（失败重试，而非首次或组合态推迟）。
+/// - `connected` / `stateEstablished`：主管道已连上，且本连接上 IME_ACTIVATED 或
+///   FOCUS_GAINED 已发出去过。
+inline Action Decide(bool isRetry, bool hasFocus, bool hasThreadFocus, bool composing,
+                     bool connected, bool stateEstablished)
+{
+    if (!hasFocus)
+        return Action::StopNoFocus;
+    if (isRetry && connected && stateEstablished)
+        return Action::StopAlreadySynced;
+    if (isRetry && !hasThreadFocus)
+        return Action::StopBackground;
+    if (composing)
+        return Action::DeferComposition;
+    return Action::Sync;
+}
+
 } // namespace svcready
 } // namespace wind
