@@ -5723,13 +5723,13 @@ BOOL CTextService::GetCaretPosition(LONG* px, LONG* py, LONG* pHeight, int* pSou
         }
     }
 
-    // 补发 IMN_OPENCANDIDATE 的 IMM32 宿主（见 ImmOpenCandidateNudge.h）：GUI caret 不可用，
+    // 出现过宿主默认位置指纹的线程（见 ImmOpenCandidateNudge.h 的 IsGuiCaretUnreliable）：GUI caret 不可用，
     // 直接判失败，调用方退到 last known（上一次真正发出去的坐标）。
     // 实测（2026-10-04 靶机 Zulu 7u45）：Java 的系统光标恒在窗口客户区原点 (0,54)。JTable 这类
     // 被动客户端按键时报上去，服务端把它当「组合前空闲上报」，25ms 兜底拿它首显——候选窗
     // 先闪到屏幕左边，62ms 后 CARET_RETRY 拿到 Windows 输入编辑框 (473,217) 才跳回。
     // 编辑框位置不随单元格变，last known 恰是它。
-    if (wind::caret::IsImmOpenCandidateHost())
+    if (wind::caret::IsGuiCaretUnreliable())
     {
         WIND_LOG_DEBUG(L"GetCaretPosition: IMM32 宿主不取 GUI caret（恒为窗口原点），交由 last known\n");
         return FALSE;
