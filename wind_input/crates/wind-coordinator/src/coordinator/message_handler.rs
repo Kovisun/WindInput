@@ -775,7 +775,8 @@ impl MessageHandler for Coordinator {
             None => return,
         };
         let cfg = &self.rt().config.stats;
-        if !cfg.enabled || !cfg.track_english {
+        // 暂停学习同样不记（理由见 `record_commit_ks`）。
+        if !cfg.enabled || !cfg.track_english || self.learning_suspended() {
             return;
         }
         if chars == 0 && digits == 0 && puncts == 0 && spaces == 0 {

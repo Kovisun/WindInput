@@ -569,6 +569,11 @@ impl Coordinator {
         single_is_synthesized: bool,
         overlay: Option<&str>,
     ) -> Option<String> {
+        // 暂停学习：拼音分步 / 整句造词不进临时词库（返回 None，调用方的 6b 照常判，
+        // 它自己也挡）。
+        if self.learning_suspended() {
+            return None;
+        }
         // 单段仅当它是整句解时放行；其余仍要求 ≥2 段。
         if state.committed_segs.len() < 2
             && !(state.committed_segs.len() == 1 && single_is_synthesized)
@@ -773,6 +778,10 @@ impl Coordinator {
         code: &str,
         learned_code: Option<&str>,
     ) {
+        // 暂停学习：选中临时词也不累加计数、不推晋升。
+        if self.learning_suspended() {
+            return;
+        }
         let Some(store) = &self.store else {
             return;
         };

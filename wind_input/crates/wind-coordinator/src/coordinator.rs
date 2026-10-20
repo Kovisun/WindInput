@@ -1578,6 +1578,14 @@ pub struct Coordinator {
     /// 合成坐标去骗过闸门（Android 一度就是这么做的，`height` 写 0 还会被判为「宿主
     /// 尚未 reflow」整帧丢弃，候选一次都不下发）。
     caret_independent: std::sync::atomic::AtomicBool,
+    /// 暂停学习（隐私 / 无痕输入）：置位期间上屏照常、候选照常，但**不把这次输入写进任何
+    /// 用户数据**（词频、自动造词 / 草稿、联想历史与下一词、英文造词、输入统计、快捷输入 /
+    /// 网址 / 邮箱历史、上屏历史）。见 [`Coordinator::set_learning_suspended`]。
+    ///
+    /// 纯运行时、**不进配置**：它描述的是「当前这个输入框」的属性（Android 的
+    /// `IME_FLAG_NO_PERSONALIZED_LEARNING`），宿主每次聚焦重新声明；持久化下来反而会让
+    /// 一次无痕输入把之后所有输入框都变成不学习。
+    learning_suspended: std::sync::atomic::AtomicBool,
     /// 宿主报的光标坐标可直接当权威用（Linux addon：来自应用自己上报的光标矩形，没有 Windows
     /// 那种跨窗口 Win32 光标冒充插入点的问题，但来源字段恒为 UNKNOWN）。见 `host.display`。
     host_caret_trusted: std::sync::atomic::AtomicBool,
@@ -2438,6 +2446,29 @@ impl Coordinator {
             .store(value, std::sync::atomic::Ordering::Relaxed);
     }
 
+    /// 暂停 / 恢复学习（隐私 / 无痕输入，见字段 `learning_suspended`）。
+    ///
+    /// 判断收口在各条**学习入口**（`record_selection_cased_in`、`learn_phrase_on_commit_in`、
+    /// `bump_selected_temp_word`、`promote_draft_on_commit`、`note_draft_commit`、
+    /// `learn_english_raw`、`record_assoc_pick`、`learn_next_word`、`record_commit_ks` /
+    /// `handle_english_stats`、`learn_quick_history`、`learn_url_history`、
+    /// `learn_email_suffix`、`push_commit_history`），而不是散在各个 store 写函数里：
+    /// 用户**主动**的操作（加词、删词、置顶、清空）也走同一批 store 写函数，那是用户意图、
+    /// 不是学习，暂停期间必须照常生效。读路径一概不看本开关。
+    ///
+    /// 切换时顺带打一个下一词断点：暂停前最后一个词不该和恢复后的第一个词连成一对。
+    pub fn set_learning_suspended(&self, on: bool) {
+        self.learning_suspended
+            .store(on, std::sync::atomic::Ordering::Relaxed);
+        self.note_word_boundary();
+    }
+
+    /// 当前是否暂停学习（见 [`Self::set_learning_suspended`]）。
+    pub fn learning_suspended(&self) -> bool {
+        self.learning_suspended
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     /// 声明宿主报的光标坐标可直接当权威（见字段 `host_caret_trusted`）。
     pub fn set_host_caret_trusted(&self, value: bool) {
         self.host_caret_trusted
@@ -3006,6 +3037,7 @@ impl Coordinator {
             pair_tracker: Mutex::new(wind_transform::pair_tracker::PairTracker::new()),
             last_valid_caret: Mutex::new((0, 0, 0)),
             caret_independent: std::sync::atomic::AtomicBool::new(false),
+            learning_suspended: std::sync::atomic::AtomicBool::new(false),
             host_caret_trusted: std::sync::atomic::AtomicBool::new(false),
             host_no_inline_preedit: std::sync::atomic::AtomicBool::new(false),
             eager_prewarm: std::sync::atomic::AtomicBool::new(true),
@@ -9725,6 +9757,14 @@ impl Coordinator {
             None => return,
         };
         if !self.rt().config.stats.enabled {
+            return;
+        }
+        // 暂停学习：逐日字数与速度同样是「这次输入留下的痕迹」。放在断点与调试捕获之后——
+        // 断点照打，调试捕获只观测「本该记哪一笔」。`stat_recorded` 照常置位，与正常记账
+        // 同一形状，顶层 `record_input_stats` 才不会把这次当成漏记、再走一遍兜底。
+        if self.learning_suspended() {
+            self.stat_recorded
+                .store(true, std::sync::atomic::Ordering::Relaxed);
             return;
         }
         let (chinese, english, punct, other) = wind_store::stats::classify_chars_full(text);

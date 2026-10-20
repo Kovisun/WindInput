@@ -367,6 +367,20 @@ impl MobileCore {
         self.coord.handle_focus_lost(1, FocusLostReason::Thread);
     }
 
+    /// 暂停 / 恢复学习（隐私 / 无痕输入）。暂停期间照常出候选、照常上屏，但这次输入
+    /// **不写进任何用户数据**：词频、自动造词、联想与下一词、英文造词、输入统计、各类历史。
+    /// 用户在设置页 / 候选菜单里的显式操作（加词、删词、置顶）不受影响。
+    ///
+    /// 宿主在**每次** `onStartInput`（[`Self::focus_gained`] 前后均可）按当前输入框重新声明：
+    /// `EditorInfo.imeOptions` 带 `IME_FLAG_NO_PERSONALIZED_LEARNING`（无痕浏览器、私密
+    /// 聊天框），或 `inputType` 是密码类（`TYPE_TEXT_VARIATION_PASSWORD` /
+    /// `VISIBLE_PASSWORD` / `WEB_PASSWORD` / `TYPE_NUMBER_VARIATION_PASSWORD`）时传 `true`，
+    /// 其余传 `false`。开关纯运行时、不落盘，所以「其余传 `false`」不能省——
+    /// 否则上一个无痕框的暂停会一直延续到之后的普通输入框。
+    pub fn set_learning_suspended(&self, on: bool) {
+        self.coord.set_learning_suspended(on);
+    }
+
     /// 下达引擎命令。状态变化经 [`MobileEventSink::on_status`] 异步回报，不在此处同步返回
     /// ——同一个变化也可能由按键或焦点事件引发，只留推送一条路，宿主才不会有两份真值。
     pub fn run_command(&self, cmd: MobileCommand) {
@@ -933,6 +947,19 @@ mod user_words_tests {
 
         assert_eq!(m.user_words_clear("pinyin"), Ok(1));
         assert_eq!(m.user_words("pinyin", "", 0, 50), UserWordPage::default());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// 暂停学习只是转发：开关落到协调器上（学习路径的覆盖在 wind-coordinator 的
+    /// `tests/learning_suspended.rs` 验）。
+    #[test]
+    fn learning_suspended_forwards_to_coordinator() {
+        let (m, dir) = core("suspend", None);
+        assert!(!m.coord.learning_suspended(), "默认不暂停");
+        m.set_learning_suspended(true);
+        assert!(m.coord.learning_suspended());
+        m.set_learning_suspended(false);
+        assert!(!m.coord.learning_suspended());
         let _ = std::fs::remove_dir_all(dir);
     }
 

@@ -373,6 +373,9 @@ impl Coordinator {
     /// 只记**前缀延伸**类的选择（有 `commit_override`：显示整词、上屏补剩余）——上文就是
     /// 整词去掉补出的那截。标点联想等没有「上文 → 词」的前缀关系，不记。
     pub(crate) fn record_assoc_pick(&self, cand: &Candidate) {
+        if self.learning_suspended() {
+            return;
+        }
         let (Some(store), Some(rest)) = (&self.store, cand.commit_override.as_deref()) else {
             return;
         };
@@ -401,7 +404,9 @@ impl Coordinator {
     /// - 后一个词以前一个词开头（「中」→「中国」）：读端会把它当前缀延伸，只补「国」，
     ///   而用户打的是两个词。
     pub(crate) fn learn_next_word(&self, prev: Option<String>, word: &str, already_recorded: bool) {
-        if !word.chars().any(char::is_alphabetic) {
+        // 暂停学习：不记，也不把这个词留作下一次的上文——否则恢复后的第一个词会和
+        // 无痕框里的最后一个词连成一对，等于把它带了出去。
+        if self.learning_suspended() || !word.chars().any(char::is_alphabetic) {
             self.note_word_boundary();
             return;
         }

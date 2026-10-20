@@ -431,7 +431,9 @@ impl Coordinator {
     /// 而快捷输入数字透镜的上屏（计算结果、日期、金额）没有编码、恒不记词频，却同样是
     /// 一次上屏。历史点若只挂在选词上，「算完再按 ; 空格重复一次」永远取不到刚算的结果。
     pub(crate) fn push_commit_history(&self, text: &str) {
-        if text.is_empty() {
+        // 暂停学习也不记：它虽只在内存里，却会经 `;` 重复上屏、加词推荐把无痕框里打的字
+        // 带到下一个输入框去——隐私上与落库无异。
+        if text.is_empty() || self.learning_suspended() {
             return;
         }
         let mut h = self
@@ -586,7 +588,8 @@ impl Coordinator {
         // `$CC` 纯文本命令就是 `freq_text` 空而上屏文本非空的例子。
         self.push_commit_history(history_text);
         let text = freq_text;
-        if text.is_empty() {
+        // 暂停学习：一切选词记账（主路、临拼、快捷输入、特殊模式、英文头部候选）都汇到这里。
+        if text.is_empty() || self.learning_suspended() {
             return;
         }
         if source == CandidateSource::Phrase {
