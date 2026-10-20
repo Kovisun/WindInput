@@ -309,6 +309,8 @@ pub struct UnparsableLayer {
     pub skipped_lines: Vec<usize>,
     /// 救回来的顶层键数量。0 且 `skipped_lines` 为空 ⇒ 该层完全作废。
     pub salvaged_keys: usize,
+    /// 文件不是 UTF-8（记事本存成 ANSI/GBK 最常见）：整层作废，与语法错误分开讲。
+    pub not_utf8: bool,
 }
 
 /// 文案里最多列出几个行号，其余折叠成计数。
@@ -361,6 +363,9 @@ impl UnparsableLayer {
     /// 两者同时成立，而那时说「加载其余内容」是在撒谎——一个字都没加载。
     pub fn describe(&self) -> String {
         let file = self.path.display();
+        if self.not_utf8 {
+            return format!("{file}：不是 UTF-8 编码，本次未能加载");
+        }
         if !self.is_salvaged() {
             // 尝试过的行号仍要给（用户拿它去看那几行怎么了），但走紧凑形态：
             // 啃不动的文件会攒到 32 个行号，全列出来只是噪音。
@@ -9080,6 +9085,22 @@ impl Config {
         }
         let content = match std::fs::read_to_string(path) {
             Ok(c) => c,
+            // 编码不对是文件内容的问题，与语法错同类：必须进 `unparsable` 关上写盘闸，
+            // 否则这一层按「不存在」处理，下次保存就拿默认值覆盖掉用户的文件。
+            Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
+                warn!("配置文件不是 UTF-8 编码 {}：{}", path.display(), e);
+                if !layer.is_empty() {
+                    unparsable.push(UnparsableLayer {
+                        layer,
+                        path: path.to_path_buf(),
+                        error: e.to_string(),
+                        skipped_lines: Vec::new(),
+                        salvaged_keys: 0,
+                        not_utf8: true,
+                    });
+                }
+                return None;
+            }
             Err(e) => {
                 // 读不出来（权限、被独占、坏扇区）不是语法问题，不进 `unparsable`：
                 // 那份文件在盘上可能完好，报「语法错误」会把用户支去改一个没错的文件。
@@ -9115,6 +9136,7 @@ impl Config {
                 error: parsed.first_error.clone().unwrap_or_default(),
                 skipped_lines: parsed.skipped_lines.clone(),
                 salvaged_keys,
+                not_utf8: false,
             });
         }
         parsed.value
@@ -12769,6 +12791,7 @@ scripts = { latin = 42 }
             skipped_lines: vec![1, 2, 3],
             // ……但最终什么都没解析出来。
             salvaged_keys: 0,
+            not_utf8: false,
         };
         let s = u.describe();
         assert!(
@@ -12802,6 +12825,7 @@ scripts = { latin = 42 }
             error: String::new(),
             skipped_lines: (1..=n).collect(),
             salvaged_keys: 1,
+            not_utf8: false,
         };
         assert_eq!(mk(0).lines_phrase(), "", "没有行号就返回空串");
 
@@ -12824,6 +12848,30 @@ scripts = { latin = 42 }
             many.starts_with("第 ") && many.contains(" 行"),
             "短语须自带「第…行」：{many}"
         );
+    }
+
+    /// ★ 非 UTF-8 的配置文件要进 `unparsable`（关写盘闸），不能当「文件不存在」跳过。
+    #[test]
+    fn non_utf8_config_is_reported_as_unparsable() {
+        let dir = std::env::temp_dir().join(format!("wind_cfg_gbk_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        // 「# 中文」的 GBK 字节
+        std::fs::write(&path, b"# \xd6\xd0\xce\xc4\n[ui]\nx = 1\n").unwrap();
+        let mut un = Vec::new();
+        let v = Config::read_toml_value_reporting(&path, "user", &mut un);
+        assert!(v.is_none());
+        assert_eq!(un.len(), 1, "编码错误必须上报");
+        assert!(un[0].not_utf8);
+        assert!(un[0].describe().contains("UTF-8"), "{}", un[0].describe());
+
+        // 对照：带 BOM 的 UTF-8 照常加载，不上报。
+        std::fs::write(&path, "\u{FEFF}# 中文\n[ui]\nx = 1\n").unwrap();
+        let mut un = Vec::new();
+        let v = Config::read_toml_value_reporting(&path, "user", &mut un);
+        assert!(un.is_empty(), "{un:?}");
+        assert_eq!(v.unwrap()["ui"]["x"].as_integer(), Some(1));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// 合法文件走的是零改动的快路径：`is_clean` 为真、一行都没跳过。
@@ -12851,6 +12899,7 @@ scripts = { latin = 42 }
                 error: "duplicate key".into(),
                 skipped_lines: vec![6],
                 salvaged_keys: 2,
+                not_utf8: false,
             }],
         };
         assert!(deg.is_degraded());

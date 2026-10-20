@@ -158,6 +158,8 @@ fn handle(state: &DispatchState, method: &str, params: &Value) -> anyhow::Result
                     // 1-based，就是用户在编辑器里看到的行号。
                     "skippedLines": u.skipped_lines,
                     "salvagedKeys": u.salvaged_keys,
+                    // 编码不对（非 UTF-8）：设置端据此改讲「另存为 UTF-8」，而不是「修语法」。
+                    "notUtf8": u.not_utf8,
                 })).collect::<Vec<_>>(),
             }))
         }
