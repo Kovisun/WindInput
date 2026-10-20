@@ -5496,6 +5496,8 @@ impl Coordinator {
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = hidden;
         if hidden {
+            // 看不见的网格里 ←→ 还会移高亮而不移编码光标：随候选窗一起收起（§5.5）。
+            self.collapse_grid(&mut self.state.lock().unwrap_or_else(|e| e.into_inner()));
             self.clear_hover();
             let _ = self.ui_tx.send(UiCommand::HideCandidates);
         }
@@ -7016,6 +7018,8 @@ impl Coordinator {
             *h
         };
         if hidden {
+            // 看不见的网格里 ←→ 还会移高亮而不移编码光标：随候选窗一起收起（§5.5）。
+            self.collapse_grid(&mut self.state.lock().unwrap_or_else(|e| e.into_inner()));
             self.clear_hover();
             let _ = self.ui_tx.send(UiCommand::HideCandidates);
         }
@@ -7298,7 +7302,7 @@ impl Coordinator {
         // 与数字键的选择范围 `select_range` 同源。
         let grid_index = grid_range.map(|(vis_start, _)| {
             let (sel_start, sel_end) = self.select_range(state);
-            (sel_start - vis_start, sel_end - sel_start)
+            (sel_start.saturating_sub(vis_start), sel_end - sel_start)
         });
         // 候选序号标签：
         //  - 数字透镜：数字键正在录表达式 → 选词改用字母标签 a/b/c

@@ -289,6 +289,8 @@ impl Coordinator {
         state.active = overlay.origin;
         state.candidates = overlay.session.restore_original();
         state.preedit = overlay.preedit_base;
+        // 进辅助码前展开着的，退回来也展开着（与分步上屏同一条「本次组合保持」）。
+        self.grid_resume(state);
         debug!("aux_code: exited (origin={:?})", overlay.origin);
     }
 

@@ -1001,10 +1001,11 @@ impl MessageHandler for Coordinator {
         // 别让上一键的登记漏到这一键。
         self.commit_code_pending
             .store(false, std::sync::atomic::Ordering::Relaxed);
-        // 按下时已没有候选 = 上一次组合已经结束（出口有几十处），「本次展开过」随之作废。
+        // 按下时已没有输入会话（或只剩联想）= 上一次组合已经结束（出口有几十处），「本次展开过」
+        // 随之作废。不看「候选为空」：码表空码、拼音分步上屏后删空余码时组合还在。
         if data.event_type == EVENT_KEY_DOWN {
             let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            if st.candidates.is_empty() {
+            if !Self::has_input_session(&st) || st.assoc_active() {
                 st.grid_keep = false;
             }
         }

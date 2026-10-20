@@ -4288,6 +4288,9 @@ impl Coordinator {
         // 余码是缓冲的后缀 → 影子串同步掐头，否则大写会在这里静默丢掉。
         preedit_cursor::keep_cased_tail(&state.input_buffer, &mut state.input_buffer_cased);
         state.input_cursor_pos = state.input_buffer.len(); // 顶码后余码续打，光标在余码末尾
+        // 首选已上屏，余码是新的一次组合：不继承上一次的展开（按键入口那道「没有输入会话」
+        // 判不到——这一键按下时候选还在）。
+        state.grid_keep = false;
         let _ = self.update_candidates(state); // 余码候选（不再消费其结局）
         let preedit = state.preedit.clone();
         // 顶码 = 部分上屏 + 余码续组合：宿主光标因 top_text 插入而前移，余码组合起点已变。
@@ -4663,12 +4666,17 @@ impl Coordinator {
         // 重新构建候选（会重新应用 Shadow）并重绘。
         // **必须按模式分派**：主路径的 `update_candidates` 读 `input_buffer`，而特殊模式下它
         // 恒为空 —— 在快符里走主路径的后果不是「不刷新」而是候选窗当场被清空。
+        let grid = Self::grid_snapshot(&state);
         if special {
             // 返回值是「全码策略请求自动上屏」的意向，此处**刻意丢弃**：编码一个字没变，
             // 用户只是在调整候选顺序，凭空上屏是错的。
             let _ = self.update_special_candidates(&mut state);
         } else {
             self.update_candidates(&mut state);
+        }
+        // 展开态：别跳回首行、丢掉分类——用户正在第几行调的就留在第几行。
+        if let Some(snap) = grid {
+            self.grid_restore(&mut state, snap);
         }
         // 用户看到的那一半判据。「记录删掉了、但同文的系统词条目还在」与「根本没删到」
         // 在屏幕上完全同形（都是点了没反应），只有把这一行和上面的「删前命中」并排看

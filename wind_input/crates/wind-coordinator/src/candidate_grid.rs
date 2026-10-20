@@ -36,6 +36,13 @@ pub(crate) struct ReorderPositions {
     pub(crate) last: usize,
 }
 
+/// 展开态在原地重建前后要保住的位置，见 [`Coordinator::grid_snapshot`]。
+pub(crate) struct GridSnapshot {
+    page: usize,
+    selected: usize,
+    tab: GridTab,
+}
+
 impl Coordinator {
     /// 展开态的生效可见行数。
     pub(crate) fn grid_rows(&self) -> usize {
@@ -96,14 +103,43 @@ impl Coordinator {
             return false;
         }
         state.grid_top = Some(state.current_page);
-        state.grid_keep = true;
         self.clear_hover();
         self.grid_ensure_loaded(state);
+        // 「还能加载」只是可能：扩容、去重、过滤之后仍不足两页，就别展开成一行真候选加一屏
+        // 占位行。
+        if self.total_pages(state) < 2 {
+            state.grid_top = None;
+            return false;
+        }
+        state.grid_keep = true;
         // 在靠后的页上展开（收起态已经翻到了末页附近）：可见区往前让，凑满一屏，
         // 别只露出一行真候选、下面全是占位行。
         let full_top = self.total_pages(state).saturating_sub(self.grid_rows());
         state.grid_top = Some(state.current_page.min(full_top));
         true
+    }
+
+    /// 候选原地重建（输入没变：置顶 / 调位 / 删除）之前记下展开态的位置。
+    pub(crate) fn grid_snapshot(state: &State) -> Option<GridSnapshot> {
+        Self::grid_active(state).then(|| GridSnapshot {
+            page: state.current_page,
+            selected: state.selected_index,
+            tab: state.grid_tab,
+        })
+    }
+
+    /// 原地重建之后回到重建前的那一行、那一列和那个分类。重建经 `update_candidates` 已按
+    /// `grid_keep` 从首行展开回来，这里只把位置挪回去（夹到新列表的范围内）。
+    pub(crate) fn grid_restore(&self, state: &mut State, snap: GridSnapshot) {
+        if !Self::grid_active(state) {
+            return;
+        }
+        state.grid_tab = snap.tab;
+        self.grid_reapply_filter(state);
+        state.current_page = snap.page;
+        state.selected_index = snap.selected;
+        self.clamp_candidate_view(state);
+        self.grid_follow(state);
     }
 
     /// 候选重新装填之后：本次组合展开过就再展开（分步上屏、继续打字都不打回单行）。
@@ -759,6 +795,93 @@ mod tests {
         seed(&c, PP);
         c.handle_key_event(&key(keymap::VK_EQUAL));
         assert_eq!(view(&c).2, None);
+    }
+
+    /// 「还能加载」但扩容后仍只有一页：不展开，也不记「本次展开过」。
+    #[test]
+    fn has_more_but_still_one_page_does_not_expand() {
+        let (c, _rx) = coord(true);
+        seed(&c, PP);
+        c.state.lock().unwrap().has_more = true;
+        c.handle_key_event(&key(keymap::VK_EQUAL));
+        let st = c.state.lock().unwrap();
+        assert_eq!(st.grid_top, None);
+        assert!(!st.grid_keep);
+    }
+
+    /// 原地重建（置顶 / 调位 / 删除）后回到原来那一行、那一列，而不是跳回首行。
+    #[test]
+    fn in_place_rebuild_keeps_the_row_and_column() {
+        let (c, _rx) = coord(true);
+        seed(&c, PP * 8);
+        c.handle_key_event(&key(keymap::VK_EQUAL));
+        for _ in 0..3 {
+            c.handle_key_event(&key(keymap::VK_DOWN));
+        }
+        c.handle_key_event(&key(keymap::VK_RIGHT));
+        c.handle_key_event(&key(keymap::VK_RIGHT));
+        let before = view(&c);
+        let mut st = c.state.lock().unwrap();
+        let snap = Coordinator::grid_snapshot(&st).expect("展开着");
+        // 模拟 `update_candidates`：视图复位，再按「本次展开过」从首行展开回来。
+        c.reset_candidate_view(&mut st);
+        c.grid_resume(&mut st);
+        assert_eq!(st.current_page, 0, "前置：重建会跳回首行");
+        c.grid_restore(&mut st, snap);
+        drop(st);
+        assert_eq!(view(&c), before);
+    }
+
+    /// 只剩联想（候选非空、没有编码）时按键：上一次组合已结束，「本次展开过」作废。
+    #[test]
+    fn association_ends_the_kept_expansion() {
+        let (c, _rx) = coord(true);
+        {
+            let mut st = c.state.lock().unwrap();
+            st.candidates = vec![wind_candidate::Candidate {
+                text: "们".into(),
+                source: wind_candidate::CandidateSource::Assoc,
+                ..Default::default()
+            }];
+            st.grid_keep = true;
+        }
+        c.handle_key_event(&key(u32::from(b'A')));
+        assert!(!c.state.lock().unwrap().grid_keep);
+    }
+
+    /// 码表空码：候选为空但组合还在，「本次展开过」不能被当成组合结束清掉。
+    #[test]
+    fn empty_code_keeps_the_kept_expansion() {
+        let (c, _rx) = coord(true);
+        {
+            let mut st = c.state.lock().unwrap();
+            st.input_buffer = "zzzz".into();
+            st.grid_keep = true;
+        }
+        c.handle_key_event(&key(keymap::VK_LEFT));
+        assert!(c.state.lock().unwrap().grid_keep);
+    }
+
+    /// 顶码：首选上屏、余码另起一次组合，不继承展开。
+    #[test]
+    fn top_code_commit_starts_collapsed() {
+        let (c, _rx) = coord(true);
+        let mut st = c.state.lock().unwrap();
+        st.input_buffer = "aaaah".into();
+        st.input_buffer_cased = "aaaah".into();
+        st.grid_keep = true;
+        c.commit_top_text(
+            &mut st,
+            "aaaa",
+            "工".into(),
+            None,
+            None,
+            "h",
+            wind_candidate::CandidateSource::default(),
+            None,
+        );
+        assert!(!st.grid_keep);
+        assert_eq!(st.grid_top, None);
     }
 
     /// ↓ 换行并保持列号；← → 线性移动、越过行尾折到下一行。
