@@ -4593,6 +4593,23 @@ impl Coordinator {
         if idx >= end || idx >= state.candidates.len() {
             return;
         }
+        self.candidate_op_in(&mut state, op, idx);
+    }
+
+    /// 同 [`Self::candidate_op`]，但按**全量绝对下标**定位（移动端候选长按菜单）。
+    ///
+    /// 不先翻页再调页内版：那会改掉用户可见的页状态。执行体本就按绝对下标工作
+    /// （页内版也是先折成 `start + page_local` 再进去），这里只是省掉那道「落在可选范围」的边界。
+    pub(crate) fn candidate_op_at(&self, op: CandidateOp, idx: usize) {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if idx >= state.candidates.len() {
+            return;
+        }
+        self.candidate_op_in(&mut state, op, idx);
+    }
+
+    /// 词条操作执行体，`idx` 为全量绝对下标（调用方已做边界检查）。
+    fn candidate_op_in(&self, state: &mut State, op: CandidateOp, idx: usize) {
         let cand = state.candidates[idx].clone();
         let word = cand.text.clone();
 
@@ -4601,13 +4618,13 @@ impl Coordinator {
         // 直接 return —— 用户点得动、毫无反应、没有任何日志，是最难查的一类错配。
         // 判据与菜单侧 `common_char_mark` 同源（都由它决定给不给这一项）。
         if matches!(op, CandidateOp::ToggleCommon) {
-            self.toggle_common_char(&mut state, &word);
+            self.toggle_common_char(state, &word);
             return;
         }
 
         // 作用域即准入：拿不到落点（无词库归属的 overlay / 空码浏览态）就什么都不做，
         // 与菜单侧「只给复制」是同一个判据的两副面孔。
-        let Some(scope) = self.candidate_op_scope(&state) else {
+        let Some(scope) = self.candidate_op_scope(state) else {
             return;
         };
         let CandidateOpScope {
@@ -4645,7 +4662,7 @@ impl Coordinator {
             return;
         }
         // 位置一律按完整列表计（分类筛选中 `idx` 只是子集下标），见 `reorder_positions`。
-        let pos = self.reorder_positions(&state, idx);
+        let pos = self.reorder_positions(state, idx);
         // 已在首位：置顶是冗余规则，直接忽略（菜单已灰显，热键路径 defensive）。
         if matches!(op, CandidateOp::MoveTop) && pos.here == 0 {
             return;
@@ -4687,17 +4704,17 @@ impl Coordinator {
         // 重新构建候选（会重新应用 Shadow）并重绘。
         // **必须按模式分派**：主路径的 `update_candidates` 读 `input_buffer`，而特殊模式下它
         // 恒为空 —— 在快符里走主路径的后果不是「不刷新」而是候选窗当场被清空。
-        let grid = Self::grid_snapshot(&state);
+        let grid = Self::grid_snapshot(state);
         if special {
             // 返回值是「全码策略请求自动上屏」的意向，此处**刻意丢弃**：编码一个字没变，
             // 用户只是在调整候选顺序，凭空上屏是错的。
-            let _ = self.update_special_candidates(&mut state);
+            let _ = self.update_special_candidates(state);
         } else {
-            self.update_candidates(&mut state);
+            self.update_candidates(state);
         }
         // 展开态：别跳回首行、丢掉分类——用户正在第几行调的就留在第几行。
         if let Some(snap) = grid {
-            self.grid_restore(&mut state, snap);
+            self.grid_restore(state, snap);
         }
         // 用户看到的那一半判据。「记录删掉了、但同文的系统词条目还在」与「根本没删到」
         // 在屏幕上完全同形（都是点了没反应），只有把这一行和上面的「删前命中」并排看
@@ -4709,7 +4726,7 @@ impl Coordinator {
                 word
             );
         }
-        self.notify_ui_update(&state);
+        self.notify_ui_update(state);
     }
 
     /// 右键「删除」按候选来源分流：

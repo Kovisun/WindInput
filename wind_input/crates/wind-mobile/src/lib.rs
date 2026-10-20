@@ -58,7 +58,7 @@ use wind_config::Config;
 use wind_coordinator::Coordinator;
 use wind_host::{KeyProbe, Modifiers};
 use wind_ipc::protocol::{EVENT_KEY_DOWN, FocusLostReason, caret_source};
-use wind_ui_types::{MenuCmd, MenuKind, UiCommand, UiEvent};
+use wind_ui_types::{CandidateOp, MenuCmd, MenuItemSpec, MenuKind, UiCommand, UiEvent};
 
 /// 宿主直接消费的接缝类型，从 [`wind_host`] 原样透出。
 ///
@@ -181,6 +181,56 @@ pub struct UserWordPage {
     pub items: Vec<UserWord>,
     /// 命中总数（不是本页条数），分页 / 「共 N 条」用。
     pub total: u64,
+}
+
+/// 候选长按菜单的一项（桌面候选右键菜单在手机上的对应物）。
+///
+/// 只出可点的叶子：桌面菜单里的分隔线 / 标题行是绘制用的，命令项不会出现在候选菜单里；
+/// 子菜单（目前候选菜单没有）会被摊平成同级项。
+#[derive(Debug, Clone, PartialEq)]
+pub struct CandidateMenuItem {
+    /// 文案，与桌面同一候选的右键菜单逐字一致（如「隐藏候选」「设为生僻字」）
+    pub label: String,
+    /// `"move_top"` | `"move_up"` | `"move_down"` | `"delete"` | `"reset"` |
+    /// `"toggle_common"` | `"copy"`。原样回传给 [`MobileCore::candidate_menu_run`]。
+    pub action: String,
+    /// 灰显项照样列出：用户要看得出「这条不能调」，而不是以为菜单少了一项
+    pub enabled: bool,
+}
+
+/// [`CandidateMenuItem::action`] 与词条操作的对照。`copy` 不在此表——复制由宿主自己写剪贴板。
+const CANDIDATE_MENU_ACTIONS: [(&str, CandidateOp); 6] = [
+    ("move_top", CandidateOp::MoveTop),
+    ("move_up", CandidateOp::MoveUp),
+    ("move_down", CandidateOp::MoveDown),
+    ("delete", CandidateOp::Delete),
+    ("reset", CandidateOp::Reset),
+    ("toggle_common", CandidateOp::ToggleCommon),
+];
+
+/// 把桌面菜单树压成移动端的扁平列表：只留 Op 与 Copy 叶子，子菜单摊平。
+fn flatten_candidate_menu(items: &[MenuItemSpec], out: &mut Vec<CandidateMenuItem>) {
+    for item in items {
+        let action = match item.kind {
+            MenuKind::Op(op) => CANDIDATE_MENU_ACTIONS
+                .iter()
+                .find(|(_, o)| *o == op)
+                .map(|(a, _)| *a),
+            MenuKind::Copy => Some("copy"),
+            MenuKind::Submenu => {
+                flatten_candidate_menu(&item.children, out);
+                None
+            }
+            MenuKind::Command(_) | MenuKind::Separator | MenuKind::Label => None,
+        };
+        if let Some(action) = action {
+            out.push(CandidateMenuItem {
+                label: item.label.clone(),
+                action: action.to_string(),
+                enabled: item.enabled,
+            });
+        }
+    }
 }
 
 /// 宿主可下达的引擎命令。
@@ -431,6 +481,42 @@ impl MobileCore {
     /// 永远点不到。
     pub fn select_candidate(&self, index: usize) -> KeyOutcome {
         self.coord.select_candidate(index)
+    }
+
+    /// 第 `index`（**绝对下标**，与 [`Self::candidates`] 同一口径）个候选的长按菜单；
+    /// 无候选 / 越界 → 空。
+    ///
+    /// 菜单项与桌面右键同源（`Coordinator::candidate_menu_items`），文案与启用态逐字一致。
+    pub fn candidate_menu(&self, index: usize) -> Vec<CandidateMenuItem> {
+        let mut out = Vec::new();
+        if let Some(items) = self.coord.candidate_menu_items(index) {
+            flatten_candidate_menu(&items, &mut out);
+        }
+        out
+    }
+
+    /// 执行第 `index` 个候选的菜单动作；执行了返回 `true`。执行后核心重排候选，新列表经
+    /// [`MobileEventSink::on_candidates`] 推来（与桌面右键同一条刷新）。
+    ///
+    /// `"copy"` 返回 `false`：复制由宿主自己写剪贴板，核心不碰。未知 action、越界、
+    /// 或这一项在当前菜单里不存在 / 是灰的，同样返回 `false`——准入与 [`Self::candidate_menu`]
+    /// 同源，宿主绕过灰显直接调也不会写出菜单本来拒绝的规则。
+    ///
+    /// 暂停学习（[`Self::set_learning_suspended`]）不拦这里：那是「别从输入里偷偷学」，
+    /// 而这些是用户点名的显式编辑。
+    pub fn candidate_menu_run(&self, index: usize, action: &str) -> bool {
+        let Some(&(_, op)) = CANDIDATE_MENU_ACTIONS.iter().find(|(a, _)| *a == action) else {
+            return false;
+        };
+        let offered = self
+            .candidate_menu(index)
+            .iter()
+            .any(|i| i.action == action && i.enabled);
+        if !offered {
+            return false;
+        }
+        self.coord.candidate_or_quick_format_op_at(op, index);
+        true
     }
 
     /// 可选主题。`_` 前缀的基底主题不在其中（它们只供继承）。
@@ -973,5 +1059,108 @@ mod user_words_tests {
         assert!(m.user_words_clear("pinyin").is_err());
         assert_eq!(m.user_words("pinyin", "", 0, 50), UserWordPage::default());
         let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+/// 候选长按菜单门面：扁平化、action 映射、准入。菜单内容本身与绝对下标执行在
+/// wind-coordinator 的 `tests/candidate_menu_abs_index.rs` 验，这里只验门面这一层。
+#[cfg(test)]
+mod candidate_menu_tests {
+    use super::*;
+
+    #[test]
+    fn flatten_keeps_op_and_copy_leaves_and_inlines_submenus() {
+        let items = vec![
+            MenuItemSpec::leaf("置顶", MenuKind::Op(CandidateOp::MoveTop), false, false),
+            MenuItemSpec::separator(),
+            MenuItemSpec::label("标题"),
+            MenuItemSpec::leaf(
+                "命令",
+                MenuKind::Command(MenuCmd::OpenSettings),
+                true,
+                false,
+            ),
+            MenuItemSpec {
+                label: "更多".into(),
+                kind: MenuKind::Submenu,
+                enabled: true,
+                checked: false,
+                children: vec![MenuItemSpec::leaf(
+                    "设为生僻字",
+                    MenuKind::Op(CandidateOp::ToggleCommon),
+                    true,
+                    false,
+                )],
+            },
+            MenuItemSpec::leaf("复制", MenuKind::Copy, true, false),
+        ];
+        let mut out = Vec::new();
+        flatten_candidate_menu(&items, &mut out);
+        let got: Vec<(&str, &str, bool)> = out
+            .iter()
+            .map(|i| (i.label.as_str(), i.action.as_str(), i.enabled))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("置顶", "move_top", false),
+                ("设为生僻字", "toggle_common", true),
+                ("复制", "copy", true),
+            ]
+        );
+    }
+
+    /// 真词库下走一遍门面：第二页候选取得到菜单、置顶生效；copy / 未知 action / 灰显项 /
+    /// 越界都返回 false 或空。词典缺失时跳过（计数照绿）。
+    #[test]
+    fn menu_and_run_by_absolute_index() {
+        let data =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../build_dev/data");
+        if !data.join("schemas/wubi86/wubi86_jidian.dict.yaml").exists() {
+            eprintln!("跳过：词库不存在");
+            return;
+        }
+        let user = std::env::temp_dir().join(format!("wind_mobile_cm_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&user);
+        std::fs::create_dir_all(&user).unwrap();
+        let mut cfg = Config::default();
+        cfg.schema.available = vec!["wubi86".into()];
+        cfg.schema.active = "wubi86".into();
+        cfg.input.default.chinese_mode = true;
+        cfg.schema.codetable.auto_commit_at_full = false;
+        let (coord, _rx) = Coordinator::new_headless_with_ui_at(cfg, Some(&data), Some(&user));
+        let m = MobileCore {
+            coord,
+            warming: Arc::new(AtomicBool::new(false)),
+            data_dir: user.clone(),
+        };
+        assert!(m.candidate_menu(0).is_empty(), "无候选时菜单为空");
+        for ch in ['A', 'A'] {
+            dispatch_key(&m.coord, ch as u32, 0);
+        }
+        let pp = m.coord.debug_page_texts().len();
+        let all = m.candidates(0, MAX_WINDOW);
+        assert!(all.total > pp + 1, "前提：aa 有第二页");
+        let n = pp + 1;
+        let target = all.items[n].clone();
+
+        let menu = m.candidate_menu(n);
+        let actions: Vec<&str> = menu.iter().map(|i| i.action.as_str()).collect();
+        assert_eq!(actions.first(), Some(&"move_top"), "{menu:?}");
+        assert_eq!(actions.last(), Some(&"copy"), "{menu:?}");
+        assert!(!actions.contains(&""), "分隔线不应出现: {menu:?}");
+
+        assert!(!m.candidate_menu_run(n, "copy"), "复制归宿主");
+        assert!(!m.candidate_menu_run(n, "bogus"), "未知 action");
+        assert!(
+            !m.candidate_menu_run(0, "move_top"),
+            "首位置顶是灰的，不执行"
+        );
+        assert!(!m.candidate_menu_run(all.total, "move_top"), "越界");
+        assert!(m.candidate_menu(all.total).is_empty(), "越界菜单为空");
+
+        assert!(m.candidate_menu_run(n, "move_top"));
+        assert_eq!(m.candidates(0, 1).items, [target], "置顶后成首选");
+        let _ = std::fs::remove_dir_all(&user);
     }
 }
