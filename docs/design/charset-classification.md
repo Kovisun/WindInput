@@ -77,6 +77,11 @@ issue #83 正是前者：`is_han` 列举到扩展 H 末尾 `0x323AF`，Unicode 1
 表里，也不落「其它」）。扣减由 `gen_block_charsets` 读 `emoji.yaml` 完成，改了 emoji 字表
 要重新生成 `blocks.yaml`。
 
+- 并入的后果：生僻字模式的 `include_blocks` 写「符号」，从此也会带上 `✓ ★ ☐ ⌘` 这些
+  原先哪类都不归的字符。
+- 扣减是**生成期**做的，只认出厂 emoji 字表：用户在覆盖层里从 emoji 删掉的字（`-☯`）
+  不会因此回到「符号」，此后不归任何一类。
+
 ⇒ 外部引用写法 `exclude_blocks = ["emoji", "my_symbols"]` **保留**（已自带，且同为并集）。
 它与类上的 `no_freq` 是同一件事的两个入口，装载期合并成同一个掩码。
 
