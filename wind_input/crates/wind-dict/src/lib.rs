@@ -35,6 +35,7 @@ pub mod layer;
 pub mod manager;
 pub mod reader_pool;
 pub mod reverseidx;
+pub mod stats;
 pub mod trie;
 pub mod weight_norm;
 

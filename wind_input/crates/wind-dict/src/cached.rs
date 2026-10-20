@@ -836,10 +836,170 @@ pub fn build_single_char_full_codes_from(
     best.into_iter().map(|(k, (code, _))| (k, code)).collect()
 }
 
+/// [`for_each_code_group`] 交出的一条：文本借自词库，另带排序与音节所需的原始字段。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GroupEntry<'a> {
+    /// 在 `dicts` 里的下标（[`CachedDict::Layered`] 的子层都记外层下标）。
+    pub layer: usize,
+    pub text: &'a str,
+    /// 词库里的原始权重（未经 `default_weight` / `weight_spec` 换算）。
+    pub weight: i32,
+    /// 写入时的自然序（同一词库内）。
+    pub order: i32,
+    /// 音节起始位 bitmask，见 [`crate::binformat::DictEntry::boundary`]；0 = 无边界信息。
+    pub boundary: u64,
+}
+
+/// 一个词库按码升序逐组吐条目的拉式源。
+enum GroupSource<'a> {
+    Mmap(&'a WdatReader, crate::datformat::CodeCursor<'a>),
+    Memory(Box<dyn Iterator<Item = (&'a str, &'a [crate::codetable::CodetableEntry])> + 'a>),
+}
+
+impl<'a> GroupSource<'a> {
+    fn next_group(&mut self, layer: usize) -> Option<(String, Vec<GroupEntry<'a>>)> {
+        match self {
+            Self::Mmap(r, cur) => {
+                let (code, leaf) = cur.next()?;
+                let es = r
+                    .leaf_entries(leaf)
+                    .into_iter()
+                    .map(|(text, weight, order, boundary)| GroupEntry {
+                        layer,
+                        text,
+                        weight,
+                        order: order as i32,
+                        boundary,
+                    })
+                    .collect();
+                Some((code, es))
+            }
+            Self::Memory(it) => {
+                let (code, es) = it.next()?;
+                let es = es
+                    .iter()
+                    .map(|e| GroupEntry {
+                        layer,
+                        text: &e.text,
+                        weight: e.weight,
+                        order: e.order,
+                        boundary: e.boundary,
+                    })
+                    .collect();
+                Some((code.to_string(), es))
+            }
+        }
+    }
+}
+
+fn push_group_sources<'a>(
+    layer: usize,
+    d: &'a CachedDict,
+    out: &mut Vec<(usize, GroupSource<'a>)>,
+) {
+    match d {
+        CachedDict::Mmap(r) => out.push((layer, GroupSource::Mmap(r, r.codes()))),
+        CachedDict::Memory(m) => out.push((layer, GroupSource::Memory(Box::new(m.groups())))),
+        CachedDict::Layered(ls) => ls.iter().for_each(|l| push_group_sources(layer, l, out)),
+    }
+}
+
+/// 多个词库**按码归并**遍历：同一编码在各库里的条目合成一组交给 `f`（库序在前者在前，
+/// 库内保持词库原序），码按字节序升序。
+///
+/// 供词库统计这类「要看整组」的全表扫描用：重码、同码内序位都得先把一组收齐，而
+/// [`CachedDict::for_each_entry`] 是逐条推、还丢了 `order` / `boundary`。各库本身就按码有序
+/// （wdat DFS 与 `CodetableDict` 的 BTreeMap 都是字节序），这里只做 k 路归并，任意时刻只
+/// 持有每库一组，不物化全表。
+///
+/// ⚠️ O(全表)，绝不能进按键链路。
+pub fn for_each_code_group<'a>(
+    dicts: &[&'a CachedDict],
+    f: &mut dyn FnMut(&str, &[GroupEntry<'a>]),
+) {
+    let mut srcs: Vec<(usize, GroupSource<'a>)> = Vec::new();
+    for (i, d) in dicts.iter().enumerate() {
+        push_group_sources(i, d, &mut srcs);
+    }
+    let mut heads: Vec<Option<(String, Vec<GroupEntry<'a>>)>> = srcs
+        .iter_mut()
+        .map(|(layer, s)| s.next_group(*layer))
+        .collect();
+    let mut buf: Vec<GroupEntry<'a>> = Vec::new();
+    while let Some(min) = heads
+        .iter()
+        .flatten()
+        .map(|(c, _)| c.as_str())
+        .min()
+        .map(str::to_owned)
+    {
+        buf.clear();
+        for (i, h) in heads.iter_mut().enumerate() {
+            if h.as_ref().is_some_and(|(c, _)| *c == min) {
+                if let Some((_, es)) = h.take() {
+                    buf.extend(es);
+                }
+                let (layer, s) = &mut srcs[i];
+                *h = s.next_group(*layer);
+            }
+        }
+        f(&min, &buf);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::codetable::CodetableDict;
+
+    /// 两库各有独占码与共有码：归并后码升序、共有码的条目按库序拼成一组，层号对得上；
+    /// mmap 与内存两种形态混用时结果一致。
+    #[test]
+    fn code_groups_merge_layers_in_byte_order() {
+        let mut a = CodetableDict::empty();
+        a.merge_single("aa".into(), "甲".into(), 10, 0);
+        a.merge_single("ab".into(), "乙".into(), 5, 0);
+        a.merge_single("ab".into(), "丙".into(), 3, 0);
+        let mut b = CodetableDict::empty();
+        b.merge_single("a".into(), "丁".into(), 1, 0);
+        b.merge_single("ab".into(), "戊".into(), 7, 0);
+        b.merge_single("b".into(), "己".into(), 2, 0);
+
+        let dir = std::env::temp_dir().join(format!("wind-groups-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut w = WdatWriter::new();
+        a.export_to_wdat(&mut w);
+        let wdat = dir.join("a.wdat");
+        w.write(&wdat).unwrap();
+        let mm = CachedDict::Mmap(Arc::new(WdatReader::open(&wdat).unwrap()));
+        let mem_b = CachedDict::Memory(b);
+
+        type Got = (String, Vec<(usize, String, i32, i32)>);
+        let mut got: Vec<Got> = Vec::new();
+        for_each_code_group(&[&mm, &mem_b], &mut |code, es| {
+            got.push((
+                code.to_string(),
+                es.iter()
+                    .map(|e| (e.layer, e.text.to_string(), e.weight, e.order))
+                    .collect(),
+            ));
+        });
+        let s = |x: &str| x.to_string();
+        assert_eq!(
+            got,
+            vec![
+                (s("a"), vec![(1, s("丁"), 1, 0)]),
+                (s("aa"), vec![(0, s("甲"), 10, 0)]),
+                (
+                    s("ab"),
+                    vec![(0, s("乙"), 5, 0), (0, s("丙"), 3, 1), (1, s("戊"), 7, 0)]
+                ),
+                (s("b"), vec![(1, s("己"), 2, 0)]),
+            ]
+        );
+        drop(mm);
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     /// 单音节 code 的 boundary（只有起点位）。
     fn b1() -> u64 {
