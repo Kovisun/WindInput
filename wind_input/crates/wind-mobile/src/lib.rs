@@ -210,6 +210,9 @@ pub struct CandidateMenuItem {
     pub enabled: bool,
 }
 
+/// 候选提示的一段（段名 + 原始行），见 [`MobileCore::candidate_tooltip`]。
+pub use wind_coordinator::handle_tooltip::CandidateTooltipSection;
+
 /// [`CandidateMenuItem::action`] 与词条操作的对照。`copy` 不在此表——复制由宿主自己写剪贴板。
 const CANDIDATE_MENU_ACTIONS: [(&str, CandidateOp); 6] = [
     ("move_top", CandidateOp::MoveTop),
@@ -507,6 +510,15 @@ impl MobileCore {
             flatten_candidate_menu(&items, &mut out);
         }
         out
+    }
+
+    /// 第 `index`（全量绝对下标）个候选的提示：与桌面候选窗悬停气泡同一份 `ui.tooltip.sections`
+    /// 模板与求值（编码 / 读音 / 释义 / 拆字…）。手机没有悬停，宿主在长按时取来显示。
+    ///
+    /// 越界、或各段都为空时返回空列表。编码段依赖的反查索引第一次用时在后台建，建好前
+    /// 这一段暂缺（核心绝不为它等待）。
+    pub fn candidate_tooltip(&self, index: usize) -> Vec<CandidateTooltipSection> {
+        self.coord.candidate_tooltip_at(index).unwrap_or_default()
     }
 
     /// 执行第 `index` 个候选的菜单动作；执行了返回 `true`。执行后核心重排候选，新列表经
@@ -1332,6 +1344,67 @@ mod candidate_menu_tests {
 
         assert!(m.candidate_menu_run(n, "move_top"));
         assert_eq!(m.candidates(0, 1).items, [target], "置顶后成首选");
+        let _ = std::fs::remove_dir_all(&user);
+    }
+}
+
+/// 候选提示门面：与桌面气泡同一份段模板。段内容本身在 wind-coordinator 的 tooltip 测试里验，
+/// 这里只验「按绝对下标取得到、越界为空、编码段在索引建好后出现」。
+#[cfg(test)]
+mod candidate_tooltip_tests {
+    use super::*;
+
+    #[test]
+    fn tooltip_by_absolute_index() {
+        let data =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../build_dev/data");
+        if !data.join("schemas/wubi86/wubi86_jidian.dict.yaml").exists() {
+            eprintln!("跳过：词库不存在");
+            return;
+        }
+        let user = std::env::temp_dir().join(format!("wind_mobile_tip_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&user);
+        std::fs::create_dir_all(&user).unwrap();
+        let mut cfg = Config::default();
+        cfg.schema.available = vec!["wubi86".into()];
+        cfg.schema.active = "wubi86".into();
+        cfg.input.default.chinese_mode = true;
+        cfg.schema.codetable.auto_commit_at_full = false;
+        let (coord, _rx) = Coordinator::new_headless_with_ui_at(cfg, Some(&data), Some(&user));
+        let m = MobileCore {
+            coord,
+            warming: Arc::new(AtomicBool::new(false)),
+            data_dir: user.clone(),
+        };
+        assert!(m.candidate_tooltip(0).is_empty(), "无候选时为空");
+        for ch in ['W', 'Q', 'V', 'B'] {
+            dispatch_key(&m.coord, ch as u32, 0);
+        }
+        let all = m.candidates(0, MAX_WINDOW);
+        assert!(all.total > 0, "前提：wqvb 有候选");
+        assert!(m.candidate_tooltip(all.total).is_empty(), "越界为空");
+        // 编码段靠反查索引，第一次取时才在后台建：轮询到它出现（模拟器外通常一两百毫秒）
+        let mut code_line = None;
+        for _ in 0..100 {
+            let tip = m.candidate_tooltip(0);
+            assert!(
+                tip.iter().all(|s| !s.lines.is_empty()),
+                "段不应为空: {tip:?}"
+            );
+            code_line = tip
+                .iter()
+                .find(|s| s.title.as_deref().is_some_and(|t| t.starts_with("编码")))
+                .map(|s| s.lines.join(" "));
+            if code_line.is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        let code_line = code_line.expect("编码段应在索引建好后出现");
+        assert!(
+            code_line.contains("wqvb"),
+            "首选的编码里应有 wqvb: {code_line}"
+        );
         let _ = std::fs::remove_dir_all(&user);
     }
 }
