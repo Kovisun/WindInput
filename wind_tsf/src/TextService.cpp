@@ -3167,6 +3167,8 @@ STDAPI CTextService::OnSetFocus(ITfDocumentMgr* pDocMgrFocus, ITfDocumentMgr* pD
             {
                 WIND_LOG_WARN_FMT(L"FocusGained IPC send failed focusSession=%llu", _focusSessionId);
                 _needsFocusRecovery = TRUE;
+                if (_pLangBarItemButton != nullptr)
+                    _pLangBarItemButton->ScheduleStateSyncRetry();
             }
         }
 

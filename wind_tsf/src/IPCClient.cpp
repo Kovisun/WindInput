@@ -21,6 +21,8 @@ CIPCClient::CIPCClient()
     , _needsStateSync(TRUE)
     , _stateEstablished(FALSE)
     , _pipeBusyExempt(FALSE)
+    , _pipeWritten(FALSE)
+    , _lastWriteError(ERROR_SUCCESS)
     , _circuitState(CircuitState::Closed)
     , _consecutiveFailures(0)
     , _lastFailureTime(0)
@@ -239,6 +241,7 @@ BOOL CIPCClient::_WriteWithTimeout(const void* data, DWORD size, DWORD timeoutMs
     ResetEvent(_hEvent);
 
     DWORD bytesWritten = 0;
+    _lastWriteError = ERROR_SUCCESS;
     BOOL result = WriteFile(_hPipe, data, size, &bytesWritten, &overlapped);
 
     if (result)
@@ -249,6 +252,7 @@ BOOL CIPCClient::_WriteWithTimeout(const void* data, DWORD size, DWORD timeoutMs
     DWORD error = GetLastError();
     if (error != ERROR_IO_PENDING)
     {
+        _lastWriteError = error;
         _LogError(L"WriteFile failed immediately: %d", error);
         return FALSE;
     }
@@ -257,6 +261,7 @@ BOOL CIPCClient::_WriteWithTimeout(const void* data, DWORD size, DWORD timeoutMs
 
     if (waitResult == WAIT_TIMEOUT)
     {
+        _lastWriteError = ERROR_TIMEOUT;
         _LogError(L"Write operation timed out after %dms", timeoutMs);
         CancelIo(_hPipe);
         return FALSE;
@@ -264,14 +269,16 @@ BOOL CIPCClient::_WriteWithTimeout(const void* data, DWORD size, DWORD timeoutMs
 
     if (waitResult != WAIT_OBJECT_0)
     {
-        _LogError(L"WaitForSingleObject failed: %d", GetLastError());
+        _lastWriteError = GetLastError();
+        _LogError(L"WaitForSingleObject failed: %d", _lastWriteError);
         CancelIo(_hPipe);
         return FALSE;
     }
 
     if (!GetOverlappedResult(_hPipe, &overlapped, &bytesWritten, FALSE))
     {
-        _LogError(L"GetOverlappedResult failed: %d", GetLastError());
+        _lastWriteError = GetLastError();
+        _LogError(L"GetOverlappedResult failed: %d", _lastWriteError);
         return FALSE;
     }
 
@@ -661,6 +668,7 @@ BOOL CIPCClient::Connect()
             _RecordSuccess();
             _needsStateSync = TRUE;
             _stateEstablished = FALSE;
+            _pipeWritten = FALSE;
 
             return TRUE;
         }
@@ -715,6 +723,19 @@ void CIPCClient::Disconnect()
     }
 }
 
+BOOL CIPCClient::DiscardStaleConnection()
+{
+    if (_hPipe == INVALID_HANDLE_VALUE)
+        return FALSE;
+    // 对端进程退出后客户端句柄不会自己失效，只有读写才暴露；Peek 不消费数据，活连接上恒成功。
+    DWORD avail = 0;
+    if (PeekNamedPipe(_hPipe, nullptr, 0, nullptr, &avail, nullptr))
+        return FALSE;
+    _LogInfo(L"Main pipe stale (peek err=%d), dropping old connection", GetLastError());
+    Disconnect();
+    return TRUE;
+}
+
 // ============================================================================
 // Binary message sending
 // ============================================================================
@@ -762,6 +783,13 @@ void CIPCClient::_DrainStaleData()
     Disconnect();
 }
 
+// 写管道失败的错误码是否表示对端已关闭（服务进程退出 / 重启）。232 是服务端句柄已关、
+// 客户端句柄仍开着时 WriteFile 的典型返回。
+static bool _IsPeerGoneError(DWORD error)
+{
+    return error == ERROR_NO_DATA || error == ERROR_BROKEN_PIPE || error == ERROR_PIPE_NOT_CONNECTED;
+}
+
 BOOL CIPCClient::_SendBinaryMessage(uint16_t command, const void* payload, uint32_t payloadSize, bool async)
 {
     // A late response from a previous timed-out request must never be paired with
@@ -788,7 +816,29 @@ BOOL CIPCClient::_SendBinaryMessage(uint16_t command, const void* payload, uint3
     }
 
     // Write complete message in one call
-    if (!_WriteWithTimeout(buffer.data(), static_cast<DWORD>(buffer.size()), IPCConfig::WRITE_TIMEOUT_MS))
+    const BOOL reusedPipe = _pipeWritten;
+    BOOL written = _WriteWithTimeout(buffer.data(), static_cast<DWORD>(buffer.size()), IPCConfig::WRITE_TIMEOUT_MS);
+
+    // 用过的连接写失败且对端已断：多半是服务端重启留下的陈旧句柄。消息一个字节都没进管道，
+    // 重连后重写一次是安全的（同步请求的回包也只会来自新连接）。这次失败不代表服务不可用，
+    // 不计入熔断；重连失败由 Connect 自己计数。
+    if (!written && reusedPipe && _IsPeerGoneError(_lastWriteError))
+    {
+        const DWORD staleError = _lastWriteError;
+        Disconnect();
+        if (!Connect())
+        {
+            WIND_LOG_WARN_FMT(L"Stale pipe (err=%lu), reconnect failed cmd=0x%04X", staleError, command);
+            return FALSE;
+        }
+        written = _WriteWithTimeout(buffer.data(), static_cast<DWORD>(buffer.size()), IPCConfig::WRITE_TIMEOUT_MS);
+        if (written)
+            _LogInfo(L"Stale pipe (err=%lu), reconnected and resent cmd=0x%04X", staleError, command);
+        else
+            WIND_LOG_WARN_FMT(L"Stale pipe (err=%lu), resend failed cmd=0x%04X", staleError, command);
+    }
+
+    if (!written)
     {
         _LogError(L"Failed to write message");
         _RecordFailure();
@@ -796,6 +846,7 @@ BOOL CIPCClient::_SendBinaryMessage(uint16_t command, const void* payload, uint3
         return FALSE;
     }
 
+    _pipeWritten = TRUE;
     _RecordSuccess();
     return TRUE;
 }

@@ -88,6 +88,13 @@ cmake --build . --config Release      # → build/Release/wind_tsf.dll
 - SERVICE_READY 后 IME_ACTIVATED 发不出去会按 `ServiceReadyRetryPolicy.h` 有限次带抖动重试
   （与组合态推迟共用 `TIMER_ID_SERVICE_READY`）。重试只在前台线程做；按键 / 焦点路径在本连接
   上同步过就停——再发 IME_ACTIVATED 会让服务端按初始模式重置中英
+- 服务重启后主管道句柄是旧连接（`IsConnected()` 仍为真，写入报 232）：收到 SERVICE_READY 时
+  `DiscardStaleConnection` 先丢掉它（Peek 失败才丢，活连接不动）；没经过 SERVICE_READY 的，
+  `_SendBinaryMessage` 在**写过的**连接上遇到对端已断类错误时重连重写一次，不计熔断
+- focus_gained 仍发不出去时 `ScheduleStateSyncRetry` 挂上同一套就绪重试，到点做全量同步并补发焦点
+- 回归测试 `tests/win/ipc_reconnect_test.cpp`：链接真实 IPCClient.cpp + 测试专用管道名的服务端，
+  模拟重启；`make -C wind_tsf/tests/win run`（wine），exe 也可拷到 Windows 直接跑。
+  放子目录是因为 CI 会拿 g++ 编 `tests/` 顶层的 `*_test.cpp`
 
 ## Component Architecture
 

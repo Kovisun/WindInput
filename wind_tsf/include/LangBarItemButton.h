@@ -100,6 +100,9 @@ public:
     // 按键 / 焦点路径已建立服务端状态时调（TSF 线程）：停掉 SERVICE_READY 的待发同步，
     // 免得它晚到一步再发 IME_ACTIVATED、把用户刚切的中英状态重置。
     void CancelServiceReadyRetry();
+    // focus_gained 发不出去时调（TSF 线程）：挂上与 SERVICE_READY 同一套有限次重试，
+    // 不必等用户按键才把状态补上。
+    void ScheduleStateSyncRetry();
 
     // Thread-safe activation status from async reader thread.
     // 触发时机：Go 收到异步化后的 CmdIMEActivated / CmdFocusGained 完成 handler 后通过

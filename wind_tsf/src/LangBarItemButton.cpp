@@ -803,7 +803,12 @@ LRESULT CALLBACK CLangBarItemButton::_MsgWndProc(HWND hwnd, UINT msg, WPARAM wPa
             // 否则下面的 Connect 会在熔断窗口里直接跳过。
             CIPCClient* pIPC = pThis->_pTextService->GetIPCClient();
             if (pIPC != nullptr)
+            {
                 pIPC->ResetCircuitBreaker();
+                // 服务重启后主管道句柄是旧连接，无焦点时下面不同步，它会一直留到下次焦点 /
+                // 按键才在写入时暴露。此刻就丢掉，下一次发送直接新建连接。活连接不受影响。
+                pIPC->DiscardStaleConnection();
+            }
             pThis->_serviceReadyFailures = 0;
             pThis->_RunServiceReadySync(hwnd);
         }
@@ -1377,6 +1382,19 @@ void CLangBarItemButton::CancelServiceReadyRetry()
         WIND_LOG_INFO_FMT(L"SERVICE_READY pending sync cancelled (state synced by key/focus path, failures=%u)\n",
                           _serviceReadyFailures);
     _serviceReadyFailures = 0;
+}
+
+void CLangBarItemButton::ScheduleStateSyncRetry()
+{
+    if (_hMsgWnd == NULL)
+        return;
+    // 与 SERVICE_READY 的失败重试共用定时器与判决：到点时有焦点就做全量同步，
+    // 其末尾的 TryRecoverFocusState 补发 focus_gained。
+    if (_serviceReadyFailures == 0)
+        _serviceReadyFailures = 1;
+    const UINT delay = wind::svcready::RetryDelayMs(GetCurrentThreadId(), _serviceReadyFailures);
+    WIND_LOG_INFO_FMT(L"FocusGained failed, state sync retry in %ums\n", delay);
+    SetTimer(_hMsgWnd, TIMER_ID_SERVICE_READY, delay, nullptr);
 }
 
 void CLangBarItemButton::PostServiceReady()
