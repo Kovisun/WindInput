@@ -42,6 +42,10 @@ pub const PINYIN_DATA_SCHEMA: &str = "pinyin";
 /// 分词索引随用户词库规模增长，那台机器 18 万条）。
 pub const ENGLISH_SCHEMA: &str = "english";
 
+/// 英文词频名次表（相对 `schemas/`）：给英文词库里没写权重的词条按名次赋权，
+/// 见 `wind_dict::freq_rank` 与 [`EngineManager::load_table_dict`]。
+const ENGLISH_FREQ_RANKS: &str = "english/en_freq.txt";
+
 /// 双拼方案未声明 `layout` 时的缺省布局。
 ///
 /// 独立成常量而非各处写字面量：设置页要显示「当前选的是哪个」，那个判断与引擎实际
@@ -7142,13 +7146,12 @@ impl EngineManager {
             .map(|e| {
                 let full = Self::resolve_dict_file(&e.path, schemas_dir);
                 let is_english = e.dict_type == "english";
+                let schemas_dir = schemas_dir.to_path_buf();
                 crate::codetable::DisabledDictSource {
                     id: e.id.clone(),
                     base_order: e.base_order,
                     default_weight: e.default_weight,
-                    load: Arc::new(move || {
-                        CachedDict::load_at_with(&full, &cache_path(&full, "wdat"), is_english)
-                    }),
+                    load: Arc::new(move || Self::load_table_dict(&full, is_english, &schemas_dir)),
                 }
             })
             .collect()
@@ -7175,6 +7178,25 @@ impl EngineManager {
         ))
     }
 
+    /// 码表类词库（含英文）读盘的统一入口：英文词库额外叠英文词频名次表
+    /// （[`ENGLISH_FREQ_RANKS`]，见 `wind_dict::freq_rank`）。
+    ///
+    /// ⚠️ 读英文词库的每一处都要走这里：名次表参与 wdat 指纹，有的带有的不带，同一槽位就
+    /// 有两种指纹、两份缓存来回重建。名次表经 `resolve_dict_file` 定位，用户目录可整体替换。
+    fn load_table_dict(
+        full: &Path,
+        english: bool,
+        schemas_dir: &Path,
+    ) -> anyhow::Result<CachedDict> {
+        let wdat = cache_path(full, "wdat");
+        if english {
+            let ranks = Self::resolve_dict_file(ENGLISH_FREQ_RANKS, schemas_dir);
+            CachedDict::load_english_at(full, &wdat, &ranks)
+        } else {
+            CachedDict::load_at_with(full, &wdat, false)
+        }
+    }
+
     fn load_codetable_layers(schema: &Schema, schemas_dir: &Path) -> Vec<CodetableLayer> {
         let resolve =
             |rel: &str| -> std::path::PathBuf { Self::resolve_dict_file(rel, schemas_dir) };
@@ -7187,7 +7209,7 @@ impl EngineManager {
 
         let load_one = |e: &DictSpec| -> Option<CachedDict> {
             let full = resolve(&e.path);
-            match CachedDict::load_at_with(&full, &cache_path(&full, "wdat"), is_english(e)) {
+            match Self::load_table_dict(&full, is_english(e), schemas_dir) {
                 Ok(d) => Some(d),
                 Err(err) => {
                     warn!("Failed to load codetable dict {}: {}", full.display(), err);
@@ -7301,10 +7323,7 @@ impl EngineManager {
                     "rime_pinyin" => Self::load_rime_pinyin_dict(&full),
                     // english：code 列小写化，与 load_codetable_layers 的缓存 tag 一致，
                     // 否则会另建一份大小写不同的 wdat。
-                    t => {
-                        CachedDict::load_at_with(&full, &cache_path(&full, "wdat"), t == "english")
-                            .ok()
-                    }
+                    t => Self::load_table_dict(&full, t == "english", schemas_dir).ok(),
                 }
             })
             .collect()
@@ -7794,7 +7813,7 @@ impl EngineManager {
             } else {
                 // 英文词库：code 列小写化（大小写不敏感前缀匹配，text 保留原样）。
                 let lowercase = dtype(e) == "english";
-                match CachedDict::load_at_with(&full, &cache_path(&full, "wdat"), lowercase) {
+                match Self::load_table_dict(&full, lowercase, schemas_dir) {
                     Ok(d) => {
                         info!("Dictionary loaded: {} entries", d.len());
                         Some(d)

@@ -284,6 +284,10 @@ pub(crate) const TEMP_PINYIN_MAX_CANDIDATES: usize = 5000;
 /// 晋升入用户词库时统一取 `wind_store::temp_words::PROMOTED_WEIGHT`。
 pub(crate) const LEARN_ADD_WEIGHT: i32 = 800;
 
+// 英文系统词的名次权重须低于临时词初始权重：否则加了词频名次后，自动造的英文临时词会
+// 沉到常用系统词之后（名次引入前系统词全是 0）。见 `wind_dict::freq_rank`。
+const _: () = assert!(wind_dict::freq_rank::RANK_WEIGHT_MAX < LEARN_ADD_WEIGHT);
+
 /// 自提交宽限期：本输入法吐字后这段时间内收到的 `SelectionChanged` 视为宿主回声，
 /// 不当作用户移动光标（见 `handle_selection_changed`）。
 ///
