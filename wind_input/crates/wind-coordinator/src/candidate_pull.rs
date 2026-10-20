@@ -106,7 +106,9 @@ impl Coordinator {
     ) -> CandidateWindow {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let mut rebuilt = false;
-        if grow {
+        // 只在「紧接着已加载的部分往后续取」时扩容：起点越过已加载末尾的请求是越界查询
+        // （宿主据此判断自己越界），不能被悄悄扩容成有内容——宿主从来是连续往后取的
+        if grow && offset <= state.candidates.len() {
             let want_end = offset.saturating_add(limit.min(MAX_WINDOW));
             // 每轮上限翻倍；expand 在引擎没给出新东西时会清 has_more，循环必然结束
             while state.has_more && state.candidates.len() < want_end {
