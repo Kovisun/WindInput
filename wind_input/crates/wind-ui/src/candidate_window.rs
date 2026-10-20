@@ -480,9 +480,9 @@ pub struct CandidateWindow {
     /// `Cell`：在 `&self` 的测量路径里回写。第二项是记下它时的缩放：设备像素跨了 DPI
     /// 就不可比，换屏后作废重新起算。
     grid_peak_w: Cell<(f32, f32)>,
-    /// 展开态这一帧内容区的横向范围 `(左, 右)`（窗口内坐标，与命中矩形同一坐标系）。
-    /// 悬停气泡据此贴到整个窗口外侧，见 [`Self::tip_anchor`]。
-    grid_box_x: Cell<(f32, f32)>,
+    /// 展开态这一帧内容区的 `(左, 右, 顶)`（窗口内坐标，与命中矩形同一坐标系）。
+    /// 悬停气泡据此停靠在整个窗口外侧的顶端，见 [`Self::tip_anchor`]。
+    grid_box: Cell<(f32, f32, f32)>,
 }
 
 impl CandidateWindow {
@@ -513,6 +513,8 @@ impl CandidateWindow {
             tip_released: false,
             tip_for: tip_for.clone(),
             deferred: None,
+            tip_rect: None,
+            last_pos: None,
         }));
         window.register_mouse(mouse.clone());
         Ok(Self {
@@ -575,7 +577,7 @@ impl CandidateWindow {
             min_rows: 0,
             grid: None,
             grid_peak_w: Cell::new((0.0, 0.0)),
-            grid_box_x: Cell::new((0.0, 0.0)),
+            grid_box: Cell::new((0.0, 0.0, 0.0)),
         })
     }
 
@@ -1412,16 +1414,16 @@ impl CandidateWindow {
     }
 
     /// 记下展开态这一帧的内容区：宽度供下一帧当宽度下限（见 [`Self::grid_peak_w`]），
-    /// 横向范围供悬停气泡定位（见 [`Self::grid_box_x`]）。`left` 是内容区在窗口里的左缘
-    /// （软阴影扩边）。
-    fn note_grid_width(&self, left: f32, w: f32) {
+    /// 内容盒供悬停气泡停靠（见 [`Self::grid_box`]）。`(left, top)` 是内容区在窗口里的
+    /// 左上（软阴影扩边）。
+    fn note_grid_width(&self, (left, top): (f32, f32), w: f32) {
         if self.grid.is_some() {
             self.grid_peak_w
                 .set((self.grid_peak_px().max(w), self.scale));
             // 气泡贴的是**窗口实际的**右缘：渲染入口随后会按屏幕安全宽度收窄窗口，超宽的网格
             // 按测得宽度记会让气泡离窗口右缘空出一截。与入口那道钳制同一个上限。
             let shown = w.min(self.screen_safety_max_width_px() as f32);
-            self.grid_box_x.set((left, left + shown));
+            self.grid_box.set((left, left + shown, top));
         }
     }
 
@@ -1433,22 +1435,29 @@ impl CandidateWindow {
             && !self.candidates.is_empty()
     }
 
-    /// 悬停气泡的锚点：`(放侧边?, 左缘, 右缘)`，窗口内坐标；纵向一律对齐悬停那一格所在的行。
+    /// 悬停气泡的锚点：`(放侧边?, 左缘, 右缘, 顶, 底)`，窗口内坐标。
     ///
-    /// - 展开态：贴着**整个窗口**的外侧（右侧优先、放不下改左）。按单格放的话，横排的「下方」
-    ///   与竖排的「侧边」都会盖住相邻的格子。
+    /// - 展开态：**停靠**在整个窗口外侧的顶端（右侧优先、放不下改左），不随悬停行上下移动，
+    ///   只换内容。按单格放的话，横排的「下方」与竖排的「侧边」都会盖住相邻的格子；跟着行
+    ///   上下走则是「半跟随」——位置在变却够不着，鼠标斜着过去一路擦过别的格子。
     /// - 竖排 / 旋转态：候选项侧边（旋转态的候选项是又高又窄的一列，放上下会离得很远）。
     /// - 横排：候选项下方（不足时上翻）。
     ///
     /// ★ 三处定位（本地显示 `update_tooltip`、host-render `render_tooltip_frame`、外部宿主
     /// `render_tooltip_overlay`）都从这里取，一处放侧边、一处放上下的话，同一个悬停在
     /// 「实时显示」与「重推帧」之间会跳位置。
-    fn tip_anchor(&self, r: &Rect) -> (bool, f32, f32) {
+    fn tip_anchor(&self, r: &Rect) -> (bool, f32, f32, f32, f32) {
         if self.grid_shown() {
-            let (l, rr) = self.grid_box_x.get();
-            return (true, l, rr);
+            let (l, rr, top) = self.grid_box.get();
+            return (true, l, rr, top, top + r.h);
         }
-        (self.vertical || self.rotated, r.x, r.x + r.w)
+        (
+            self.vertical || self.rotated,
+            r.x,
+            r.x + r.w,
+            r.y,
+            r.y + r.h,
+        )
     }
 
     /// 本次展开见过的最大宽度（当前缩放下有效；缩放变了视为 0）。
@@ -1543,7 +1552,7 @@ impl CandidateWindow {
         let t_layout0 = Instant::now();
         root.layout(ml as f32, mt as f32, &self.text_renderer);
         let (w_f, h_f) = root.measured_size();
-        self.note_grid_width(ml as f32, w_f);
+        self.note_grid_width((ml as f32, mt as f32), w_f);
         let mut content_w = (w_f.ceil() as u32).max(40);
         // 竖排最大宽度（behavior.vertical_max_width，单位 dp，默认 0=不限）：仅在用户/主题
         // 显式配置正值时生效。本 View 引擎不支持文本折行，超宽候选在窗口右缘裁切（draw_text
@@ -1715,7 +1724,7 @@ impl CandidateWindow {
         };
         root.layout(ml as f32, mt as f32, &self.text_renderer);
         let (w_f, h_f) = root.measured_size();
-        self.note_grid_width(ml as f32, w_f);
+        self.note_grid_width((ml as f32, mt as f32), w_f);
         let mut content_w = (w_f.ceil() as u32).max(40);
         if self.vertical && !self.candidates.is_empty() {
             let vmax = self.theme.behavior.vertical_max_width;
@@ -1891,7 +1900,7 @@ impl CandidateWindow {
         };
         root.layout(ml as f32, mt as f32, &self.text_renderer);
         let (w_f, h_f) = root.measured_size();
-        self.note_grid_width(ml as f32, w_f);
+        self.note_grid_width((ml as f32, mt as f32), w_f);
         let mut content_w = (w_f.ceil() as u32).max(40);
         if self.vertical && !self.candidates.is_empty() {
             let vmax = self.theme.behavior.vertical_max_width;
@@ -2084,17 +2093,18 @@ impl CandidateWindow {
                         wx + (r.x + r.w) as i32,
                         wy + (r.y + r.h) as i32,
                     ));
-                    let (beside, x0, x1) = anchor.unwrap_or((false, r.x, r.x + r.w));
+                    let (beside, x0, x1, y0, y1) =
+                        anchor.unwrap_or((false, r.x, r.x + r.w, r.y, r.y + r.h));
                     if beside {
-                        // 侧边：锚点左右边界见 `tip_anchor`（hit rect 已含阴影偏移，wx+x 即屏幕
+                        // 侧边：锚点见 `tip_anchor`（hit rect 已含阴影偏移，wx+x 即屏幕
                         // 坐标）。显示在右侧，空间不足时改左侧，不遮挡下方候选。
                         tip.show_beside(
                             &code,
                             hover,
                             wx + x0 as i32,
                             wx + x1 as i32,
-                            wy + r.y as i32,
-                            wy + (r.y + r.h) as i32,
+                            wy + y0 as i32,
+                            wy + y1 as i32,
                         );
                     } else {
                         tip.show(
@@ -2105,6 +2115,9 @@ impl CandidateWindow {
                             wy + (r.y + r.h) as i32,
                         );
                     }
+                    self.mouse.borrow_mut().tip_rect = tip
+                        .content_rect()
+                        .map(|(l, t, r, b)| (l - wx, t - wy, r - wx, b - wy));
                 }
                 None => {
                     self.tip_for.set(-1);
@@ -2153,15 +2166,16 @@ impl CandidateWindow {
         let tip = self.tooltip.as_mut()?;
         match info {
             Some((code, r, hover)) => {
-                let (beside, x0, x1) = anchor.unwrap_or((false, r.x, r.x + r.w));
+                let (beside, x0, x1, y0, y1) =
+                    anchor.unwrap_or((false, r.x, r.x + r.w, r.y, r.y + r.h));
                 if beside {
                     tip.render_frame_beside(
                         &code,
                         hover,
                         wx + x0 as i32,
                         wx + x1 as i32,
-                        wy + r.y as i32,
-                        wy + (r.y + r.h) as i32,
+                        wy + y0 as i32,
+                        wy + y1 as i32,
                     )
                 } else {
                     tip.render_frame(
@@ -2187,10 +2201,10 @@ impl CandidateWindow {
         wy: i32,
     ) -> Option<crate::overlay_host::Overlay> {
         let (code, r, hover) = self.tooltip_target()?;
-        let (beside, x0, x1) = self.tip_anchor(&r);
+        let (beside, x0, x1, y0, y1) = self.tip_anchor(&r);
         // 命中矩形是位图像素，`(wx, wy)` 是宿主坐标单位（macOS 为点），先折成同一单位。
         let u = |px: f32| crate::overlay_host::to_host(px, self.scale);
-        let row = (wx + u(x0), wy + u(r.y), wx + u(x1), wy + u(r.y + r.h));
+        let row = (wx + u(x0), wy + u(y0), wx + u(x1), wy + u(y1));
         self.tooltip
             .as_mut()?
             .render_overlay(&code, hover, row, beside)
@@ -4569,6 +4583,11 @@ pub struct CandidateMouse {
     tip_for: Rc<Cell<i32>>,
     /// 悬停宽限：待发的悬停变化（`pending_raw`）到期时刻，见 [`hover_move`]。
     deferred: Option<Instant>,
+    /// 气泡内容盒（窗口内坐标 `(left, top, right, bottom)`），显示气泡时由候选窗写入。
+    /// 只在 `tip_for` 指着当前悬停时才有人读，见 [`heading_to_tip`]。
+    tip_rect: Option<(i32, i32, i32, i32)>,
+    /// 上一次真实移动的窗口内坐标，判这一步的方向用。
+    last_pos: Option<(i32, i32)>,
 }
 
 /// 光标离开气泡所属候选、去往「无」（空隙 / 内边距 / 翻页器）的宽限：与气泡那侧的
@@ -4580,6 +4599,37 @@ const TIP_GRACE: Duration = Duration::from_millis(crate::tooltip::LEAVE_GRACE_MS
 /// （三四十像素），而在候选间正常移动时高亮只慢这么一点，不显得迟钝。比宽限短：去往另一个
 /// 候选多半是真想看它。
 const TIP_SWITCH: Duration = Duration::from_millis(150);
+
+/// 光标从 `prev` 移到 `now` 这一步是不是朝着气泡 `tip`（`(left, top, right, bottom)`）去。
+///
+/// 是的话悬停宽限按 [`TIP_SWITCH`] 往后顺延：展开态的气泡停靠在窗口外侧，过去要横穿同一行
+/// 好几格，固定的 150ms 只够穿过一格。停下来、往回走或偏离气泡，都照常在 150ms 内切换。
+///
+/// 不用严格的「安全三角」：气泡停在顶端时，从靠下几行水平滑向它并不指向气泡本身。判据是
+/// 沿气泡所在那一侧的位移在靠近，且横向偏离气泡跨度的位移不比靠近的快。
+fn heading_to_tip(prev: (i32, i32), now: (i32, i32), tip: (i32, i32, i32, i32)) -> bool {
+    let (l, t, r, b) = tip;
+    let (dx, dy) = (now.0 - prev.0, now.1 - prev.1);
+    let (toward, lateral, lo, hi, pos) = if l >= prev.0 {
+        (dx, dy, t, b, now.1)
+    } else if r <= prev.0 {
+        (-dx, dy, t, b, now.1)
+    } else if t >= prev.1 {
+        (dy, dx, l, r, now.0)
+    } else if b <= prev.1 {
+        (-dy, dx, l, r, now.0)
+    } else {
+        return false;
+    };
+    let away = if pos > hi {
+        lateral
+    } else if pos < lo {
+        -lateral
+    } else {
+        0
+    };
+    toward > 0 && away <= toward
+}
 
 /// 悬停从 `last` 变到 `raw` 时是即时发出还是延后（设计 §7.6 C）。只有 `last` 的气泡正显示
 /// （`tip_for == last`）时才延后：去往「无」按 [`TIP_GRACE`]，去往另一个候选按 [`TIP_SWITCH`]。
@@ -4779,6 +4829,7 @@ impl CandidateMouse {
     ///   那次基线到下次显示时多半已经过时（用户在这期间移动了鼠标），**不能当作基线的来源**。
     fn reset_hover(&mut self) {
         self.deferred = None;
+        self.last_pos = None;
         self.last_hover = -1;
         self.engaged = false;
         self.engage_at = None;
@@ -4982,6 +5033,12 @@ impl WindowMouse for CandidateMouse {
                 let (x, y) = mouse_pos(lparam);
                 let raw = self.hit(x, y);
                 self.pending_raw = raw;
+                let pos = (x as i32, y as i32);
+                let toward = self
+                    .last_pos
+                    .replace(pos)
+                    .zip(self.tip_rect)
+                    .is_some_and(|(prev, tip)| heading_to_tip(prev, pos, tip));
                 // 先按此刻的菜单可见性推进压制阶段：菜单在上一次 tick 之后才收起时，关后的
                 // 第一次移动就该能武装闸门，不必再等一轮。
                 self.tip_hold = self
@@ -5001,9 +5058,15 @@ impl WindowMouse for CandidateMouse {
                                 let _ = self.events.send(UiEvent::Hover(raw));
                             }
                             HoverMove::Defer(d) => {
-                                // 取较早者：宽限里又移到另一个候选时按切换延迟收紧，不顺延。
-                                let at = Instant::now() + d;
-                                self.deferred = Some(self.deferred.map_or(at, |u| u.min(at)));
+                                // 取较早者：宽限里又移到另一个候选时按切换延迟收紧，不顺延；
+                                // 正朝气泡去则顺延，见 `heading_to_tip`。
+                                let now = Instant::now();
+                                let at = now + d;
+                                self.deferred = Some(match self.deferred {
+                                    Some(u) if toward => u.max(now + TIP_SWITCH),
+                                    Some(u) => u.min(at),
+                                    None => at,
+                                });
                             }
                         }
                     }
@@ -5233,19 +5296,19 @@ mod grid_tests {
         let w = grid_win(3, 2, 0, SIX);
         let root = laid(&w);
         let width = root.measured_size().0;
-        w.note_grid_width(6.0, width);
+        w.note_grid_width((6.0, 5.0), width);
         let cell = hit(&root, 4);
         assert_eq!(
             w.tip_anchor(&cell),
-            (true, 6.0, 6.0 + width),
-            "展开态：侧边、窗口左右缘"
+            (true, 6.0, 6.0 + width, 5.0, 5.0 + cell.h),
+            "展开态：停靠在窗口外侧顶端，不随行走"
         );
         let mut flat = grid_win(3, 2, 0, SIX);
         flat.set_grid(None);
         let cell = hit(&laid(&flat), 1);
         assert_eq!(
             flat.tip_anchor(&cell),
-            (false, cell.x, cell.x + cell.w),
+            (false, cell.x, cell.x + cell.w, cell.y, cell.y + cell.h),
             "收起态横排：放下方"
         );
     }
@@ -5332,7 +5395,7 @@ mod grid_tests {
     fn width_never_shrinks_while_expanded() {
         let mut w = grid_win(3, 2, 0, &["一二三四五", "一", "一", "一", "一", "一"]);
         let wide = laid(&w).measured_size().0;
-        w.note_grid_width(0.0, wide);
+        w.note_grid_width((0.0, 0.0), wide);
         refill(&mut w, 3, 2, 0, &["一"; 6]);
         assert_eq!(laid(&w).measured_size().0, wide, "滚到窄的一屏宽度不回缩");
         w.set_grid(None);
@@ -8045,6 +8108,8 @@ mod tip_hold_tests {
             tip_released: false,
             tip_for: Rc::new(Cell::new(-1)),
             deferred: None,
+            tip_rect: None,
+            last_pos: None,
         };
         (m, rx)
     }
@@ -8456,6 +8521,59 @@ mod tip_hold_tests {
         assert!(hovers(&rx).is_empty(), "进了气泡：撤掉");
         assert!(m.deferred.is_none());
         assert_eq!(m.last_hover, 0);
+    }
+
+    /// 朝向判据：气泡在右侧顶端时，水平右移、斜着往上右移都算；往左、往下偏离得比靠近快、
+    /// 原地不动都不算。气泡在下方时（收起态横排）同理换一条轴。
+    #[test]
+    fn heading_to_tip_table() {
+        let right_top = (100, 0, 200, 40);
+        assert!(
+            heading_to_tip((10, 120), (14, 120), right_top),
+            "沿行水平右移"
+        );
+        assert!(heading_to_tip((10, 120), (14, 116), right_top), "斜着往上");
+        assert!(
+            !heading_to_tip((10, 120), (14, 126), right_top),
+            "往下偏得比靠近快"
+        );
+        assert!(!heading_to_tip((10, 120), (6, 120), right_top), "往回走");
+        assert!(!heading_to_tip((10, 120), (10, 120), right_top), "没动");
+        assert!(
+            heading_to_tip((10, 20), (12, 26), right_top),
+            "跨度内上下随意"
+        );
+        let left = (-200, 0, -100, 40);
+        assert!(heading_to_tip((10, 20), (6, 20), left), "气泡在左侧：左移");
+        let below = (0, 50, 80, 120);
+        assert!(
+            heading_to_tip((40, 10), (40, 14), below),
+            "气泡在下方：下移"
+        );
+        assert!(!heading_to_tip((40, 10), (40, 6), below));
+        assert!(
+            !heading_to_tip((150, 60), (151, 60), (100, 0, 200, 100)),
+            "已在气泡上"
+        );
+    }
+
+    /// 宽限里朝气泡继续移动：截止顺延；背离气泡：照旧取较早者、不顺延。
+    #[test]
+    fn moving_toward_tip_extends_the_grace() {
+        let run = |tip: (i32, i32, i32, i32)| {
+            let (mut m, _rx) = engaged_on_0();
+            m.tip_rect = Some(tip);
+            real_move(&mut m, 5);
+            real_move(&mut m, 22);
+            let first = m.deferred.expect("移开气泡所属候选应延后");
+            std::thread::sleep(Duration::from_millis(2));
+            real_move(&mut m, 25);
+            (first, m.deferred.unwrap())
+        };
+        let (first, after) = run((100, 0, 200, 40));
+        assert!(after > first, "朝右侧气泡移动：顺延");
+        let (first, after) = run((-200, 0, -100, 40));
+        assert_eq!(after, first, "背离气泡：不顺延");
     }
 
     /// 宽限到期仍不在气泡上（也没回来）：照发。

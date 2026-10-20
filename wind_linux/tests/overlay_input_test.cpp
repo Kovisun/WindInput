@@ -86,6 +86,21 @@ int main()
     CHECK(kTipSwitchMs < kTipGraceMs);
     CHECK_EQ(kTipGraceMs, 280u); // 与 tooltip.rs LEAVE_GRACE_MS / candidate_window TIP_GRACE 同值
 
+    CASE("朝向提示：同 Windows heading_to_tip 那张表");
+    {
+        const Rect rightTop{100, 0, 100, 40};
+        CHECK(headingToTip(10, 120, 14, 120, rightTop));  // 沿行水平右移
+        CHECK(headingToTip(10, 120, 14, 116, rightTop));  // 斜着往上
+        CHECK(!headingToTip(10, 120, 14, 126, rightTop)); // 往下偏得比靠近快
+        CHECK(!headingToTip(10, 120, 6, 120, rightTop));  // 往回走
+        CHECK(!headingToTip(10, 120, 10, 120, rightTop)); // 没动
+        CHECK(headingToTip(10, 20, 12, 26, rightTop));    // 跨度内上下随意
+        CHECK(headingToTip(10, 20, 6, 20, Rect{-200, 0, 100, 40}));  // 提示在左侧
+        CHECK(headingToTip(40, 10, 40, 14, Rect{0, 50, 80, 70}));    // 提示在下方
+        CHECK(!headingToTip(40, 10, 40, 6, Rect{0, 50, 80, 70}));
+        CHECK(!headingToTip(150, 60, 151, 60, Rect{100, 0, 100, 100})); // 已在提示上
+    }
+
     CASE("离开提示后重定悬停：回到提示 / 回到所属候选不动；候选窗别处报那里；外面报 -1");
     CHECK_EQ(tipRecheckHover(true, false, kNoHit, 2), kKeepHover);
     CHECK_EQ(tipRecheckHover(false, true, 2, 2), kKeepHover);

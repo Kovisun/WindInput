@@ -2094,7 +2094,7 @@ async def grid_cases(bus, im):
           f"鼠标={by_mouse!r} 键盘={by_key!r}")
     sh("xdotool", "mousemove", "5", "5")
 
-    # 悬停提示：展开态贴在整个候选窗外侧，不盖住任何格子；纵向对齐悬停的那一行。
+    # 悬停提示：展开态停靠在整个候选窗外侧的顶端，不盖住任何格子；悬停第 3 行也不跟着下移。
     await c.type("yi")
     await asyncio.sleep(0.3)
     await c.key("equal")
@@ -2117,7 +2117,7 @@ async def grid_cases(bus, im):
         outside = tx >= win[1] + win[3] or tx + tw <= win[1]
         check("展开：tooltip 在候选窗外侧、不盖格子", outside,
               f"tooltip x={tx}..{tx + tw} 候选窗 x={win[1]}..{win[1] + win[3]}")
-        check("展开：tooltip 纵向对齐悬停的那一行", win[2] + row_h * 2 <= ty <= win[2] + row_h * 3.5,
+        check("展开：tooltip 停靠在候选窗顶端、不随悬停行下移", abs(ty - win[2]) <= row_h,
               f"tooltip y={ty} 候选窗 y={win[2]} 行高≈{row_h:.0f}")
         screenshot("grid_tooltip_screen")
     sh("xdotool", "mousemove", "5", "5")

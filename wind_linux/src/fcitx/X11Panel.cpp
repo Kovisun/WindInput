@@ -752,7 +752,7 @@ void X11CandidatePanel::handleEvent(xcb_generic_event_t* ev)
         }
         int32_t idx = hitTest(rects_, e->event_x, e->event_y);
         // 悬停只报候选（>=0）：命中表里的 -1/-2 是翻页按钮，而悬停协议里 -1 表示「无」。
-        candidateHover(idx >= 0 ? idx : -1);
+        candidateHover(idx >= 0 ? idx : -1, std::make_pair(int32_t(e->root_x), int32_t(e->root_y)));
         break;
     }
     case XCB_LEAVE_NOTIFY:
@@ -834,22 +834,31 @@ void X11CandidatePanel::cancelTipTimers()
     disarm(tipLeave_);
 }
 
-void X11CandidatePanel::candidateHover(int32_t raw)
+void X11CandidatePanel::candidateHover(int32_t raw, std::optional<std::pair<int32_t, int32_t>> at)
 {
+    const Surface& tip = overlays_[OVERLAY_KIND_TOOLTIP - 1];
+    const auto prev = std::exchange(lastPointer_, at);
+    const bool toward = prev && at && tip.mapped &&
+                        headingToTip(prev->first, prev->second, at->first, at->second, rectOf(tip));
     if (raw == hover_) {
         disarm(hoverDefer_); // 回到了原处：待报的变化作废
         return;
     }
-    const bool tipShown = overlays_[OVERLAY_KIND_TOOLTIP - 1].mapped;
-    const uint32_t ms = hoverDeferMs(hover_, raw, tipShown);
+    const uint32_t ms = hoverDeferMs(hover_, raw, tip.mapped);
     if (ms == 0) {
         setHover(raw);
         return;
     }
-    // 已在等：只换目标、不顺延（去往「无」的宽限不能被一路擦过的候选无限拖长）。
+    // 已在等：只换目标、不顺延（去往「无」的宽限不能被一路擦过的候选无限拖长）——除非正朝
+    // 提示去，那时按 kTipSwitchMs 顺延，停下来才切换。
     pendingHover_ = raw;
+    const uint64_t now = fcitx::now(CLOCK_MONOTONIC);
     if (!armed(hoverDefer_)) {
+        hoverDue_ = now + uint64_t(ms) * 1000;
         armTimer(hoverDefer_, ms, &X11CandidatePanel::onHoverDeferred);
+    } else if (toward && now + uint64_t(kTipSwitchMs) * 1000 > hoverDue_) {
+        hoverDue_ = now + uint64_t(kTipSwitchMs) * 1000;
+        armTimer(hoverDefer_, kTipSwitchMs, &X11CandidatePanel::onHoverDeferred);
     }
 }
 

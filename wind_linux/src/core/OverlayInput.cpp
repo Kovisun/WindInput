@@ -73,6 +73,24 @@ uint32_t hoverDeferMs(int32_t last, int32_t raw, bool tipShown)
     return raw >= 0 ? kTipSwitchMs : kTipGraceMs;
 }
 
+bool headingToTip(int32_t px, int32_t py, int32_t nx, int32_t ny, const Rect& tip)
+{
+    const int32_t l = tip.x, t = tip.y, r = tip.x + tip.w, b = tip.y + tip.h;
+    const int32_t dx = nx - px, dy = ny - py;
+    // 提示在哪一侧：沿那条轴是「靠近」，另一条轴上离开提示跨度是「偏离」。
+    const bool beside = l >= px || r <= px;
+    if (!beside && t < py && b > py) {
+        return false; // 已在提示上
+    }
+    const int32_t toward = l >= px ? dx : r <= px ? -dx : t >= py ? dy : -dy;
+    const int32_t lateral = beside ? dy : dx;
+    const int32_t lo = beside ? t : l;
+    const int32_t hi = beside ? b : r;
+    const int32_t pos = beside ? ny : nx;
+    const int32_t away = pos > hi ? lateral : pos < lo ? -lateral : 0;
+    return toward > 0 && away <= toward;
+}
+
 int32_t tipRecheckHover(bool onTip, bool onCandidate, int32_t candidateHit, int32_t held)
 {
     if (onTip) {

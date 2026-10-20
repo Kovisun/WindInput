@@ -38,8 +38,12 @@ public final class CandidatePanelHost {
     /// 候选悬停的变化会被延后上报, 给「从候选行穿过空隙挪进提示」留时间 (见 `handleRawHover`)。
     private var reportedHover = -1
     private var pendingHover: DispatchWorkItem?
-    /// 待报悬停的目标 (计时中途目标可换, 计时不重排)。
+    /// 待报悬停的目标 (计时中途目标可换, 计时不重排——正朝提示去时除外, 见 `notePointerMoved`)。
     private var pendingHoverTarget = -1
+    /// `pendingHover` 的到期时刻。
+    private var pendingHoverDue: DispatchTime = .now()
+    /// 上一次指针移动的 wire 坐标, 判这一步的方向用。
+    private var lastPointerWire: (x: CGFloat, y: CGFloat)?
     private var pendingRecheck: DispatchWorkItem?
     /// 服务端最近一次建议的候选窗落点 (wire 左上, 仅主线程)。悬停提示按「候选窗实际落点 − 它」平移。
     private var lastSuggestedWire: (x: CGFloat, y: CGFloat)?
@@ -68,6 +72,7 @@ public final class CandidatePanelHost {
         }
         panel.onSelect = { [weak self] index in self?.handlePanelClick(index) }
         panel.onHover = { [weak self] index in self?.handleRawHover(index) }
+        panel.onPointerMoved = { [weak self] in self?.notePointerMoved() }
         panel.onContextMenu = { [weak self] target in self?.openMenu(target: target) }
         wireOverlays()
         panel.onScroll = { [weak self] delta in
@@ -159,13 +164,33 @@ public final class CandidatePanelHost {
             return
         }
         pendingHoverTarget = raw
+        schedulePendingHover(afterMs: ms)
+    }
+
+    private func schedulePendingHover(afterMs ms: UInt32) {
+        pendingHover?.cancel()
         let item = DispatchWorkItem { [weak self] in
             guard let self = self else { return }
             self.pendingHover = nil
             self.reportHover(self.pendingHoverTarget)
         }
         pendingHover = item
-        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(Int(ms)), execute: item)
+        pendingHoverDue = .now() + .milliseconds(Int(ms))
+        DispatchQueue.main.asyncAfter(deadline: pendingHoverDue, execute: item)
+    }
+
+    /// 指针每次移动: 有待报的悬停变化且这一步正朝提示去, 就把到期按 switch 往后顺延——展开态的
+    /// 提示停靠在窗口外侧, 过去要横穿好几格; 停下来才切换。对位 Linux addon 的 candidateHover。
+    private func notePointerMoved() {
+        let m = NSEvent.mouseLocation
+        let now = (x: m.x, y: WireGeometry.flipY(m.y, screenHeight: PanelGeometry.referenceHeight))
+        let prev = lastPointerWire
+        lastPointerWire = now
+        guard let prev, pendingHover != nil, let tip = overlays.tooltipWireRect(),
+              OverlayInput.headingToTip(prev.x, prev.y, now.x, now.y, tip: tip) else { return }
+        let ms = OverlayInput.tipSwitchMs
+        guard DispatchTime.now() + .milliseconds(Int(ms)) > pendingHoverDue else { return }
+        schedulePendingHover(afterMs: ms)
     }
 
     private func reportHover(_ index: Int) {
