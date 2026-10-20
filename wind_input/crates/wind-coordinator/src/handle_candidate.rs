@@ -419,6 +419,10 @@ fn make_emoji_candidate(text: String) -> Candidate {
     }
 }
 
+/// 移动端拼音单字母的首批候选上限，见 [`Coordinator::main_path_candidate_limit`]。
+/// 60 是宿主 release 实测 1～1.6ms 的档位（手机约 3～6ms，一帧以内）；100 条宿主已 2～5ms。
+pub(crate) const MOBILE_PINYIN_SINGLE_LIMIT: usize = 60;
+
 impl Coordinator {
     /// 记录一次选词到 redb FREQ（词频维度：count+1、last_used=now，按 schema+code+text）。
     /// 词频是与权重解耦的独立维度（frequency.md），仅记真实使用数据；redb 事务即时持久。
@@ -1094,7 +1098,40 @@ impl Coordinator {
 
     /// 首次加载候选上限（对齐 Go：短前缀小批量分级加载，长前缀近全量）。
     pub(crate) fn initial_candidate_limit(&self, input: &str) -> usize {
-        Self::initial_candidate_limit_of(self.engine_mgr.current_engine_type(), input)
+        Self::main_path_candidate_limit(
+            self.engine_mgr.current_engine_type(),
+            input,
+            crate::handle_assoc::use_mobile_overrides(),
+        )
+    }
+
+    /// 主路径首批上限：[`Self::initial_candidate_limit_of`]，移动端再对**拼音单字母**收紧到
+    /// [`MOBILE_PINYIN_SINGLE_LIMIT`]。
+    ///
+    /// 单个声母是拼音里展开最宽的输入（简拼覆盖整个声母下的音节），引擎取 k 条的耗时随 k
+    /// 超线性增长（宿主 release 实测 `b`：60 条 1ms、300 条 23ms）。手机上每个词的第一个
+    /// 字母都要在主线程同步付这笔钱，真机就是每打一个词卡一下。
+    ///
+    /// 代价是词频重排只能排池内候选——这由移动端的「滑到尾部扩容」补上
+    /// （[`crate::candidate_pull`] 的 `candidate_window_growing`，与桌面翻页同一个
+    /// [`Self::expand_candidates`]）。桌面不收紧：首页只露 9 个、靠翻页扩容的节奏下，
+    /// 池外常用词会直接从首页消失，而桌面 CPU 上 300 条也不到一帧。
+    ///
+    /// 只管主路径：临拼 / 混输成员 / 临英各自调 `initial_candidate_limit_of`，不受影响。
+    pub(crate) fn main_path_candidate_limit(
+        engine_type: Option<wind_engine::engine::EngineType>,
+        input: &str,
+        mobile: bool,
+    ) -> usize {
+        let base = Self::initial_candidate_limit_of(engine_type, input);
+        if mobile
+            && engine_type == Some(wind_engine::engine::EngineType::Pinyin)
+            && input.chars().count() == 1
+        {
+            base.min(MOBILE_PINYIN_SINGLE_LIMIT)
+        } else {
+            base
+        }
     }
 
     /// 同 [`Self::initial_candidate_limit`]，但按**指定引擎类型**分级。
@@ -7977,5 +8014,40 @@ mod expand_stop_tests {
             (0, 0),
             "高亮夹到当页末项"
         );
+    }
+}
+
+/// 移动端拼音单字母收紧首批上限；桌面、多字母、其它引擎一律不动。
+#[cfg(test)]
+mod mobile_limit_tests {
+    use crate::coordinator::Coordinator;
+    use wind_engine::engine::EngineType;
+
+    #[test]
+    fn mobile_pinyin_single_letter_is_capped_only_there() {
+        let lim = Coordinator::main_path_candidate_limit;
+        let py = Some(EngineType::Pinyin);
+        assert_eq!(lim(py, "b", true), super::MOBILE_PINYIN_SINGLE_LIMIT);
+        assert_eq!(
+            lim(py, "b", false),
+            Coordinator::initial_candidate_limit_of(py, "b"),
+            "桌面不收紧"
+        );
+        assert_eq!(
+            lim(py, "bz", true),
+            Coordinator::initial_candidate_limit_of(py, "bz"),
+            "两字母起不收紧"
+        );
+        for other in [
+            EngineType::English,
+            EngineType::CodeTable,
+            EngineType::Mixed,
+        ] {
+            assert_eq!(
+                lim(Some(other), "t", true),
+                Coordinator::initial_candidate_limit_of(Some(other), "t"),
+                "{other:?} 不受影响（英文 t 曾因上限太小打不出 then）"
+            );
+        }
     }
 }

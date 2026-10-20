@@ -520,14 +520,17 @@ impl MobileCore {
     ///
     /// 别在每次按键都拉一大段：序列化与宿主侧的文字测量都在宿主主线程上。
     /// 起手拉够铺满一两屏即可，用户滚到尾部再续取。
+    ///
+    /// 要的范围超出已加载、且引擎还有更多时先扩容（[`CandidateWindow::rebuilt`] 置真，宿主须
+    /// 整份重取已显示的部分）：首批只取够首屏，用户真往后滑才付钱。
     pub fn candidates(&self, offset: usize, limit: usize) -> CandidateWindow {
-        self.coord.candidate_window(offset, limit)
+        self.coord.candidate_window_growing(offset, limit, false)
     }
 
     /// 同 [`Self::candidates`]，另带每条候选的注释灰字（码表剩余编码、拼音候选反查码…），
     /// 与电脑版候选窗同一份模板。宿主开着「候选显示编码提示」才调这个——注释逐条求值，不要就别付。
     pub fn candidates_with_comments(&self, offset: usize, limit: usize) -> CandidateWindow {
-        self.coord.candidate_window_with_comments(offset, limit)
+        self.coord.candidate_window_growing(offset, limit, true)
     }
 
     /// 按**绝对下标**选词，返回编辑指令流（与 [`Self::key_down`] 同一种形状）。
@@ -1742,6 +1745,48 @@ mod candidate_tooltip_tests {
             "五笔单码 a 的候选里应有带剩余编码的: {:?}",
             rich.items.iter().zip(&rich.comments).collect::<Vec<_>>()
         );
+        let _ = std::fs::remove_dir_all(&user);
+    }
+
+    /// 滑到尾部再取：五笔单码首批 100 条（has_more），要第 90～150 条时核心扩容重建、
+    /// 标 rebuilt，总数变多；要的范围在已加载之内时不重建。
+    #[test]
+    fn window_grows_past_loaded_candidates() {
+        let data =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../build_dev/data");
+        if !data.join("schemas/wubi86/wubi86_jidian.dict.yaml").exists() {
+            eprintln!("跳过：词库不存在");
+            return;
+        }
+        let user = std::env::temp_dir().join(format!("wind_mobile_grow_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&user);
+        std::fs::create_dir_all(&user).unwrap();
+        let mut cfg = Config::default();
+        cfg.schema.available = vec!["wubi86".into()];
+        cfg.schema.active = "wubi86".into();
+        cfg.input.default.chinese_mode = true;
+        cfg.schema.codetable.auto_commit_at_full = false;
+        let (coord, _rx) = Coordinator::new_headless_with_ui_at(cfg, Some(&data), Some(&user));
+        let m = MobileCore {
+            coord,
+            warming: Arc::new(AtomicBool::new(false)),
+            data_dir: user.clone(),
+        };
+        dispatch_key(&m.coord, 'A' as u32, 0);
+        let first = m.candidates(0, 24);
+        assert!(!first.rebuilt, "首屏在已加载范围内，不该重建");
+        let loaded = first.total;
+        assert!(loaded >= 90, "前提：五笔单码首批至少 90 条，实得 {loaded}");
+        let more = m.candidates(loaded - 10, 60);
+        assert!(more.rebuilt, "要的范围超出已加载且还有更多，应扩容重建");
+        assert!(
+            more.total > loaded,
+            "扩容后总数应变多：{loaded} → {}",
+            more.total
+        );
+        assert_eq!(more.items.len(), 60, "扩容后这一段应取满");
+        let again = m.candidates(0, 24);
+        assert!(!again.rebuilt, "已加载范围内再取不重建");
         let _ = std::fs::remove_dir_all(&user);
     }
 }

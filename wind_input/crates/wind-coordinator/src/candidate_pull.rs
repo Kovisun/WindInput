@@ -57,15 +57,21 @@ pub struct CandidateWindow {
     /// [`Coordinator::candidate_window_with_comments`] 填它，[`Coordinator::candidate_window`]
     /// 恒空——注释要逐条求值（反查、注释库），不要的宿主不该为它付钱。
     pub comments: Vec<String>,
+    /// 本次拉取触发了扩容重建（[`Coordinator::candidate_window_growing`]）。
+    ///
+    /// 重建的池更大，词频重排可能把池外的常用词提到前面——**宿主已取到的前段可能变了**。
+    /// 宿主见此须整份重取已显示的范围，不能只把这一段接在旧列表后面，否则按下标选词会选错。
+    pub rebuilt: bool,
 }
 
 impl Coordinator {
-    /// 读取候选全量的一个窗口。**纯读**，不改任何状态。
+    /// 读取候选全量的一个窗口。**纯读**，不改任何状态（要「不够就扩容」见
+    /// [`Self::candidate_window_growing`]）。
     ///
     /// `limit` 会被压到 [`MAX_WINDOW`]；`offset` 越界时返回空 `items`（但 `total`
     /// 仍然有效，宿主据此知道自己越界了而不是"候选没了"）。
     pub fn candidate_window(&self, offset: usize, limit: usize) -> CandidateWindow {
-        self.candidate_window_impl(offset, limit, false)
+        self.candidate_window_impl(offset, limit, false, false)
     }
 
     /// 同 [`Self::candidate_window`]，另带每条候选的注释（[`CandidateWindow::comments`]）。
@@ -73,7 +79,22 @@ impl Coordinator {
     /// 注释与桌面候选窗同一份模板与求值上下文（[`crate::coordinator::TooltipEvalCtx`]，
     /// 横排模板、`comment_max_chars(false)` 截断）：同一个候选，电脑上灰字写什么，手机上就写什么。
     pub fn candidate_window_with_comments(&self, offset: usize, limit: usize) -> CandidateWindow {
-        self.candidate_window_impl(offset, limit, true)
+        self.candidate_window_impl(offset, limit, true, false)
+    }
+
+    /// 同上，但要的范围超出已加载的候选、且引擎还有更多（`has_more`）时，先扩容重建
+    /// （[`Coordinator::expand_candidates`]，与桌面翻页到末页附近同一条路：上限翻倍、
+    /// 保持高亮）——移动端候选栏「滑到尾部再取」靠它。触发了重建则 [`CandidateWindow::rebuilt`]。
+    ///
+    /// 这是本模块唯一会改状态的读口：首批只取够首屏（拼音单字母移动端 60 条，见
+    /// `main_path_candidate_limit`），后面的要在用户真往后滑时才付钱。
+    pub fn candidate_window_growing(
+        &self,
+        offset: usize,
+        limit: usize,
+        with_comments: bool,
+    ) -> CandidateWindow {
+        self.candidate_window_impl(offset, limit, with_comments, true)
     }
 
     fn candidate_window_impl(
@@ -81,8 +102,22 @@ impl Coordinator {
         offset: usize,
         limit: usize,
         with_comments: bool,
+        grow: bool,
     ) -> CandidateWindow {
-        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut rebuilt = false;
+        if grow {
+            let want_end = offset.saturating_add(limit.min(MAX_WINDOW));
+            // 每轮上限翻倍；expand 在引擎没给出新东西时会清 has_more，循环必然结束
+            while state.has_more && state.candidates.len() < want_end {
+                let before = (state.candidate_limit, state.candidates.len());
+                self.expand_candidates(&mut state);
+                if (state.candidate_limit, state.candidates.len()) == before {
+                    break;
+                }
+                rebuilt = true;
+            }
+        }
         let total = state.candidates.len();
         let selected = self.highlighted_global_index(&state);
         let end = offset.saturating_add(limit.min(MAX_WINDOW)).min(total);
@@ -105,6 +140,7 @@ impl Coordinator {
             total,
             selected,
             comments,
+            rebuilt,
         }
     }
 
