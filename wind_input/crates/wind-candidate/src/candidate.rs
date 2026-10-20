@@ -185,7 +185,8 @@ pub struct Candidate {
     /// 与 [`Self::is_scope_filtered`] 同构，四个消费者各自决定行为：
     /// - **自动上屏**：计数时跳过。`phrase_auto_commit` 判的是「整个候选列表长度为 1」
     ///   （`let [c] = &state.candidates[..]`），插一条 emoji 进去那条恒假 ⇒ 短语打全码
-    ///   不再自动上屏、要按空格，且只在该短语文本恰好命中 emoji 表时发生；
+    ///   不再自动上屏、要按空格，且只在该短语文本恰好命中 emoji 表时发生。用户开了
+    ///   `input.emoji.block_auto_commit` 时反过来：列表里有它就不自动上屏；
     /// - **排序**：位置由 `input.emoji.show_as` 决定（紧随宿主 / 沉底 / 只作注释不进列表），
     ///   不由本字段决定；
     /// - **词频**：恒不参与（协调器 `record_selection_cand`）。不只是「同短语的有文本无
