@@ -703,6 +703,16 @@ impl MobileCore {
         config_api::set_emoji_module(&self.data_dir, id, on)
     }
 
+    /// 候选提示各段及当前开关（长按候选那张卡显示哪些段，见 [`config_api::tooltip_sections`]）。
+    pub fn tooltip_sections(&self) -> Vec<config_api::TooltipSectionState> {
+        config_api::tooltip_sections(&self.data_dir)
+    }
+
+    /// 打开 / 关闭一段候选提示（如「拆字」）。只写盘，生效要另发 [`MobileCommand::ReloadConfig`]。
+    pub fn set_tooltip_section_enabled(&self, label: &str, on: bool) -> Result<(), String> {
+        config_api::set_tooltip_section_enabled(&self.data_dir, label, on)
+    }
+
     // ── 输入统计（设置页「统计」）────────────────────────────────────
     //
     // 算法与桌面设置页同一份（`wind_store::stats_report`），本层只做取句柄与形状转换。

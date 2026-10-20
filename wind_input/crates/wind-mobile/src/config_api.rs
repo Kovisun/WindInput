@@ -240,6 +240,66 @@ pub fn set_emoji_module(data_dir: &Path, id: &str, on: bool) -> Result<(), Strin
         .map_err(|e| e.to_string())
 }
 
+/// 候选提示（`ui.tooltip.sections`）的一段与它当前的开关（设置页「长按提示」一行）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TooltipSectionState {
+    /// 段名原文（可能是模板，如 `编码{(${code_source})}`）——开关时原样回传，按它定位
+    pub label: String,
+    /// 给人看的段名：模板里的 `{…}` 可选组去掉（`编码{(${code_source})}` → `编码`）
+    pub title: String,
+    pub enabled: bool,
+}
+
+/// 候选提示的全部段（顺序即显示顺序）及当前开关。
+///
+/// 单独开口而不走 [`set`]：段列表是结构体数组，[`ConfigValue`] 表达不了「改第几项的某个字段」，
+/// 照 [`set_emoji_module`] 的先例按段名开关。只列有段名的段（无名段在设置里没法称呼）。
+pub fn tooltip_sections(data_dir: &Path) -> Vec<TooltipSectionState> {
+    let cfg = Config::load(Some(data_dir)).unwrap_or_default();
+    cfg.ui
+        .tooltip
+        .sections
+        .iter()
+        .filter(|s| !s.label.is_empty())
+        .map(|s| TooltipSectionState {
+            title: section_title(&s.label),
+            label: s.label.clone(),
+            enabled: s.enabled,
+        })
+        .collect()
+}
+
+/// 段名模板 → 显示名：去掉 `{…}` 可选组（组里是「有值才出现」的变量部分）。
+fn section_title(label: &str) -> String {
+    let mut out = String::new();
+    let mut depth = 0usize;
+    for ch in label.chars() {
+        match ch {
+            '{' => depth += 1,
+            '}' => depth = depth.saturating_sub(1),
+            _ if depth == 0 => out.push(ch),
+            _ => {}
+        }
+    }
+    out.trim().to_string()
+}
+
+/// 打开 / 关闭名为 `label` 的提示段：整份段列表写回用户层（改回与出厂一致时由
+/// `set_user_value` 剪掉，不留残余）。没有这一段 → Err。同 [`set`]，只写盘，生效要另发重载。
+pub fn set_tooltip_section_enabled(data_dir: &Path, label: &str, on: bool) -> Result<(), String> {
+    let mut cfg = Config::load(Some(data_dir)).map_err(|e| e.to_string())?;
+    let sec = cfg
+        .ui
+        .tooltip
+        .sections
+        .iter_mut()
+        .find(|s| s.label == label)
+        .ok_or_else(|| format!("没有这一段提示：{label}"))?;
+    sec.enabled = on;
+    let value = toml::Value::try_from(&cfg.ui.tooltip.sections).map_err(|e| e.to_string())?;
+    Config::set_user_value(&["ui", "tooltip", "sections"], value).map_err(|e| e.to_string())
+}
+
 /// 写一个配置键到用户层。
 ///
 /// **只写盘，不重载引擎**——重载走 [`crate::MobileCommand::ReloadConfig`]。分开是为了
@@ -271,6 +331,21 @@ mod tests {
         let cfg = apply_overrides_to(Config::default());
         assert!(!cfg.input.association.space_commits, "联想态空格不选联想");
         assert_eq!(cfg.ui.candidate.preedit_display, "candidate_top");
+    }
+
+    /// 段名模板的显示名：可选组整个去掉，字面文字留下
+    #[test]
+    fn tooltip_section_title_strips_optional_groups() {
+        assert_eq!(section_title("编码{(${code_source})}"), "编码");
+        assert_eq!(section_title("拆字"), "拆字");
+        assert_eq!(section_title("{${x}}"), "");
+    }
+
+    /// 不存在的段名当场拒绝（不落盘）
+    #[test]
+    fn unknown_tooltip_section_is_rejected() {
+        let dir = std::env::temp_dir();
+        assert!(set_tooltip_section_enabled(&dir, "没有这一段", true).is_err());
     }
 
     /// 不存在的模块 id 当场拒绝（不落盘）
