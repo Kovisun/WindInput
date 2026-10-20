@@ -2992,6 +2992,16 @@ pub struct PinyinEnglishMerge {
     /// 最小触发长度（0=回退 3，即 2 字符以内不查英文）。
     #[serde(default)]
     pub min_length: usize,
+    /// 中文侧**有**候选时也补英文前缀（至多 2 条，不与精确命中重复）。出厂关。
+    ///
+    /// 只在「打的不是完整拼音」时补：输入至少 5 个字母，且整串**任何切法**都切不成完整的
+    /// 全拼音节序列（`templa` 补 template，`shang` / `chang` 不补）。判据见
+    /// `wind_engine::english_merge::prefix_complete_applies`。
+    ///
+    /// ⚠️ 双拼方案下不生效：判据按全拼音节定义，双拼码两键一音节、几乎任何串都解得开，
+    /// 套不上这条判据。
+    #[serde(default)]
+    pub prefix_complete: bool,
 }
 
 /// 全局模糊音（[schema.pinyin.fuzzy]）。字段对齐引擎 FuzzyConfig。

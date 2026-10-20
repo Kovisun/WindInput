@@ -81,6 +81,9 @@ pub(crate) use wind_candidate::candidate_display_order;
 /// 无从标定：英文词库权重（`hen 800` / `shi 500`）与拼音词库权重（`很 86016`）是两套
 /// 互不相干的量纲。
 ///
+/// 前缀补全的英文（code 比输入长，只在 `prefix_complete` 开着时与中文同场）再往后让一段：
+/// 让过紧随其后、吃满整串的中文真词（`xiaom` 的「小米」），理由见函数内注释。
+///
 /// ⚠️ **取开头的连续段，不是 `rposition`**。用「最后一条常用精确解」作锚会让英文被推到
 /// 列表深处——词频重排可能把某条常用词提到很靠后的位置之后，那条就成了锚。连续段是
 /// 有界的，且与「用户第一屏看到什么」这个真实关切对齐。
@@ -115,10 +118,10 @@ pub(crate) fn place_english_after_common_exact(candidates: &mut Vec<Candidate>, 
     // 有词库背书的候选**不受影响**：`hen` 的「很」、`men` 的「们」、`data` 的「打他」
     // 都是 `is_synthesized == false`，照旧排在英文之前。于是「中文解得好就让位、
     // 解不出或只能靠拼凑就上前」这条线在这里继续成立。
-    let english_exact = {
-        let lower = input.to_lowercase();
-        english.iter().any(|c| c.code == lower)
-    };
+    let lower = input.to_lowercase();
+    let english_exact = english.iter().any(|c| c.code == lower);
+    // 前缀补全的英文（`schema.pinyin.english_merge.prefix_complete`，code 比输入长）另行定位，
+    // 见下方 `pos_prefix`。精确命中的英文不受影响；开关关着时中文侧有候选就不会有前缀英文。
     // ②b **混合简拼整句**自 `3934d5cc` 起带 `is_abbrev`（与整串简拼词同层按权重竞争），
     // `is_pinyin_exact_tier` 因此不再认它、`source_tier` 落到 4。但在**这里**它的身份没变：
     // 仍是吃满整串、全为常用字的一种完整解读，此前一直算在开头那段里——不补这一条，
@@ -136,7 +139,28 @@ pub(crate) fn place_english_after_common_exact(candidates: &mut Vec<Candidate>, 
         .iter()
         .take_while(|c| leads_as_exact(c) && !(english_exact && c.is_synthesized))
         .count();
-    rest.splice(pos..pos, english);
+    // ★ 前缀补全的英文还要让过紧随其后、**吃满整串的中文真词**（非引擎合成）：`xiaom` 的
+    // 「小米」是简拼残码命中、不在精确档，但它才是用户最可能要的；补全出的 `Xiaomi` 只是
+    // 「也许在打英文」的猜测，不该压在它前面。只吃一部分输入的（「小」）不算。
+    let pos_prefix = pos
+        + rest[pos..]
+            .iter()
+            .take_while(|c| {
+                !c.is_synthesized
+                    && wind_candidate::effective_consumed(c, input.len()) >= input.len()
+            })
+            .count();
+    if pos_prefix == pos {
+        // 没有要让的中文（英文方案、中文侧无候选、或紧随其后的不是整串真词）：英文整块
+        // 原序插入。⚠️ 不能按精确 / 前缀拆开——英文方案里那会把调频排好的次序打回
+        // 「精确恒在前」（`hell` 压回 `hello` 之上）。
+        rest.splice(pos..pos, english);
+    } else {
+        let (exact_en, prefix_en): (Vec<Candidate>, Vec<Candidate>) =
+            english.into_iter().partition(|c| c.code == lower);
+        rest.splice(pos_prefix..pos_prefix, prefix_en);
+        rest.splice(pos..pos, exact_en);
+    }
     *candidates = rest;
 }
 
@@ -7263,6 +7287,39 @@ mod english_placement_tests {
             vec!["哈额乐乐", "hello"],
             "英文非整串精确命中时不触发让位"
         );
+    }
+
+    /// ★ 前缀补全的英文（`prefix_complete`，code 比输入长）让位给**吃满整串的中文真词**：
+    /// `xiaom` 的「小米」是简拼残码命中，不在精确档，但它才是用户最可能要的；只消费一部分
+    /// 输入的「小」不算。精确命中的英文仍按原规则定位。
+    #[test]
+    fn prefix_english_yields_to_whole_input_words() {
+        let mut v = vec![
+            zh("小米", "xiaomi", false, 5),
+            zh("消灭", "xiaomie", false, 5),
+            zh("小", "xiao", false, 4),
+            en("Xiaomi", "xiaomi"),
+        ];
+        place_english_after_common_exact(&mut v, "xiaom");
+        assert_eq!(texts(&v), vec!["小米", "消灭", "Xiaomi", "小"]);
+
+        // 中文侧只有残缺解读时，英文整块上前，块内保持原序。
+        let mut v = vec![
+            zh("他", "ta", true, 2),
+            en("table", "table"),
+            en("tables", "tables"),
+        ];
+        place_english_after_common_exact(&mut v, "table");
+        assert_eq!(texts(&v), vec!["table", "tables", "他"]);
+    }
+
+    /// 没有要让的中文时英文整块原序不动——英文方案里调频把 `hello` 排到 `hell` 之前，
+    /// 不得被「精确恒在前」拆回去。
+    #[test]
+    fn english_only_list_keeps_its_order() {
+        let mut v = vec![en("hello", "hello"), en("hell", "hell")];
+        place_english_after_common_exact(&mut v, "hell");
+        assert_eq!(texts(&v), vec!["hello", "hell"]);
     }
 
     /// 无英文候选 / 空输入时是空操作。

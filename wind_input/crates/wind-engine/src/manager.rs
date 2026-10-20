@@ -4543,10 +4543,23 @@ impl EngineManager {
             // 有中文候选 ⇒ 只收精确（前缀词是噪音，`hen` 不该带出 Henderson/Hendrix）；
             // 无中文候选 ⇒ 给前缀补全（此时用户显然在打英文，补全正是他要的），
             // 精确那条由英文引擎自己排在最前。
+            //
+            // 例外是可选的 `prefix_complete`（拼音，出厂关）：中文侧有候选、但整串不是完整
+            // 拼音时，在精确之外再补至多 2 条前缀词。判据见 `prefix_complete_applies`；
+            // 它按全拼音节定义，双拼下不生效（双拼码两键一音节，几乎任何串都解得开）。
             let english = if r.candidates.is_empty() {
                 crate::english_merge::lookup_prefix_fallback(eng.as_ref(), input, cfg.min_length)
             } else {
-                crate::english_merge::lookup(eng.as_ref(), input, cfg.min_length)
+                let mut v = crate::english_merge::lookup(eng.as_ref(), input, cfg.min_length);
+                if cfg.prefix_complete
+                    && crate::english_merge::prefix_complete_applies(input, cfg.min_length)
+                    && !self.pinyin_is_shuangpin()
+                {
+                    let extra =
+                        crate::english_merge::lookup_prefix_complete(eng.as_ref(), input, &v);
+                    v.extend(extra);
+                }
+                v
             };
             if !english.is_empty() {
                 // 通路①（满码自动上屏 / 满码空码清空）的英文守护。
@@ -4625,6 +4638,7 @@ impl EngineManager {
                     enable: c.enable,
                     min_length: c.min_length,
                     block_commit: c.block_commit,
+                    prefix_complete: false,
                 })
             }
             EngineType::Pinyin => {
@@ -4639,6 +4653,7 @@ impl EngineManager {
                     min_length: p.min_length,
                     // 见 `Effective::block_commit`：拼音没有满码上屏 / 顶码可否决。
                     block_commit: false,
+                    prefix_complete: p.prefix_complete,
                 })
             }
             // 混输有自带的英文混入（`schema.mix.enable_english`，带三方档位仲裁），

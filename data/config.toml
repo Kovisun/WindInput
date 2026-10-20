@@ -300,6 +300,10 @@ separator = "auto"
 [schema.pinyin.english_merge]
 enable = false
 min_length = 3
+# 中文侧有候选时也补英文前缀（至多 2 条）。只在打的不是完整拼音时补：输入至少 5 个字母、
+# 且整串怎么切都切不成完整全拼音节（templa 补 template；shang、chang 不补）。
+# 双拼方案下不生效（判据按全拼音节定义）。需先开 enable。
+prefix_complete = false
 
 [schema.pinyin.shuangpin]
 # 双拼方案下额外把击键当全拼再解释一遍（多人共用一台机器：主力打双拼，别人只会全拼）。
