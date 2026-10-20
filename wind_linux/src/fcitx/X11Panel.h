@@ -257,6 +257,7 @@ private:
     std::unique_ptr<fcitx::EventSourceTime> hoverDefer_; // 延后报的悬停变化
     uint64_t hoverDue_ = 0;                              // hoverDefer_ 的到期时刻（微秒）
     std::optional<std::pair<int32_t, int32_t>> lastPointer_; // 上一次移动的根窗口坐标
+    std::optional<int32_t> tipBest_; // 本次宽限里离提示最近的距离（tipGap），刷新新低才顺延
     std::unique_ptr<fcitx::EventSourceTime> tipLeave_;   // 离开悬停提示后的宽限
 
     struct Drag {

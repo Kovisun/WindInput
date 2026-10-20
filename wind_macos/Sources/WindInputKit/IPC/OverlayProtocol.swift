@@ -264,6 +264,16 @@ public enum OverlayInput {
         return toward > 0 && away <= toward
     }
 
+    /// 点到提示的距离（沿提示所在那一侧的轴；在提示上为 0）。只有刷新到本次宽限的新低才顺延：
+    /// 指针停着抖动时一来一回刷不出新低，不会把切换无限拖住。对位 Windows `tip_gap`。
+    public static func tipGap(_ x: CGFloat, _ y: CGFloat, tip: WireRect) -> CGFloat {
+        if tip.x >= x { return tip.x - x }
+        if tip.right <= x { return x - tip.right }
+        if tip.y >= y { return tip.y - y }
+        if tip.bottom <= y { return y - tip.bottom }
+        return 0
+    }
+
     /// 「不改悬停」的哨兵。
     public static let keepHover = Int.min
 

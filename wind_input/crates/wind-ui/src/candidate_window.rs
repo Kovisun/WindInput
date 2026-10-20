@@ -514,9 +514,13 @@ impl CandidateWindow {
             tip_for: tip_for.clone(),
             deferred: None,
             tip_rect: None,
+            tip_visible: None,
+            tip_best: None,
             last_pos: None,
         }));
         window.register_mouse(mouse.clone());
+        let tooltip = crate::tooltip::Tooltip::new(tooltip_events).ok();
+        mouse.borrow_mut().tip_visible = tooltip.as_ref().map(|t| t.visible_flag());
         Ok(Self {
             window,
             config,
@@ -539,7 +543,7 @@ impl CandidateWindow {
             hit_rects: Vec::new(),
             mouse,
             tip_for,
-            tooltip: crate::tooltip::Tooltip::new(tooltip_events).ok(),
+            tooltip,
             window_at: crate::window::window_at,
             theme: wind_theme::Resolved::default(),
             theme_source: wind_theme::Resolved::default(),
@@ -4586,6 +4590,11 @@ pub struct CandidateMouse {
     /// 气泡内容盒（窗口内坐标 `(left, top, right, bottom)`），显示气泡时由候选窗写入。
     /// 只在 `tip_for` 指着当前悬停时才有人读，见 [`heading_to_tip`]。
     tip_rect: Option<(i32, i32, i32, i32)>,
+    /// 气泡此刻是否显示（与气泡共享）。气泡自己收起时 `tip_rect` 不会跟着清，读它前先问这个。
+    tip_visible: Option<Rc<Cell<bool>>>,
+    /// 本次宽限里离气泡最近的距离（[`tip_gap`]）。只有刷新到新的最小值才顺延：指针停着抖动时
+    /// 一来一回刷不出新低，不会把切换无限拖住。
+    tip_best: Option<i32>,
     /// 上一次真实移动的窗口内坐标，判这一步的方向用。
     last_pos: Option<(i32, i32)>,
 }
@@ -4629,6 +4638,21 @@ fn heading_to_tip(prev: (i32, i32), now: (i32, i32), tip: (i32, i32, i32, i32)) 
         0
     };
     toward > 0 && away <= toward
+}
+
+/// 点 `p` 到气泡 `tip` 的距离（沿气泡所在那一侧的轴；在气泡上为 0）。
+fn tip_gap(p: (i32, i32), (l, t, r, b): (i32, i32, i32, i32)) -> i32 {
+    if l >= p.0 {
+        l - p.0
+    } else if r <= p.0 {
+        p.0 - r
+    } else if t >= p.1 {
+        t - p.1
+    } else if b <= p.1 {
+        p.1 - b
+    } else {
+        0
+    }
 }
 
 /// 悬停从 `last` 变到 `raw` 时是即时发出还是延后（设计 §7.6 C）。只有 `last` 的气泡正显示
@@ -5034,11 +5058,15 @@ impl WindowMouse for CandidateMouse {
                 let raw = self.hit(x, y);
                 self.pending_raw = raw;
                 let pos = (x as i32, y as i32);
-                let toward = self
-                    .last_pos
-                    .replace(pos)
-                    .zip(self.tip_rect)
-                    .is_some_and(|(prev, tip)| heading_to_tip(prev, pos, tip));
+                let tip = self
+                    .tip_rect
+                    .filter(|_| self.tip_visible.as_ref().is_some_and(|v| v.get()));
+                let prev = self.last_pos.replace(pos);
+                let gap = tip.map(|t| tip_gap(pos, t));
+                let toward = prev
+                    .zip(tip)
+                    .is_some_and(|(prev, tip)| heading_to_tip(prev, pos, tip))
+                    && gap.zip(self.tip_best).is_some_and(|(g, best)| g < best);
                 // 先按此刻的菜单可见性推进压制阶段：菜单在上一次 tick 之后才收起时，关后的
                 // 第一次移动就该能武装闸门，不必再等一轮。
                 self.tip_hold = self
@@ -5063,9 +5091,15 @@ impl WindowMouse for CandidateMouse {
                                 let now = Instant::now();
                                 let at = now + d;
                                 self.deferred = Some(match self.deferred {
-                                    Some(u) if toward => u.max(now + TIP_SWITCH),
+                                    Some(u) if toward => {
+                                        self.tip_best = gap;
+                                        u.max(now + TIP_SWITCH)
+                                    }
                                     Some(u) => u.min(at),
-                                    None => at,
+                                    None => {
+                                        self.tip_best = gap;
+                                        at
+                                    }
                                 });
                             }
                         }
@@ -8109,6 +8143,8 @@ mod tip_hold_tests {
             tip_for: Rc::new(Cell::new(-1)),
             deferred: None,
             tip_rect: None,
+            tip_visible: None,
+            tip_best: None,
             last_pos: None,
         };
         (m, rx)
@@ -8563,6 +8599,7 @@ mod tip_hold_tests {
         let run = |tip: (i32, i32, i32, i32)| {
             let (mut m, _rx) = engaged_on_0();
             m.tip_rect = Some(tip);
+            m.tip_visible = Some(Rc::new(Cell::new(true)));
             real_move(&mut m, 5);
             real_move(&mut m, 22);
             let first = m.deferred.expect("移开气泡所属候选应延后");
@@ -8574,6 +8611,37 @@ mod tip_hold_tests {
         assert!(after > first, "朝右侧气泡移动：顺延");
         let (first, after) = run((-200, 0, -100, 40));
         assert_eq!(after, first, "背离气泡：不顺延");
+    }
+
+    /// 指针停在格子上左右抖动：一来一回刷不出离气泡的新低，截止不再往后推。
+    #[test]
+    fn jitter_does_not_keep_extending() {
+        let (mut m, _rx) = engaged_on_0();
+        m.tip_rect = Some((100, 0, 200, 40));
+        m.tip_visible = Some(Rc::new(Cell::new(true)));
+        real_move(&mut m, 5);
+        real_move(&mut m, 25);
+        real_move(&mut m, 26);
+        let settled = m.deferred.unwrap();
+        for x in [25, 26, 25, 26] {
+            std::thread::sleep(Duration::from_millis(2));
+            real_move(&mut m, x);
+        }
+        assert_eq!(m.deferred.unwrap(), settled, "抖动不顺延");
+    }
+
+    /// 气泡已自己收起（`tip_rect` 还是旧值）：不按它判朝向。
+    #[test]
+    fn hidden_tip_does_not_extend() {
+        let (mut m, _rx) = engaged_on_0();
+        m.tip_rect = Some((100, 0, 200, 40));
+        m.tip_visible = Some(Rc::new(Cell::new(false)));
+        real_move(&mut m, 5);
+        real_move(&mut m, 22);
+        let first = m.deferred.unwrap();
+        std::thread::sleep(Duration::from_millis(2));
+        real_move(&mut m, 25);
+        assert_eq!(m.deferred.unwrap(), first);
     }
 
     /// 宽限到期仍不在气泡上（也没回来）：照发。

@@ -91,6 +91,24 @@ bool headingToTip(int32_t px, int32_t py, int32_t nx, int32_t ny, const Rect& ti
     return toward > 0 && away <= toward;
 }
 
+int32_t tipGap(int32_t x, int32_t y, const Rect& tip)
+{
+    const int32_t l = tip.x, t = tip.y, r = tip.x + tip.w, b = tip.y + tip.h;
+    if (l >= x) {
+        return l - x;
+    }
+    if (r <= x) {
+        return x - r;
+    }
+    if (t >= y) {
+        return t - y;
+    }
+    if (b <= y) {
+        return y - b;
+    }
+    return 0;
+}
+
 int32_t tipRecheckHover(bool onTip, bool onCandidate, int32_t candidateHit, int32_t held)
 {
     if (onTip) {

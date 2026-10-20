@@ -804,6 +804,12 @@ impl Tooltip {
         self.mouse.borrow_mut().anchor = Some(rect);
     }
 
+    /// 「是否显示中」的共享标志：候选窗的悬停宽限读 `tip_rect` 之前先问它（气泡自己收起时
+    /// 候选窗那边不知道）。
+    pub(crate) fn visible_flag(&self) -> Rc<Cell<bool>> {
+        self.visible.clone()
+    }
+
     /// 显示中的内容盒屏幕矩形 `(left, top, right, bottom)`；没显示为 `None`。候选窗的悬停
     /// 宽限据此判「光标正朝气泡去」。
     pub fn content_rect(&self) -> Option<(i32, i32, i32, i32)> {

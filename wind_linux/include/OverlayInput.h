@@ -149,6 +149,10 @@ uint32_t hoverDeferMs(int32_t last, int32_t raw, bool tipShown);
 /// `candidate_window::heading_to_tip`：沿提示所在那一侧在靠近，且偏离提示跨度不比靠近快。
 bool headingToTip(int32_t px, int32_t py, int32_t nx, int32_t ny, const Rect& tip);
 
+/// 点到提示的距离（沿提示所在那一侧的轴；在提示上为 0）。只有刷新到本次宽限的新低才顺延：
+/// 指针停着抖动时一来一回刷不出新低，不会把切换无限拖住。对位 Windows `tip_gap`。
+int32_t tipGap(int32_t x, int32_t y, const Rect& tip);
+
 /// 「不改悬停」的哨兵（`tipRecheckHover` 的返回值）。
 constexpr int32_t kKeepHover = INT32_MIN;
 

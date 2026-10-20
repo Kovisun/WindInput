@@ -99,6 +99,9 @@ int main()
         CHECK(headingToTip(40, 10, 40, 14, Rect{0, 50, 80, 70}));    // 提示在下方
         CHECK(!headingToTip(40, 10, 40, 6, Rect{0, 50, 80, 70}));
         CHECK(!headingToTip(150, 60, 151, 60, Rect{100, 0, 100, 100})); // 已在提示上
+        CHECK_EQ(tipGap(25, 5, rightTop), 75);  // 同 Windows tip_gap
+        CHECK_EQ(tipGap(40, 10, Rect{0, 50, 80, 70}), 40);
+        CHECK_EQ(tipGap(150, 60, Rect{100, 0, 100, 100}), 0);
     }
 
     CASE("离开提示后重定悬停：回到提示 / 回到所属候选不动；候选窗别处报那里；外面报 -1");

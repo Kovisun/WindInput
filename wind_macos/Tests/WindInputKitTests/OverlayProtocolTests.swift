@@ -189,6 +189,9 @@ final class OverlayProtocolTests: XCTestCase {
         XCTAssertTrue(OverlayInput.headingToTip(40, 10, 40, 14, tip: below))
         XCTAssertFalse(OverlayInput.headingToTip(40, 10, 40, 6, tip: below))
         XCTAssertFalse(OverlayInput.headingToTip(150, 60, 151, 60, tip: WireRect(x: 100, y: 0, w: 100, h: 100)))
+        XCTAssertEqual(OverlayInput.tipGap(25, 5, tip: rightTop), 75)   // 同 Windows tip_gap
+        XCTAssertEqual(OverlayInput.tipGap(40, 10, tip: below), 40)
+        XCTAssertEqual(OverlayInput.tipGap(150, 60, tip: WireRect(x: 100, y: 0, w: 100, h: 100)), 0)
     }
 
     func testTipRecheckHover() {

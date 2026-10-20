@@ -161,9 +161,10 @@ final class CandidateContentView: NSView {
 
     override func mouseMoved(with event: NSEvent) {
         // 命中即上报：候选(index≥0) / 翻页器(-1 上页 / -2 下页) 均高亮；空白→无悬停哨兵。
+        // 先报移动再报命中：宽限起算时（onHover 里）要拿到的是这一次的指针位置。
+        onPointerMoved?()
         let report = hitIndex(event) ?? CandidateContentView.noHover
         if report != lastHover { lastHover = report; onHover?(report) }
-        onPointerMoved?()
     }
 
     /// 滚轮 → 上报 delta，服务端解释成「上下键调整高亮项」(到页边界翻到相邻页)。

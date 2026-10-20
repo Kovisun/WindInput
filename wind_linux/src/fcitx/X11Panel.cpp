@@ -838,7 +838,9 @@ void X11CandidatePanel::candidateHover(int32_t raw, std::optional<std::pair<int3
 {
     const Surface& tip = overlays_[OVERLAY_KIND_TOOLTIP - 1];
     const auto prev = std::exchange(lastPointer_, at);
-    const bool toward = prev && at && tip.mapped &&
+    const std::optional<int32_t> gap =
+        at && tip.mapped ? std::optional<int32_t>(tipGap(at->first, at->second, rectOf(tip))) : std::nullopt;
+    const bool toward = prev && gap && tipBest_ && *gap < *tipBest_ &&
                         headingToTip(prev->first, prev->second, at->first, at->second, rectOf(tip));
     if (raw == hover_) {
         disarm(hoverDefer_); // 回到了原处：待报的变化作废
@@ -855,10 +857,14 @@ void X11CandidatePanel::candidateHover(int32_t raw, std::optional<std::pair<int3
     const uint64_t now = fcitx::now(CLOCK_MONOTONIC);
     if (!armed(hoverDefer_)) {
         hoverDue_ = now + uint64_t(ms) * 1000;
+        tipBest_ = gap;
         armTimer(hoverDefer_, ms, &X11CandidatePanel::onHoverDeferred);
-    } else if (toward && now + uint64_t(kTipSwitchMs) * 1000 > hoverDue_) {
-        hoverDue_ = now + uint64_t(kTipSwitchMs) * 1000;
-        armTimer(hoverDefer_, kTipSwitchMs, &X11CandidatePanel::onHoverDeferred);
+    } else if (toward) {
+        tipBest_ = gap;
+        if (now + uint64_t(kTipSwitchMs) * 1000 > hoverDue_) {
+            hoverDue_ = now + uint64_t(kTipSwitchMs) * 1000;
+            armTimer(hoverDefer_, kTipSwitchMs, &X11CandidatePanel::onHoverDeferred);
+        }
     }
 }
 

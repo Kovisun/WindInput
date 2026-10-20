@@ -42,8 +42,10 @@ public final class CandidatePanelHost {
     private var pendingHoverTarget = -1
     /// `pendingHover` 的到期时刻。
     private var pendingHoverDue: DispatchTime = .now()
-    /// 上一次指针移动的 wire 坐标, 判这一步的方向用。
+    /// 上一次指针移动的 wire 坐标, 判这一步的方向用。离开候选窗 / 撤掉待报项时清掉。
     private var lastPointerWire: (x: CGFloat, y: CGFloat)?
+    /// 本次宽限里离提示最近的距离 (`tipGap`), 刷新新低才顺延。
+    private var tipBest: CGFloat?
     private var pendingRecheck: DispatchWorkItem?
     /// 服务端最近一次建议的候选窗落点 (wire 左上, 仅主线程)。悬停提示按「候选窗实际落点 − 它」平移。
     private var lastSuggestedWire: (x: CGFloat, y: CGFloat)?
@@ -136,6 +138,7 @@ public final class CandidatePanelHost {
 
     /// 撤掉待报的悬停变化与重定 (指针进了提示 / 点击 / 菜单请求时)。
     private func cancelPendingHover() {
+        lastPointerWire = nil
         pendingHover?.cancel(); pendingHover = nil
         pendingRecheck?.cancel(); pendingRecheck = nil
     }
@@ -146,6 +149,7 @@ public final class CandidatePanelHost {
         // 菜单开着时指针归捕获窗：候选视图补发的 mouseExited 不是用户真的移开了，别据此收提示。
         // 菜单收起时 `onMenuClosed` 会按指针真实位置重定一次。
         guard !overlays.isMenuOpen else { return }
+        if raw == CandidateContentView.noHover { lastPointerWire = nil }   // 指针离开了候选窗
         let norm = raw < 0 ? -1 : raw
         // 已有待报项: 回到已报的目标 = 撤销待报; 否则只换目标, 计时不顺延 (一路擦过多个候选
         // 不该把宽限无限拖长)。对位 Linux addon 的 candidateHover。
@@ -164,7 +168,13 @@ public final class CandidatePanelHost {
             return
         }
         pendingHoverTarget = raw
+        tipBest = currentTipGap()
         schedulePendingHover(afterMs: ms)
+    }
+
+    private func currentTipGap() -> CGFloat? {
+        guard let p = lastPointerWire, let tip = overlays.tooltipWireRect() else { return nil }
+        return OverlayInput.tipGap(p.x, p.y, tip: tip)
     }
 
     private func schedulePendingHover(afterMs ms: UInt32) {
@@ -188,6 +198,9 @@ public final class CandidatePanelHost {
         lastPointerWire = now
         guard let prev, pendingHover != nil, let tip = overlays.tooltipWireRect(),
               OverlayInput.headingToTip(prev.x, prev.y, now.x, now.y, tip: tip) else { return }
+        let gap = OverlayInput.tipGap(now.x, now.y, tip: tip)
+        guard let best = tipBest, gap < best else { return }
+        tipBest = gap
         let ms = OverlayInput.tipSwitchMs
         guard DispatchTime.now() + .milliseconds(Int(ms)) > pendingHoverDue else { return }
         schedulePendingHover(afterMs: ms)
