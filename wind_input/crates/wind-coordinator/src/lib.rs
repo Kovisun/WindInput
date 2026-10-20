@@ -79,6 +79,8 @@ pub(crate) mod tooltip;
 pub mod tsf_profile_name;
 /// UI 命令发送端：把「投递 + 唤醒 UI 线程」绑成一次操作，见模块文档。
 pub mod ui_sender;
+/// 用户词管理的存储域逻辑（桌面设置页 RPC 与移动端门面共用），见模块文档。
+pub mod user_words_api;
 pub mod watchdog;
 pub mod web_host;
 pub(crate) mod wildcard;

@@ -164,6 +164,25 @@ pub struct DailyTotal {
     pub english: u32,
 }
 
+/// 一条用户词（设置页「词库」列表项）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct UserWord {
+    /// **带音节空格的显示码**（`ni hao`）；码表方案、无边界信息的旧词没有空格。
+    /// 原样回传给 [`MobileCore::user_word_remove`] 即可删掉——拆回扁平码由核心做。
+    pub code: String,
+    /// 真实文本（存储域，不做桌面设置页那层 `\n` 转义——移动端直接显示原文）
+    pub text: String,
+    pub weight: i32,
+}
+
+/// 用户词的一页与命中总数。
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct UserWordPage {
+    pub items: Vec<UserWord>,
+    /// 命中总数（不是本页条数），分页 / 「共 N 条」用。
+    pub total: u64,
+}
+
 /// 宿主可下达的引擎命令。
 ///
 /// 刻意是一张**手工挑选的小表**而非桌面 `MenuCmd` 的镜像：后者含截图、打开目录、
@@ -555,6 +574,113 @@ impl MobileCore {
         .map_err(|e| e.to_string())
     }
 
+    // ── 用户词库（设置页「词库」）────────────────────────────────────
+    //
+    // 本体与桌面设置页的 `dict.*` RPC 同一份（`wind_coordinator::user_words_api`）：
+    // ü 归一、音节边界求解、搜索的三条分流都不在本层重写。`schema_id` 传方案 id 即可，
+    // 拼音族折叠到 `pinyin` 数据方案在核心里做；混输方案与桌面现状一致，落它自己的桶
+    // （`EngineManager::data_schema_id` 只折叠拼音族）。
+    //
+    // 加词 / 删词 / 清空落库时推进该方案的结构代次（`Store::bump_words_gen`），引擎据此
+    // 失效候选缓存——改完立即打得出，与桌面同一条路，不需要另发重载。
+
+    /// 分页列出用户词。`query` 为空 = 浏览（按编码序），非空 = 搜索（编码前缀命中在前，
+    /// 词条内容 / 编码中段命中在后；可带音节空格）。出错记 warn 返回空页。
+    pub fn user_words(
+        &self,
+        schema_id: &str,
+        query: &str,
+        offset: u32,
+        limit: u32,
+    ) -> UserWordPage {
+        use wind_coordinator::web_host::WebDataHost;
+        let r = wind_coordinator::user_words_api::list_paged(
+            &*self.coord,
+            schema_id,
+            query,
+            None,
+            offset as usize,
+            limit as usize,
+        );
+        // 三条分流都扫满全表（`total` 要精确）：标记一次，空闲后回收 redb 读缓存。
+        // 与桌面 RPC 出口（wind-webdata 的 `scans_whole_table`）同一策略，只是那张表在
+        // webdata 里、本层够不着，故在这里显式做。
+        if let Some(store) = self.coord.user_store() {
+            store.mark_scan_pending();
+        }
+        match r {
+            Ok(page) => UserWordPage {
+                total: page.total as u64,
+                items: page
+                    .items
+                    .iter()
+                    .map(|r| UserWord {
+                        code: wind_coordinator::user_words_api::display_code(r),
+                        text: r.text.clone(),
+                        weight: r.weight,
+                    })
+                    .collect(),
+            },
+            Err(e) => {
+                tracing::warn!("读用户词失败: {e}");
+                UserWordPage::default()
+            }
+        }
+    }
+
+    /// 手动加词。`code` 可带音节空格（显式切分，优先于自动求解）。
+    ///
+    /// 权重固定取 [`USER_WORD_ADD_WEIGHT`]，与桌面设置页手动加词的默认值一致。
+    pub fn user_word_add(&self, schema_id: &str, code: &str, text: &str) -> Result<(), String> {
+        self.ensure_writable()?;
+        wind_coordinator::user_words_api::add(
+            &*self.coord,
+            schema_id,
+            code,
+            text,
+            USER_WORD_ADD_WEIGHT,
+        )
+        .map_err(|e| e.to_string())
+    }
+
+    /// 删词。`code` 接受列表给的显示码（带音节空格）。不存在静默成功。
+    pub fn user_word_remove(&self, schema_id: &str, code: &str, text: &str) -> Result<(), String> {
+        self.ensure_writable()?;
+        wind_coordinator::user_words_api::remove(&*self.coord, schema_id, code, text)
+            .map_err(|e| e.to_string())
+    }
+
+    /// 清空该方案（折叠后的数据方案）的全部用户词，返回删除条数。
+    pub fn user_words_clear(&self, schema_id: &str) -> Result<u64, String> {
+        use wind_coordinator::web_host::WebDataHost;
+        self.ensure_writable()?;
+        let n = wind_coordinator::user_words_api::clear(&*self.coord, schema_id)
+            .map_err(|e| e.to_string())?;
+        // 整表规模的写：redb 刷盘把脏页晋升进读缓存且长期不还，做完立即回收。同桌面
+        // RPC 出口的 `BULK_WRITE_METHODS`；失败只记日志——词已经清掉了，不能报成失败。
+        if let Some(store) = self.coord.user_store()
+            && let Err(e) = store.drop_page_cache()
+        {
+            tracing::error!(
+                "清空用户词之后丢弃页缓存失败：{e}。数据已写入，但存储层现处于暂停态，\
+                 后续读写都会失败，请重启输入法。"
+            );
+        }
+        Ok(n as u64)
+    }
+
+    /// 写口的前置闸：只读模式（用户数据由更新版本写入 / meta.toml 读不出）拒绝。
+    ///
+    /// 桌面那边只读模式下 store 根本不打开，写 RPC 靠「无持久化存储」间接挡住；这里显式
+    /// 先查，是为了把**原因**（要升级 / 要从备份还原）原样交给用户，而不是一句看不懂的
+    /// 「无持久化存储」。
+    fn ensure_writable(&self) -> Result<(), String> {
+        match self.coord.storage_readonly_reason() {
+            Some(r) => Err(r.to_string()),
+            None => Ok(()),
+        }
+    }
+
     /// 可选双拼布局。清单由核心扫描目录得出，**宿主不要硬编码**——
     /// 用户可以往 `schemas` 的 `shuangpin` 子目录里丢自己的布局文件，硬编码清单看不见它。
     pub fn shuangpin_layouts(&self) -> Vec<LayoutEntry> {
@@ -570,6 +696,14 @@ impl MobileCore {
             .collect()
     }
 }
+
+/// 移动端手动加词的权重。
+///
+/// 取桌面设置页手动加词的默认值，两个入口加出来的词排序口径一致：wind-setting 仓
+/// `src/add_word_window.rs` 的 `DEFAULT_WEIGHT`（快捷加词小窗）与
+/// `src/pages/dict/state.rs` 打开新增对话框时预填的 `edit_weight`，都是 1200。
+/// 移动端词库页不提供权重输入（手机上没人会去调它），故固定取这个值。
+pub const USER_WORD_ADD_WEIGHT: i32 = 1200;
 
 /// 把用户目录与**安装根**钉进 App 私有路径。
 ///
@@ -743,4 +877,74 @@ fn dispatch_key(coord: &Coordinator, vk: u32, modifiers: u32) -> BridgeKeyAction
         event_seq: 0,
         prev_char: 0,
     })
+}
+
+/// 词库门面：形状转换（显示码、`u64` 总数）与只读闸。存储语义本身在 wind-coordinator 的
+/// `tests/user_words_api.rs` 验，这里不重复。
+#[cfg(test)]
+mod user_words_tests {
+    use super::*;
+
+    /// 直接拼 [`MobileCore`]：`MobileCore::new` 要挂环境变量与出厂目录，测这几个口用不着。
+    /// ⚠️ 目录名带 pid：多会话并行跑测试时固定名会互删夹具。
+    fn core(tag: &str, meta: Option<&str>) -> (MobileCore, std::path::PathBuf) {
+        let user =
+            std::env::temp_dir().join(format!("wind_mobile_uw_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&user);
+        std::fs::create_dir_all(&user).unwrap();
+        if let Some(m) = meta {
+            std::fs::write(user.join("meta.toml"), m).unwrap();
+        }
+        let (coord, _rx) =
+            Coordinator::new_headless_with_ui_at(Config::default(), None, Some(&user));
+        let core = MobileCore {
+            coord,
+            warming: Arc::new(AtomicBool::new(false)),
+            data_dir: user.clone(),
+        };
+        (core, user)
+    }
+
+    #[test]
+    fn add_list_search_remove_clear() {
+        let (m, dir) = core("crud", None);
+        m.user_word_add("pinyin", "ni hao", "你好").unwrap();
+        m.user_word_add("pinyin", "wo men", "我们").unwrap();
+
+        let page = m.user_words("pinyin", "", 0, 50);
+        assert_eq!(page.total, 2);
+        assert_eq!(
+            page.items[0],
+            UserWord {
+                code: "ni hao".into(),
+                text: "你好".into(),
+                weight: USER_WORD_ADD_WEIGHT,
+            },
+            "显示码带音节空格、权重取桌面加词默认值"
+        );
+
+        let hits = m.user_words("pinyin", "们", 0, 50);
+        assert_eq!((hits.total, hits.items[0].text.as_str()), (1, "我们"));
+
+        // 列表给的显示码原样回传即可删掉
+        m.user_word_remove("pinyin", &page.items[0].code, "你好")
+            .unwrap();
+        assert_eq!(m.user_words("pinyin", "", 0, 50).total, 1);
+
+        assert_eq!(m.user_words_clear("pinyin"), Ok(1));
+        assert_eq!(m.user_words("pinyin", "", 0, 50), UserWordPage::default());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// 只读模式：写口带着原因拒绝；读口照约定返回空页（不 panic）。
+    #[test]
+    fn readonly_rejects_writes_with_reason() {
+        let (m, dir) = core("ro", Some("format_version = 99\ndir_id = \"x\"\n"));
+        let err = m.user_word_add("pinyin", "ni hao", "你好").unwrap_err();
+        assert!(err.contains("99"), "要把只读原因交给用户: {err}");
+        assert!(m.user_word_remove("pinyin", "ni hao", "你好").is_err());
+        assert!(m.user_words_clear("pinyin").is_err());
+        assert_eq!(m.user_words("pinyin", "", 0, 50), UserWordPage::default());
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }
