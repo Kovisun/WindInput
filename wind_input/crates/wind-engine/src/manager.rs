@@ -420,7 +420,7 @@ pub const ASSOC_POOL_FACTOR: usize = 4;
 const UNTOUCHED: u64 = u64::MAX;
 
 #[cfg(test)]
-type BeforePublishHook = Box<dyn FnMut(&EngineManager, &str) + Send>;
+type BeforePublishHook = Arc<dyn Fn(&EngineManager, &str) + Send + Sync>;
 
 /// `engines` 表里的一项：引擎 + 最后使用时刻（方案常驻策略的闲置淘汰用）。
 ///
@@ -439,6 +439,10 @@ pub struct EngineManager {
     /// `ensure_loaded` 锁外构建前记代次、写回前（同一把锁下）比对，变了就丢掉重建——否则
     /// 「建到一半被失效」的旧引擎会被插回表里，一直用到下次失效。共享英文引擎缓存同理。
     /// 闲置淘汰不推进它：被摘的引擎配置没变，正在建的那份照样能用。
+    ///
+    /// **全局一个代次是有意的取舍**：无关方案的失效也会让在建的构建重来一轮（白建一次），
+    /// 换来的是不必维护「谁依赖谁」的按方案代次（混输成员、共享英文都要跟着推）。失效是
+    /// 设置页操作级的低频事件，不会活锁——每多一轮都要求其间又发生一次失效。
     engines_gen: std::sync::atomic::AtomicU64,
     /// 淘汰时钟的零点（构造时刻）。
     clock_origin: std::time::Instant,
@@ -625,8 +629,9 @@ pub struct EngineManager {
     /// 每方案构建锁（single-flight）：同一方案的引擎/缓存构建串行，避免后台预热与首次
     /// 切换并发时重复构建同一份大缓存；不同方案可并行构建（缓存在各自子目录，互不冲突）。
     build_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
-    /// 测试钩子：引擎建好、写回 `engines` 之前（参数为方案 id），以及共享英文引擎写回缓存
-    /// 之前（参数为 `"@shared_english"`）调用。用来在锁外构建的窗口里确定性地插入一次失效。
+    /// 测试钩子：引擎建好、写回 `engines` 之前（参数为方案 id）、共享英文引擎写回缓存之前
+    /// （`"@shared_english"`）、`invalidate_schema` 放开 `engines` 锁之后（`"@after_engines_bump"`）
+    /// 调用。用来在锁外构建的窗口里确定性地插入一次失效。
     #[cfg(test)]
     before_publish_hook: Mutex<Option<BeforePublishHook>>,
     /// 反查索引的每方案构建锁。与 `build_locks` **刻意分开**：索引构建（秒级、上百 MB）
@@ -3102,23 +3107,17 @@ impl EngineManager {
         true
     }
 
-    /// 跑一次 [`Self::before_publish_hook`]（取出来调，调完放回：钩子里允许再取引擎）。
+    /// 跑一次 [`Self::before_publish_hook`]（拷出来、放锁后调：钩子里允许再取引擎，
+    /// 也允许别的线程同时进钩子）。
     #[cfg(test)]
     fn run_before_publish_hook(&self, stage: &str) {
         let hook = self
             .before_publish_hook
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .take();
-        if let Some(mut h) = hook {
+            .clone();
+        if let Some(h) = hook {
             h(self, stage);
-            let mut g = self
-                .before_publish_hook
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            if g.is_none() {
-                *g = Some(h);
-            }
         }
     }
 
@@ -3222,6 +3221,12 @@ impl EngineManager {
                             debug!("{schema_id} 构建期间被失效，丢弃本次结果重建");
                             continue;
                         }
+                        // 与发布同在 `engines` 锁里登记指纹：先发布后登记的话，其间
+                        // `user_dicts_changed` 会把这个刚建好的方案误报成「变了」。
+                        self.user_dicts_seen
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .insert(schema_id.to_string(), user_dicts_fp);
                         g.insert(
                             schema_id.to_string(),
                             LoadedEngine {
@@ -3232,10 +3237,6 @@ impl EngineManager {
                         );
                     }
                     info!("Loaded engine: {} (type={:?})", schema_id, engine_type);
-                    self.user_dicts_seen
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .insert(schema_id.to_string(), user_dicts_fp);
                     // 活跃方案的引擎（重）建好了：影子层后台预热。非活跃方案等切过去时再热
                     // （`on_active_changed`），不为用户未必会用的方案读盘。
                     if schema_id == self.active_schema_id() {
@@ -3955,6 +3956,14 @@ impl EngineManager {
     /// `reload_from_config` 的动作才生效——真机表现为「关了没反应，顺手改别的设置又好了」。
     /// 转发不到的依赖方案（成员子引擎不认这个 dict）直接失效，下次使用按已落盘的 override 重建。
     pub fn set_dict_enabled_live(&self, schema_id: &str, dict_id: &str, enabled: bool) -> bool {
+        // 禁用方向只对已加载引擎摘层，摸不到正在锁外构建的那份（它可能已按旧 override 读到
+        // 这个库开着）：推进代次让它写回前作废重建（见 `engines_gen`）。启用方向走
+        // `invalidate_schema`，自带推进。
+        if !enabled {
+            let _g = self.engines.lock().unwrap_or_else(|e| e.into_inner());
+            self.engines_gen
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        }
         let engine = self.loaded_engine(schema_id);
         // 独立方案与把它当成员的混输方案同一条规则：翻得动就翻，翻不动就失效待重建。
         // 只失效混输不失效独立方案的话，同一个拼音扩展库在混输里下次输入就生效、
@@ -4225,15 +4234,21 @@ impl EngineManager {
             self.engines_gen
                 .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
             g.remove(schema_id);
+            // 英文方案被换掉时，共享英文引擎缓存也必须作废——混入与混输都从那里取，不清的话
+            // 它们会一直握着刚被移出 `engines` 的旧实例（`en_ext` 的启用就走这条路）。
+            //
+            // 必须与推进代次**同在这把锁里**（锁序 engines → 缓存）：放锁后再清的话，正等着
+            // `engines` 锁写回的混输比对失败、立刻按新代次重来，会从还没清的缓存里取到旧实例，
+            // 带着新代次写回成功。
+            if schema_id == ENGLISH_SCHEMA {
+                *self
+                    .shared_english_engine
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()) = None;
+            }
         }
-        // 英文方案被换掉时，共享英文引擎缓存也必须作废——混入与混输都从那里取，不清的话
-        // 它们会一直握着刚被移出 `engines` 的旧实例（`en_ext` 的启用就走这条路）。
-        if schema_id == ENGLISH_SCHEMA {
-            *self
-                .shared_english_engine
-                .lock()
-                .unwrap_or_else(|e| e.into_inner()) = None;
-        }
+        #[cfg(test)]
+        self.run_before_publish_hook("@after_engines_bump");
         // ★ 扇出到把它当成员的混输方案。
         //
         // 从 `engines` 表里摘掉一条，**换不动已经建好的引擎手里那个 `Arc`**：混输在
@@ -4489,16 +4504,15 @@ impl EngineManager {
             self.engines_gen
                 .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
             g.clear();
+            // 连同**共享英文引擎缓存**一起重置：开关从关到开时，缓存里躺着的可能是上次
+            // 「未尝试」之外的 `Some(None)`（词库当时缺失）。不重置的话用户补上词库、重载配置后
+            // 仍然不生效，症状是「设置页改了不生效、重启后才生效」——与上面几份镜像同一类坑。
+            // 与推进代次同在这把锁里，理由见 `invalidate_schema` 同一处。
+            *self
+                .shared_english_engine
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = None;
         }
-        // 连同**共享英文引擎缓存**一起重置：开关从关到开时，缓存里躺着的可能是上次「未尝试」
-        // 之外的 `Some(None)`（词库当时缺失）。不重置的话用户补上词库、重载配置后仍然不生效，
-        // 症状是「设置页改了不生效、重启后才生效」——与上面几份镜像同一类坑。
-        // 必须在推进 `engines_gen` **之后**：之前清的话，代次未变时并发的
-        // `shared_english_engine` 仍可把旧实例写回来。
-        *self
-            .shared_english_engine
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = None;
         self.freq_cache
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -4729,8 +4743,9 @@ impl EngineManager {
         //
         // 取前记 `engines_gen`、写回前比对：其间 `invalidate_schema("english")` /
         // `reload_from_config` 清掉的缓存不能被这份旧实例盖回去。变了就只交给本次调用方、
-        // 不进缓存——下次取会重新走 `ensure_loaded`。混输构建拿到它也无妨：混输自己的
-        // 写回比对同一个代次，会整份重建。
+        // 不进缓存——下次取会重新走 `ensure_loaded`。混输构建拿到它也无妨：它记的代次在失效
+        // 之前，写回比对必失败、整份重来；重来那一轮读缓存时，失效口已在推进代次的同一段
+        // `engines` 锁里把缓存清掉，读不到旧实例。
         let generation = self.engines_gen.load(std::sync::atomic::Ordering::Acquire);
         let built = if self.ensure_loaded(ENGLISH_SCHEMA) {
             self.loaded_engine(ENGLISH_SCHEMA)
@@ -11811,111 +11826,159 @@ input_chars = \"a-z;\"
         );
     }
 
-    /// 混输代际测试的自造方案：码表 `{t}c`（单库，`a` → `word`）、混输 `{t}b`（primary = `{t}c`）、
-    /// 混输 `{t}a`（primary = `{t}b`），以及一份码表类型的 `english`（词库目录带标签，
-    /// 不与真英文方案的缓存撞路径）。返回 (data 目录, override 目录)。
-    fn mixgen_fixture(t: &str) -> (std::path::PathBuf, std::path::PathBuf) {
-        let root = std::env::temp_dir().join(format!("wind_eng_mixgen_{}_{t}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        let schemas = root.join("data/schemas");
-        for (id, word) in [(format!("{t}c"), "甲"), (format!("{t}en"), "乙")] {
-            std::fs::create_dir_all(schemas.join(&id)).unwrap();
-            std::fs::write(
-                schemas.join(format!("{id}/{id}.dict.yaml")),
-                format!("---\nname: {id}\nversion: \"1\"\n...\n{word}\ta\n"),
-            )
-            .unwrap();
-        }
-        let codetable = |id: &str, dict: &str| {
-            format!(
-                "[schema]\nid = \"{id}\"\nname = \"{id}\"\n[engine]\ntype = \"codetable\"\n\
-                 [engine.codetable]\nmax_code_length = 4\n\
-                 [[dictionaries]]\nid = \"main\"\npath = \"{dict}/{dict}.dict.yaml\"\ndefault = true\n"
-            )
-        };
-        let mixed = |id: &str, primary: &str| {
-            format!(
-                "[schema]\nid = \"{id}\"\nname = \"{id}\"\n[engine]\ntype = \"mixed\"\n\
-                 [engine.mixed]\nprimary_schema = \"{primary}\"\nsecondary_schema = \"\"\n"
-            )
-        };
-        let files = [
-            (
-                format!("{t}c"),
-                codetable(&format!("{t}c"), &format!("{t}c")),
-            ),
-            (format!("{t}b"), mixed(&format!("{t}b"), &format!("{t}c"))),
-            (format!("{t}a"), mixed(&format!("{t}a"), &format!("{t}b"))),
-            (
-                ENGLISH_SCHEMA.to_string(),
-                codetable(ENGLISH_SCHEMA, &format!("{t}en")),
-            ),
-        ];
-        for (id, body) in files {
-            std::fs::write(schemas.join(format!("{id}.schema.toml")), body).unwrap();
-        }
-        (root.join("data"), root.join("ov"))
+    /// 混输代际测试的夹具。方案 id 前缀 `t` = 标签 + 进程号：派生缓存按词库所在目录名分组、
+    /// 落在进程级 `CACHE_DIR`（真实用户缓存根）下，不带进程号的话并发进程互踩。
+    ///
+    /// 方案：码表 `{t}c`（主库 `a` → 甲；默认启用的扩展库 `ext`，`b` → 戊）、混输 `{t}b`
+    /// （primary = `{t}c`）、混输 `{t}a`（primary = `{t}b`），以及码表类型的 `english`
+    /// （词库在 `{t}en`，不与真英文方案的缓存撞路径）。Drop 时删数据目录与那几组缓存。
+    struct MixFixture {
+        t: String,
+        root: std::path::PathBuf,
     }
 
-    fn mixgen_manager(data: &Path, ov: &Path, active: &str, available: &[&str]) -> EngineManager {
-        let mut cfg = Config::default();
-        cfg.schema.active = active.into();
-        cfg.schema.available = available.iter().map(|s| s.to_string()).collect();
-        cfg.schema.mix.enable_english = false;
-        cfg.input.temp_pinyin.enabled = false;
-        cfg.input.temp_english.show_candidates = false;
-        EngineManager::with_store_override(&cfg, Some(data), None, Some(ov.to_path_buf()))
+    impl MixFixture {
+        fn new(tag: &str) -> Self {
+            let t = format!("{tag}{}", std::process::id());
+            let root = std::env::temp_dir().join(format!("wind_eng_mixgen_{t}"));
+            let _ = std::fs::remove_dir_all(&root);
+            let fx = Self { t, root };
+            let t = &fx.t;
+            let schemas = fx.data().join("schemas");
+            for (dir, line) in [("c", "甲\ta"), ("x", "戊\tb"), ("en", "乙\ta")] {
+                let id = format!("{t}{dir}");
+                std::fs::create_dir_all(schemas.join(&id)).unwrap();
+                std::fs::write(
+                    fx.dict(dir),
+                    format!("---\nname: {id}\nversion: \"1\"\n...\n{line}\n"),
+                )
+                .unwrap();
+            }
+            let codetable = |id: &str, dict: &str, extra: &str| {
+                format!(
+                    "[schema]\nid = \"{id}\"\nname = \"{id}\"\n[engine]\ntype = \"codetable\"\n\
+                     [engine.codetable]\nmax_code_length = 4\n\
+                     [[dictionaries]]\nid = \"main\"\npath = \"{dict}/{dict}.dict.yaml\"\ndefault = true\n\
+                     {extra}"
+                )
+            };
+            let mixed = |id: &str, primary: &str| {
+                format!(
+                    "[schema]\nid = \"{id}\"\nname = \"{id}\"\n[engine]\ntype = \"mixed\"\n\
+                     [engine.mixed]\nprimary_schema = \"{primary}\"\nsecondary_schema = \"\"\n"
+                )
+            };
+            let ext = format!(
+                "[[dictionaries]]\nid = \"ext\"\npath = \"{t}x/{t}x.dict.yaml\"\n\
+                 default_enabled = true\n"
+            );
+            let files = [
+                (fx.id("c"), codetable(&fx.id("c"), &fx.id("c"), &ext)),
+                (fx.id("b"), mixed(&fx.id("b"), &fx.id("c"))),
+                (fx.id("a"), mixed(&fx.id("a"), &fx.id("b"))),
+                (
+                    ENGLISH_SCHEMA.to_string(),
+                    codetable(ENGLISH_SCHEMA, &fx.id("en"), ""),
+                ),
+            ];
+            for (id, body) in files {
+                std::fs::write(schemas.join(format!("{id}.schema.toml")), body).unwrap();
+            }
+            fx
+        }
+
+        fn id(&self, suffix: &str) -> String {
+            format!("{}{suffix}", self.t)
+        }
+
+        fn data(&self) -> std::path::PathBuf {
+            self.root.join("data")
+        }
+
+        /// `{t}{dir}` 目录下那份词库源文件。
+        fn dict(&self, dir: &str) -> std::path::PathBuf {
+            let id = self.id(dir);
+            self.data().join(format!("schemas/{id}/{id}.dict.yaml"))
+        }
+
+        fn manager(&self, active: &str, available: &[&str], enable_english: bool) -> EngineManager {
+            let mut cfg = Config::default();
+            cfg.schema.active = active.into();
+            cfg.schema.available = available.iter().map(|s| s.to_string()).collect();
+            cfg.schema.mix.enable_english = enable_english;
+            cfg.input.temp_pinyin.enabled = false;
+            cfg.input.temp_english.show_candidates = false;
+            EngineManager::with_store_override(
+                &cfg,
+                Some(&self.data()),
+                None,
+                Some(self.root.join("ov")),
+            )
+        }
+    }
+
+    impl Drop for MixFixture {
+        fn drop(&mut self) {
+            for dir in ["c", "x", "en"] {
+                if let Some(p) = cache_path(&self.dict(dir), "wdat").parent() {
+                    let _ = std::fs::remove_dir_all(p);
+                }
+            }
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
     }
 
     /// 扇出要沿 primary / secondary **传递**：A 的 primary 是混输 B、B 的 primary 是码表 C，
     /// 改 C 之后 A 手里捧着的是旧 C，必须连带摘掉。
     #[test]
     fn invalidating_leaf_member_drops_mixed_two_levels_up() {
-        let (data, ov) = mixgen_fixture("fan");
-        let mgr = mixgen_manager(&data, &ov, "fana", &["fana", "fanb", "fanc"]);
-        assert!(mgr.is_loaded("fana"), "夹具：混输 A 应能建起来");
+        let fx = MixFixture::new("fan");
+        let (a, b, c) = (fx.id("a"), fx.id("b"), fx.id("c"));
+        let mgr = fx.manager(&a, &[&a, &b, &c], false);
+        assert!(mgr.is_loaded(&a), "夹具：混输 A 应能建起来");
         let v: toml::Value = "[engine.codetable]\nmax_code_length = 3\n".parse().unwrap();
-        mgr.write_schema_override("fanc", &v).unwrap();
-        assert!(
-            !mgr.is_loaded("fana"),
-            "C 是 A 的间接成员，改 C 必须连带失效 A"
-        );
-        let _ = std::fs::remove_dir_all(data.parent().unwrap());
+        mgr.write_schema_override(&c, &v).unwrap();
+        assert!(!mgr.is_loaded(&a), "C 是 A 的间接成员，改 C 必须连带失效 A");
     }
 
     /// 用户分库扇出同理：可用列表里只有 A 时，C 的分库变了也要沿 A → B → C 找到 C 并失效 A。
     #[test]
     fn user_dict_invalidation_reaches_indirect_member() {
-        let (data, ov) = mixgen_fixture("udm");
-        let mgr = mixgen_manager(&data, &ov, "udma", &["udma"]);
-        assert!(mgr.is_loaded("udma"), "夹具：混输 A 应能建起来");
-        assert_eq!(mgr.data_schema_id("udmc"), "udmc");
-        mgr.invalidate_user_dicts("udmc");
+        let fx = MixFixture::new("udm");
+        let (a, c) = (fx.id("a"), fx.id("c"));
+        let mgr = fx.manager(&a, &[&a], false);
+        assert!(mgr.is_loaded(&a), "夹具：混输 A 应能建起来");
+        assert_eq!(mgr.data_schema_id(&c), c);
+        mgr.invalidate_user_dicts(&c);
         assert!(
-            !mgr.is_loaded("udma"),
+            !mgr.is_loaded(&a),
             "C 的分库变了，间接引用它的混输 A 必须失效"
         );
-        let _ = std::fs::remove_dir_all(data.parent().unwrap());
+    }
+
+    fn set_hook(mgr: &EngineManager, f: impl Fn(&EngineManager, &str) + Send + Sync + 'static) {
+        *mgr.before_publish_hook.lock().unwrap() = Some(Arc::new(f));
     }
 
     /// 装一个只在 `stage` 第一次出现时触发的钩子。
     fn hook_once(
         mgr: &EngineManager,
-        stage: &'static str,
+        stage: String,
         f: impl FnOnce(&EngineManager) + Send + 'static,
     ) {
-        let mut f = Some(f);
-        *mgr.before_publish_hook.lock().unwrap() = Some(Box::new(move |m, s| {
-            if s == stage
-                && let Some(f) = f.take()
-            {
-                f(m);
+        let f = Mutex::new(Some(f));
+        set_hook(mgr, move |m, s| {
+            if s == stage {
+                let f = f.lock().unwrap().take();
+                if let Some(f) = f {
+                    f(m);
+                }
             }
-        }));
+        });
     }
 
-    fn first_text(mgr: &EngineManager, id: &str) -> Option<String> {
-        mgr.convert_with(id, "a", 5)
+    fn first_text(mgr: &EngineManager, id: &str, code: &str) -> Option<String> {
+        mgr.convert_with(id, code, 5)
             .candidates
             .first()
             .map(|c| c.text.clone())
@@ -11925,41 +11988,40 @@ input_chars = \"a-z;\"
     /// 下次取到的必须是按新内容建的。`invalidate` 即构建窗口里插入的那次失效。
     fn assert_mid_build_invalidation_discarded(
         tag: &str,
-        invalidate: impl FnOnce(&EngineManager) + Send + 'static,
+        invalidate: impl FnOnce(&EngineManager, &str) + Send + 'static,
     ) {
-        let (data, ov) = mixgen_fixture(tag);
-        let id = format!("{tag}c");
-        let mgr = mixgen_manager(&data, &ov, &id, &[&id]);
-        assert_eq!(first_text(&mgr, &id).as_deref(), Some("甲"), "夹具");
-        mgr.invalidate_schema(&id);
-        let dict = data.join(format!("schemas/{id}/{id}.dict.yaml"));
-        let stage: &'static str = Box::leak(id.clone().into_boxed_str());
-        hook_once(&mgr, stage, move |m| {
+        let fx = MixFixture::new(tag);
+        let c = fx.id("c");
+        let mgr = fx.manager(&c, &[&c], false);
+        assert_eq!(first_text(&mgr, &c, "a").as_deref(), Some("甲"), "夹具");
+        mgr.invalidate_schema(&c);
+        let dict = fx.dict("c");
+        let id = c.clone();
+        hook_once(&mgr, c.clone(), move |m| {
             std::fs::write(&dict, "---\nname: changed\nversion: \"2\"\n...\n丙丁\ta\n").unwrap();
-            invalidate(m);
+            invalidate(m, &id);
         });
-        assert!(mgr.prewarm_schema(&id));
+        assert!(mgr.prewarm_schema(&c));
         assert_eq!(
-            first_text(&mgr, &id).as_deref(),
+            first_text(&mgr, &c, "a").as_deref(),
             Some("丙丁"),
             "构建期间被失效的旧引擎被写回了表里"
         );
-        let _ = std::fs::remove_dir_all(data.parent().unwrap());
     }
 
     #[test]
     fn engine_invalidated_mid_build_is_not_published() {
-        assert_mid_build_invalidation_discarded("rce", |m| m.invalidate_schema("rcec"));
+        assert_mid_build_invalidation_discarded("rce", |m, id| m.invalidate_schema(id));
     }
 
     #[test]
     fn engine_reloaded_mid_build_is_not_published() {
-        assert_mid_build_invalidation_discarded("rcr", |m| {
+        assert_mid_build_invalidation_discarded("rcr", |m, id| {
             // 活跃方案不能是正在建的这个：`reload_from_config` 末尾会 `ensure_loaded(活跃)`，
             // 而钩子跑在持着它构建锁的同一线程上。
             let mut cfg = Config::default();
             cfg.schema.active = ENGLISH_SCHEMA.into();
-            cfg.schema.available = vec![ENGLISH_SCHEMA.into(), "rcrc".into()];
+            cfg.schema.available = vec![ENGLISH_SCHEMA.into(), id.into()];
             cfg.schema.mix.enable_english = false;
             cfg.input.temp_pinyin.enabled = false;
             cfg.input.temp_english.show_candidates = false;
@@ -11967,13 +12029,39 @@ input_chars = \"a-z;\"
         });
     }
 
+    /// 禁用扩展库只对已加载引擎摘层；正在锁外构建的那份（已按旧 override 读到库开着）
+    /// 不许带着这个库写回。
+    #[test]
+    fn dict_disabled_mid_build_is_not_published() {
+        let fx = MixFixture::new("dde");
+        let c = fx.id("c");
+        let mgr = fx.manager(ENGLISH_SCHEMA, &[ENGLISH_SCHEMA, &c], false);
+        assert_eq!(first_text(&mgr, &c, "b").as_deref(), Some("戊"), "夹具");
+        mgr.invalidate_schema(&c);
+        let id = c.clone();
+        hook_once(&mgr, c.clone(), move |m| {
+            let ov: toml::Value = "[[dictionaries]]\nid = \"ext\"\nenabled = false\n"
+                .parse()
+                .unwrap();
+            m.persist_schema_override(&id, &ov).unwrap();
+            m.set_dict_enabled_live(&id, "ext", false);
+        });
+        assert!(mgr.prewarm_schema(&c));
+        assert_eq!(
+            first_text(&mgr, &c, "b"),
+            None,
+            "构建期间被禁用的扩展库随旧引擎写回了表里"
+        );
+    }
+
     /// 共享英文引擎同理：取到之后、写回缓存之前 `invalidate_schema("english")`，
     /// 缓存不许留着那份已被移出表的旧实例。
     #[test]
     fn shared_english_invalidated_before_cache_write_is_not_cached() {
-        let (data, ov) = mixgen_fixture("rcs");
-        let mgr = mixgen_manager(&data, &ov, "rcsc", &["rcsc", ENGLISH_SCHEMA]);
-        hook_once(&mgr, "@shared_english", |m| {
+        let fx = MixFixture::new("rcs");
+        let c = fx.id("c");
+        let mgr = fx.manager(&c, &[&c, ENGLISH_SCHEMA], false);
+        hook_once(&mgr, "@shared_english".into(), |m| {
             m.invalidate_schema(ENGLISH_SCHEMA)
         });
         let old = mgr
@@ -11986,6 +12074,57 @@ input_chars = \"a-z;\"
             &now,
             &mgr.loaded_engine(ENGLISH_SCHEMA).unwrap()
         ));
-        let _ = std::fs::remove_dir_all(data.parent().unwrap());
+    }
+
+    /// 混输构建被 `invalidate_schema("english")` 打断后重来的那一轮，不许从共享英文缓存里
+    /// 取到还没清掉的旧实例：清缓存必须与推进代次在同一段 `engines` 锁里。
+    ///
+    /// 时序靠两个线程 + 钩子钉死：混输 B 建好、写回前（钩子 B）放行线程 A 去失效英文；
+    /// A 推进代次、放开 `engines` 锁后停在 `@after_engines_bump`；B 比对失败重来、取共享英文；
+    /// B 发布完才放 A 走完。
+    #[test]
+    fn mixed_retry_does_not_pick_up_uncleared_shared_english() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+        let fx = MixFixture::new("rse");
+        let (b, c) = (fx.id("b"), fx.id("c"));
+        let mgr = fx.manager(&c, &[&c, &b, ENGLISH_SCHEMA], true);
+        let old = Arc::downgrade(&mgr.shared_english_engine().expect("夹具：英文引擎"));
+        let (go_tx, go_rx) = mpsc::channel::<()>();
+        let (bump_tx, bump_rx) = mpsc::channel::<()>();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let go_tx = Mutex::new(Some(go_tx));
+        let (bump_tx, bump_rx) = (Mutex::new(bump_tx), Mutex::new(bump_rx));
+        let release_rx = Mutex::new(release_rx);
+        let stage = b.clone();
+        let wait = Duration::from_secs(20);
+        set_hook(&mgr, move |_, s| {
+            if s == stage {
+                let go = go_tx.lock().unwrap().take();
+                if let Some(go) = go {
+                    go.send(()).unwrap();
+                    bump_rx.lock().unwrap().recv_timeout(wait).unwrap();
+                }
+            } else if s == "@after_engines_bump" {
+                bump_tx.lock().unwrap().send(()).unwrap();
+                release_rx.lock().unwrap().recv_timeout(wait).unwrap();
+            }
+        });
+        // 判据要在放 A 走完之前取：A 收尾时的扇出会把 B 连同它捧着的英文一起摘掉。
+        let (published, stale_alive) = std::thread::scope(|sc| {
+            let m = &mgr;
+            let a = sc.spawn(move || {
+                go_rx.recv_timeout(wait).unwrap();
+                m.invalidate_schema(ENGLISH_SCHEMA);
+            });
+            let published = mgr.prewarm_schema(&b) && mgr.is_loaded(&b);
+            let stale_alive = old.upgrade().is_some();
+            release_tx.send(()).unwrap();
+            a.join().unwrap();
+            (published, stale_alive)
+        });
+        *mgr.before_publish_hook.lock().unwrap() = None;
+        assert!(published, "混输 B 应已建好发布");
+        assert!(!stale_alive, "重来那一轮的混输捧着已失效的旧英文引擎");
     }
 }
