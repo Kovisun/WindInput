@@ -4359,16 +4359,16 @@ BOOL CTextService::_SetConversionMode(BOOL bChinese)
     return SUCCEEDED(hr);
 }
 
-void CTextService::_DoFullStateSync()
+BOOL CTextService::_DoFullStateSync()
 {
     if (_pIPCClient == nullptr)
-        return;
+        return FALSE;
 
     // Lazy connect: push pipe may reconnect before main pipe is established (service restart).
     if (!_pIPCClient->IsConnected() && !_pIPCClient->Connect())
     {
-        WIND_LOG_WARN(L"_DoFullStateSync: main pipe not connected, skipping\n");
-        return;
+        WIND_LOG_INFO(L"_DoFullStateSync: main pipe not connected, skipping\n");
+        return FALSE;
     }
 
     // 异步化（Go 端 server.go::handleClient 走"先 Ack 后处理"）：本调用仅发 fire-and-forget
@@ -4381,17 +4381,13 @@ void CTextService::_DoFullStateSync()
     // explorer.exe 等 shell 宿主进程不再因任何 Go 端 handler 内的跨进程调用形成环形等待。
     WIND_LOG_INFO(L"Sending IMEActivated (async); state will arrive via CMD_ACTIVATION_STATUS_PUSH\n");
 
-    if (!_pIPCClient->SendIMEActivated())
+    BOOL sent = _pIPCClient->SendIMEActivated();
+    if (!sent)
     {
         // Stale pipe: write failed and Disconnect() was called; retry after fresh connect.
-        if (_pIPCClient->Connect())
-        {
-            _pIPCClient->SendIMEActivated();
-        }
-        else
-        {
-            WIND_LOG_WARN(L"_DoFullStateSync: SendIMEActivated failed, toolbar may not show until next focus event\n");
-        }
+        sent = _pIPCClient->Connect() && _pIPCClient->SendIMEActivated();
+        if (!sent)
+            WIND_LOG_INFO(L"_DoFullStateSync: SendIMEActivated failed\n");
     }
 
     // 注：清除 _needsStateSync 提前到此处，让后续 KeyEventSink 路径不再触发重复 state sync。
@@ -4411,6 +4407,7 @@ void CTextService::_DoFullStateSync()
 
     // 先前发不出去的 focus_gained（服务没连上）在此补发，带上窗口类名 / 标题。
     TryRecoverFocusState();
+    return sent;
 }
 
 // ApplyActivationStatusResponse 在 TSF 线程上把 push pipe 接收到的 activation status 落地。

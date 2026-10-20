@@ -930,7 +930,8 @@ private:
 public:
     // Perform full state sync with Go service (sends IMEActivated + processes response).
     // Called after new/re-connection to ensure TSF and service state are consistent.
-    void _DoFullStateSync();
+    // 返回 IME_ACTIVATED 是否真发出去了；SERVICE_READY 路径据此决定是否重试。
+    BOOL _DoFullStateSync();
     void TryRecoverFocusState();
     // 按前台 band 复核 host 候选窗的落位，不符则整组重建。一段输入的第一个键时调，
     // 见 TextService.cpp 的实现注释。why 只进日志。

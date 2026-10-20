@@ -83,6 +83,10 @@ cmake --build . --config Release      # → build/Release/wind_tsf.dll
 - Handles service unavailability gracefully
 - Max 3 consecutive failures before opening circuit
 - 3-second reset interval before retry
+- `ERROR_PIPE_BUSY` 收尾的连接失败不计入（服务活着、只是监听实例被别的宿主抢走）；
+  收到 SERVICE_READY 时重置熔断器
+- SERVICE_READY 后 IME_ACTIVATED 发不出去会按 `ServiceReadyRetryPolicy.h` 有限次带抖动重试
+  （与组合态推迟共用 `TIMER_ID_SERVICE_READY`）
 
 ## Component Architecture
 

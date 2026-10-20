@@ -611,11 +611,13 @@ BOOL CIPCClient::Connect()
 
     _LogDebug(L"Connecting to Service (binary protocol)...");
 
+    DWORD lastError = ERROR_SUCCESS;
     for (int attempt = 0; attempt < 3; attempt++)
     {
         if (!WaitNamedPipeW(PIPE_NAME, IPCConfig::CONNECT_TIMEOUT_MS))
         {
             DWORD error = GetLastError();
+            lastError = error;
             if (error == ERROR_FILE_NOT_FOUND)
             {
                 if (!_serviceStartAttempted)
@@ -661,6 +663,7 @@ BOOL CIPCClient::Connect()
         }
 
         DWORD error = GetLastError();
+        lastError = error;
         _LogDebug(L"Connection attempt %d failed: error=%d", attempt + 1, error);
         if (error == ERROR_ACCESS_DENIED)
         {
@@ -686,7 +689,10 @@ BOOL CIPCClient::Connect()
             WindLogHostProcessInfo(4, L"compat.ipc_connect_failed.current_host", currentHost);
         WindLogForegroundProcessInfo(4, L"compat.ipc_connect_failed.foreground_host");
     }
-    _RecordFailure();
+    // 管道忙说明服务活着、只是监听实例被别的宿主抢走（服务就绪时各线程同时来连），
+    // 不算服务不可用：计入熔断会让 SERVICE_READY 的重试在熔断窗口里全部空转。
+    if (lastError != ERROR_PIPE_BUSY)
+        _RecordFailure();
     return FALSE;
 }
 

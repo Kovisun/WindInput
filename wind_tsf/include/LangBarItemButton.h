@@ -132,6 +132,8 @@ private:
     // Message window for cross-thread updates
     HWND _hMsgWnd;
     static LRESULT CALLBACK _MsgWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
+    // WM_SERVICE_READY 与其 TIMER_ID_SERVICE_READY 重试共用的同步判决（TSF 线程）。
+    void _RunServiceReadySync(HWND hwnd);
     static const UINT WM_UPDATE_STATUS;
     static const UINT WM_COMMIT_TEXT;
     static const UINT WM_CLEAR_COMPOSITION;
@@ -195,6 +197,9 @@ private:
     BOOL _bIconLoading;
     // 「进入加载中」那条日志是否记过；见 GetIcon。
     BOOL _bLoggedLoading;
+    // SERVICE_READY 后 IME_ACTIVATED 已连续发送失败的次数（0 = 没有在重试）。
+    // 组合态推迟不计入；新的 WM_SERVICE_READY、成功、无焦点时清零。
+    UINT _serviceReadyFailures;
 
     // 模式主字。中文态取方案的 icon_label（"中"/"拼"/"五"/"双"），非中文态取
     // [ui.labels]（默认 "英"/"A"，用户可配，最多 2 个字符）。
