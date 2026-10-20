@@ -2293,6 +2293,12 @@ impl Coordinator {
     /// 根据输入缓冲更新候选（动态分级加载：首次小批量，翻页到边界再扩展）。
     /// 返回输入结局（全码自动上屏 / 满码空码清空）；多数调用方忽略，仅正向输入字母时消费。
     pub(crate) fn update_candidates(&self, state: &mut State) -> InputOutcome {
+        let outcome = self.refill_candidates(state);
+        self.grid_resume(state);
+        outcome
+    }
+
+    fn refill_candidates(&self, state: &mut State) -> InputOutcome {
         state.candidates.clear();
         state.preedit = state.input_buffer.clone();
         state.preedit_split_body.clear();
@@ -5989,7 +5995,7 @@ mod finalize_candidates_tests {
             ("handle_candidate.rs", "fn build_candidates", "主输入路"),
             (
                 "handle_temp.rs",
-                "fn update_temp_pinyin_candidates",
+                "fn refill_temp_pinyin_candidates",
                 "临时拼音",
             ),
             ("handle_mode.rs", "fn update_mix_candidates", "快捷输入/mix"),

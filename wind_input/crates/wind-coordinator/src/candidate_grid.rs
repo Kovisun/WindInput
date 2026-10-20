@@ -96,6 +96,7 @@ impl Coordinator {
             return false;
         }
         state.grid_top = Some(state.current_page);
+        state.grid_keep = true;
         self.clear_hover();
         self.grid_ensure_loaded(state);
         // 在靠后的页上展开（收起态已经翻到了末页附近）：可见区往前让，凑满一屏，
@@ -105,8 +106,18 @@ impl Coordinator {
         true
     }
 
+    /// 候选重新装填之后：本次组合展开过就再展开（分步上屏、继续打字都不打回单行）。
+    ///
+    /// 新候选不够两页时 `try_expand_grid` 不展开，`grid_keep` 留着，下一次够了再展开。
+    pub(crate) fn grid_resume(&self, state: &mut State) {
+        if state.grid_keep {
+            self.try_expand_grid(state);
+        }
+    }
+
     /// 收起回单行。返回是否真的收起了（本就没展开 → `false`）。
     pub(crate) fn collapse_grid(&self, state: &mut State) -> bool {
+        state.grid_keep = false;
         if state.grid_top.take().is_none() {
             return false;
         }
@@ -1135,6 +1146,67 @@ mod tests {
 
     fn tab_of(c: &Coordinator) -> GridTab {
         c.state.lock().unwrap().grid_tab
+    }
+
+    /// 把高亮移到平铺下标 `idx` 上（展开态 ↓ 换行、→ 换列）。
+    fn highlight_flat(c: &Coordinator, idx: usize) {
+        for _ in 0..idx / PP {
+            c.handle_key_event(&key(keymap::VK_DOWN));
+        }
+        for _ in 0..idx % PP {
+            c.handle_key_event(&key(keymap::VK_RIGHT));
+        }
+        let st = c.state.lock().unwrap();
+        assert_eq!(st.current_page * PP + st.selected_index, idx);
+    }
+
+    /// 分步上屏：选一个只吃掉前一段的单字，余下那段的候选仍是展开的；继续打字也不收。
+    #[test]
+    fn step_commit_keeps_the_grid_expanded() {
+        let Some((c, _rx)) = typed_expanded("SHIJIAN") else {
+            return;
+        };
+        let idx = texts(&c)
+            .iter()
+            .position(|t| t.chars().count() == 1)
+            .expect("shijian 应有单字候选");
+        highlight_flat(&c, idx);
+        c.handle_key_event(&key(keymap::VK_SPACE));
+        {
+            let st = c.state.lock().unwrap();
+            assert!(!st.committed_text.is_empty(), "单字应留在组合区");
+            assert_eq!(st.input_buffer, "jian");
+            assert_eq!(st.grid_top, Some(0), "余下那段从首行展开");
+        }
+        c.handle_key_event(&key(u32::from(b'G')));
+        assert_eq!(view(&c).2, Some(0), "继续打字也保持展开");
+    }
+
+    /// Esc 收起之后，本次组合不再自动展开。
+    #[test]
+    fn escape_collapse_stops_re_expanding() {
+        let Some((c, _rx)) = typed_expanded("SHI") else {
+            return;
+        };
+        c.handle_key_event(&key(keymap::VK_ESCAPE));
+        assert_eq!(view(&c).2, None);
+        c.handle_key_event(&key(u32::from(b'J')));
+        assert_eq!(view(&c).2, None, "收起后再打字不再展开");
+    }
+
+    /// 上屏结束组合：下一次组合从单行开始。
+    #[test]
+    fn next_composition_starts_collapsed() {
+        let Some((c, _rx)) = typed_expanded("YI") else {
+            return;
+        };
+        assert!(view(&c).2.is_some());
+        c.handle_key_event(&key(keymap::VK_SPACE));
+        assert!(c.state.lock().unwrap().input_buffer.is_empty(), "空格上屏");
+        for ch in "YI".chars() {
+            c.handle_key_event(&key(ch as u32));
+        }
+        assert_eq!(view(&c).2, None, "新组合不继承上一次的展开");
     }
 
     /// Tab 依次切到单字、词组：列表里只剩该类；切回全部，列表与切走之前逐条一致。

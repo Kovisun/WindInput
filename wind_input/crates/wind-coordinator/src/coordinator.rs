@@ -654,8 +654,14 @@ pub(crate) struct State {
     /// `docs/design/candidate-grid-expand.md`。
     ///
     /// 清零在 [`Coordinator::reset_candidate_view`]：候选重新装填（打字、退格、分步上屏后续查）
-    /// 即收起，与 `paged` 同一个时机、同一个理由。
+    /// 即收起，与 `paged` 同一个时机、同一个理由；本次组合展开过的话，装填完再由
+    /// [`Self::grid_keep`] 展开回来。
     pub(crate) grid_top: Option<usize>,
+    /// 本次组合展开过：候选重新装填后（继续打字、分步上屏）自动再展开，直到 Esc 收起或组合结束。
+    ///
+    /// 组合结束的出口有几十处，不逐个清：每次按键开头若已没有候选，就说明是一次新组合，在
+    /// `handle_key_event` 开头清掉。
+    pub(crate) grid_keep: bool,
     /// 展开态当前的分类标签（P3）。非 `All` 时 `candidates` 是**筛过的子集**，完整列表暂存在
     /// [`Self::grid_full`]——下标在几十处调用里按 `candidates` 解释，就地换成子集，选词、序号、
     /// 右键、置顶删除就都不用知道筛选的存在。重建候选的几处（扩容、末页放宽）之后要重新套一次
@@ -2875,6 +2881,7 @@ impl Coordinator {
                 selected_index: 0,
                 current_page: 0,
                 grid_top: None,
+                grid_keep: false,
                 grid_tab: wind_ui_types::GridTab::All,
                 grid_full: Vec::new(),
                 paged: false,

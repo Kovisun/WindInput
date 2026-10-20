@@ -1001,6 +1001,13 @@ impl MessageHandler for Coordinator {
         // 别让上一键的登记漏到这一键。
         self.commit_code_pending
             .store(false, std::sync::atomic::Ordering::Relaxed);
+        // 按下时已没有候选 = 上一次组合已经结束（出口有几十处），「本次展开过」随之作废。
+        if data.event_type == EVENT_KEY_DOWN {
+            let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            if st.candidates.is_empty() {
+                st.grid_keep = false;
+            }
+        }
 
         // 方案级行为覆盖的**兜底**同步点：代际未变时是一次 atomic load + 比较，可忽略。
         // 它保证「切方案后 [punct] 没落地」最迟在下一次按键收敛——其余三个调用点

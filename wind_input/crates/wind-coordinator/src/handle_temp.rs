@@ -374,6 +374,11 @@ impl Coordinator {
 
     /// 用临时拼音目标方案转换缓冲，刷新候选与组合区（前缀 + 已转换汉字 + 剩余拼音）
     pub(crate) fn update_temp_pinyin_candidates(&self, state: &mut State) {
+        self.refill_temp_pinyin_candidates(state);
+        self.grid_resume(state);
+    }
+
+    fn refill_temp_pinyin_candidates(&self, state: &mut State) {
         state.candidates.clear();
         self.reset_candidate_view(state);
         let prefix = format!("{}{}", state.temp_pinyin_prefix, state.committed_text);
@@ -1259,6 +1264,11 @@ impl Coordinator {
     /// 小写去重会把它们全部抹掉。精确去重同时仍能挡住与原文/变形重复的词库项
     /// （如缓冲 `Hello` 时词库的 `hello` 被变形候选先占位挡下）。
     pub(crate) fn update_temp_english_candidates(&self, state: &mut State) {
+        self.refill_temp_english_candidates(state);
+        self.grid_resume(state);
+    }
+
+    fn refill_temp_english_candidates(&self, state: &mut State) {
         state.candidates.clear();
         self.reset_candidate_view(state);
         let buf = state.temp_english_buffer.clone();
