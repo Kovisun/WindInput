@@ -81,6 +81,9 @@ pub(crate) use wind_candidate::candidate_display_order;
 /// 无从标定：英文词库权重（`hen 800` / `shi 500`）与拼音词库权重（`很 86016`）是两套
 /// 互不相干的量纲。
 ///
+/// 拼音「英文前缀补全」补出来的英文（`meta.from_prefix_complete`）再往后让一段：让过紧随
+/// 其后、吃满整串的拼音真词（`xiaom` 的「小米」），理由见函数内注释。
+///
 /// ⚠️ **取开头的连续段，不是 `rposition`**。用「最后一条常用精确解」作锚会让英文被推到
 /// 列表深处——词频重排可能把某条常用词提到很靠后的位置之后，那条就成了锚。连续段是
 /// 有界的，且与「用户第一屏看到什么」这个真实关切对齐。
@@ -115,10 +118,8 @@ pub(crate) fn place_english_after_common_exact(candidates: &mut Vec<Candidate>, 
     // 有词库背书的候选**不受影响**：`hen` 的「很」、`men` 的「们」、`data` 的「打他」
     // 都是 `is_synthesized == false`，照旧排在英文之前。于是「中文解得好就让位、
     // 解不出或只能靠拼凑就上前」这条线在这里继续成立。
-    let english_exact = {
-        let lower = input.to_lowercase();
-        english.iter().any(|c| c.code == lower)
-    };
+    let lower = input.to_lowercase();
+    let english_exact = english.iter().any(|c| c.code == lower);
     // ②b **混合简拼整句**自 `3934d5cc` 起带 `is_abbrev`（与整串简拼词同层按权重竞争），
     // `is_pinyin_exact_tier` 因此不再认它、`source_tier` 落到 4。但在**这里**它的身份没变：
     // 仍是吃满整串、全为常用字的一种完整解读，此前一直算在开头那段里——不补这一条，
@@ -136,7 +137,38 @@ pub(crate) fn place_english_after_common_exact(candidates: &mut Vec<Candidate>, 
         .iter()
         .take_while(|c| leads_as_exact(c) && !(english_exact && c.is_synthesized))
         .count();
-    rest.splice(pos..pos, english);
+    // ★ 拼音「英文前缀补全」补出来的英文（`meta.from_prefix_complete`，只有
+    // `english_merge::lookup_prefix_complete` 打这个标记）还要让过紧随其后、**吃满整串的拼音
+    // 真词**（非引擎合成）：`xiaom` 的「小米」是简拼残码命中、不在精确档，但它才是用户最
+    // 可能要的；补全出的 `Xiaomi` 只是「也许在打英文」的猜测。只吃一部分输入的「小」不算。
+    //
+    // ⚠️ 两头都要收窄：让位的只认带标记的英文，被让的只认 `source == Pinyin`。按「code 比
+    // 输入长」认英文的话，英文方案自己的前缀候选也会被拆开；不限来源的话，短语（`consumed`
+    // 为 0、被 `effective_consumed` 当吃满）也成了让位对象——英文方案开短语打 `da` 会被拆成
+    // 「精确英文 → 短语 → 前缀英文」（审查查出）。
+    let has_completion = english.iter().any(|c| c.meta.from_prefix_complete);
+    let pos_prefix = if has_completion {
+        pos + rest[pos..]
+            .iter()
+            .take_while(|c| {
+                c.source == CandidateSource::Pinyin
+                    && !c.is_synthesized
+                    && wind_candidate::effective_consumed(c, input.len()) >= input.len()
+            })
+            .count()
+    } else {
+        pos
+    };
+    if pos_prefix == pos {
+        // 没有要让的：英文整块原序插入（英文块内的次序可能是调频排出来的，不能动）。
+        rest.splice(pos..pos, english);
+    } else {
+        let (completion, others): (Vec<Candidate>, Vec<Candidate>) = english
+            .into_iter()
+            .partition(|c| c.meta.from_prefix_complete);
+        rest.splice(pos_prefix..pos_prefix, completion);
+        rest.splice(pos..pos, others);
+    }
     *candidates = rest;
 }
 
@@ -546,7 +578,13 @@ impl Coordinator {
         // 码表自动造词：登记这个字是用哪条码打出来的（GH#181）。主输入路的选词 / 顶屏出口
         // 全都经过这里（见上），故挂在这个薄包装里而不是逐个出口。
         self.note_draft_code_hint(cand, code);
-        self.record_selection_cand_in(None, code, cand)
+        self.record_selection_cand_in(None, code, cand);
+        // ★ 混进别的方案（拼音 / 码表的「英文候选」、混输）的英文候选，词频**另记一份进英文桶**
+        // ——与英文方案、临英同一个记频口（开关也按英文方案取），在哪儿选过的英文词，三处都
+        // 受益。上面那条按主方案的记账照旧：主方案读端（`apply_freq_rerank_in`）靠它排序。
+        if cand.source == CandidateSource::English && !self.engine_mgr.active_is_english() {
+            self.record_freq_only(Some(ENGLISH_SCHEMA), code, cand.freq_text(), cand.source);
+        }
     }
 
     /// 同 [`Self::record_selection_cand`]，但可指定**归属方案**（overlay 用）。
@@ -622,7 +660,18 @@ impl Coordinator {
         // 历史先记、与词频文本空不空无关：两条通路独立（理由见 emoji 守卫）。空显示标签的
         // `$CC` 纯文本命令就是 `freq_text` 空而上屏文本非空的例子。
         self.push_commit_history(history_text);
-        let text = freq_text;
+        self.record_freq_only(schema_override, code, freq_text, source);
+    }
+
+    /// [`Self::record_selection_cased_in`] 的词频半边（不记上屏历史）：一次上屏要记进**两个**
+    /// 桶时（混入的英文候选，见 [`Self::record_selection_cand`]），历史只该记一次。
+    fn record_freq_only(
+        &self,
+        schema_override: Option<&str>,
+        code: &str,
+        text: &str,
+        source: CandidateSource,
+    ) {
         // 暂停学习：一切选词记账（主路、临拼、快捷输入、特殊模式、英文头部候选）都汇到这里。
         if text.is_empty() || self.learning_suspended() {
             return;
@@ -7294,6 +7343,70 @@ mod english_placement_tests {
             vec!["哈额乐乐", "hello"],
             "英文非整串精确命中时不触发让位"
         );
+    }
+
+    fn completion(text: &str, code: &str) -> Candidate {
+        let mut c = en(text, code);
+        c.meta.from_prefix_complete = true;
+        c
+    }
+
+    /// ★ 拼音「英文前缀补全」补出来的英文让位给**吃满整串的拼音真词**：`xiaom` 的「小米」是
+    /// 简拼残码命中，不在精确档，但它才是用户最可能要的；只消费一部分输入的「小」不算。
+    #[test]
+    fn prefix_completion_yields_to_whole_input_words() {
+        let mut v = vec![
+            zh("小米", "xiaomi", false, 5),
+            zh("消灭", "xiaomie", false, 5),
+            zh("小", "xiao", false, 4),
+            completion("Xiaomi", "xiaomi"),
+        ];
+        place_english_after_common_exact(&mut v, "xiaom");
+        assert_eq!(texts(&v), vec!["小米", "消灭", "Xiaomi", "小"]);
+
+        // 中文侧只有残缺解读时，英文整块上前，块内保持原序。
+        let mut v = vec![
+            zh("他", "ta", true, 2),
+            en("table", "table"),
+            completion("tables", "tables"),
+        ];
+        place_english_after_common_exact(&mut v, "table");
+        assert_eq!(texts(&v), vec!["table", "tables", "他"]);
+    }
+
+    /// 让位两头都要收窄：没带补全标记的前缀英文（英文方案 / 混输自己的）不挪；被让的只认
+    /// 拼音真词——短语 `consumed` 为 0 会被当成吃满，不能因此把英文块拆开（审查查出：英文方案
+    /// 开短语打 `da`，曾被拆成「精确英文 → 短语 → 前缀英文」）。
+    #[test]
+    fn unmarked_english_and_phrases_do_not_split_the_block() {
+        let phrase = Candidate {
+            text: "大家好".into(),
+            code: "da".into(),
+            source: CandidateSource::Phrase,
+            is_phrase: true,
+            ..Default::default()
+        };
+        let mut v = vec![phrase.clone(), en("da", "da"), en("data", "data")];
+        place_english_after_common_exact(&mut v, "da");
+        assert_eq!(
+            texts(&v),
+            vec!["da", "data", "大家好"],
+            "未带标记：整块原序"
+        );
+
+        // 带标记也只让拼音，不让短语。
+        let mut v = vec![phrase, en("da", "da"), completion("data", "data")];
+        place_english_after_common_exact(&mut v, "da");
+        assert_eq!(texts(&v), vec!["da", "data", "大家好"]);
+    }
+
+    /// 没有要让的中文时英文整块原序不动——英文方案里调频把 `hello` 排到 `hell` 之前，
+    /// 不得被「精确恒在前」拆回去。
+    #[test]
+    fn english_only_list_keeps_its_order() {
+        let mut v = vec![en("hello", "hello"), en("hell", "hell")];
+        place_english_after_common_exact(&mut v, "hell");
+        assert_eq!(texts(&v), vec!["hello", "hell"]);
     }
 
     /// 无英文候选 / 空输入时是空操作。

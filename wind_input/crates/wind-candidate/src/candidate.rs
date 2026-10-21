@@ -88,6 +88,13 @@ pub struct CandidateMeta {
     /// 排序/去重/显示一律不读本字段，它只服务「把这条候选写进词库」这个方向。
     #[serde(skip)]
     pub learn_code: Option<(String, u64)>,
+    /// 拼音「英文前缀补全」（`schema.pinyin.english_merge.prefix_complete`）补出来的英文候选。
+    ///
+    /// 只由 `wind_engine::english_merge::lookup_prefix_complete` 置位；协调器
+    /// `place_english_after_common_exact` 据此让它们排在整串拼音真词之后。不能拿「code 比输入
+    /// 长」代替：英文方案、混输自己的前缀候选也长那样，却不该被挪动。
+    #[serde(skip)]
+    pub from_prefix_complete: bool,
 }
 
 /// 命令栏动作

@@ -43,6 +43,10 @@ pub const PINYIN_DATA_SCHEMA: &str = "pinyin";
 /// 分词索引随用户词库规模增长，那台机器 18 万条）。
 pub const ENGLISH_SCHEMA: &str = "english";
 
+/// 英文词频名次表（相对 `schemas/`）：给英文词库里没写权重的词条按名次赋权，
+/// 见 `wind_dict::freq_rank` 与 [`EngineManager::load_table_dict`]。
+const ENGLISH_FREQ_RANKS: &str = "english/en_freq.txt";
+
 /// 双拼方案未声明 `layout` 时的缺省布局。
 ///
 /// 独立成常量而非各处写字面量：设置页要显示「当前选的是哪个」，那个判断与引擎实际
@@ -4620,10 +4624,22 @@ impl EngineManager {
             // 有中文候选 ⇒ 只收精确（前缀词是噪音，`hen` 不该带出 Henderson/Hendrix）；
             // 无中文候选 ⇒ 给前缀补全（此时用户显然在打英文，补全正是他要的），
             // 精确那条由英文引擎自己排在最前。
+            //
+            // 例外是可选的 `prefix_complete`（拼音，出厂关）：中文侧有候选、但整串不是完整
+            // 拼音时，在精确之外再补至多 2 条前缀词。判据见 `prefix_complete_applies`；
+            // 双拼已在 `english_merge_cfg_for` 折掉。
             let english = if r.candidates.is_empty() {
                 crate::english_merge::lookup_prefix_fallback(eng.as_ref(), input, cfg.min_length)
             } else {
-                crate::english_merge::lookup(eng.as_ref(), input, cfg.min_length)
+                let mut v = crate::english_merge::lookup(eng.as_ref(), input, cfg.min_length);
+                if cfg.prefix_complete
+                    && crate::english_merge::prefix_complete_applies(input, cfg.min_length)
+                {
+                    let extra =
+                        crate::english_merge::lookup_prefix_complete(eng.as_ref(), input, &v);
+                    v.extend(extra);
+                }
+                v
             };
             if !english.is_empty() {
                 // 通路①（满码自动上屏 / 满码空码清空）的英文守护。
@@ -4702,6 +4718,7 @@ impl EngineManager {
                     enable: c.enable,
                     min_length: c.min_length,
                     block_commit: c.block_commit,
+                    prefix_complete: false,
                 })
             }
             EngineType::Pinyin => {
@@ -4716,6 +4733,9 @@ impl EngineManager {
                     min_length: p.min_length,
                     // 见 `Effective::block_commit`：拼音没有满码上屏 / 顶码可否决。
                     block_commit: false,
+                    // 判据按全拼音节定义，双拼下不生效（双拼码两键一音节，几乎任何串都解得开）。
+                    // 开关关着时短路，不问方案；开着时是一次按方案 id 的缓存命中。
+                    prefix_complete: p.prefix_complete && !self.pinyin_is_shuangpin_of(schema_id),
                 })
             }
             // 混输有自带的英文混入（`schema.mix.enable_english`，带三方档位仲裁），
@@ -6730,10 +6750,12 @@ impl EngineManager {
             //
             // 注册顺序 User → Temp → System 与码表分支一致（用户词在前）。
             if let Some(store) = &store {
-                dm.register_layer(Box::new(wind_store::StoreUserLayer::new(
-                    store.clone(),
-                    schema_id,
-                )));
+                // 用户词托底到名次权重之上：系统词按词频名次赋了权，权重为 0（导入的词表
+                // 没有权重列）或手填小值的用户词不托底就会沉到常用系统词之后。
+                dm.register_layer(Box::new(
+                    wind_store::StoreUserLayer::new(store.clone(), schema_id)
+                        .with_min_weight(wind_dict::freq_rank::RANK_WEIGHT_MAX + 1),
+                ));
                 dm.register_layer(Box::new(wind_store::StoreTempLayer::new(
                     store.clone(),
                     schema_id,
@@ -7235,13 +7257,12 @@ impl EngineManager {
             .map(|e| {
                 let full = Self::resolve_dict_file(&e.path, schemas_dir);
                 let is_english = e.dict_type == "english";
+                let schemas_dir = schemas_dir.to_path_buf();
                 crate::codetable::DisabledDictSource {
                     id: e.id.clone(),
                     base_order: e.base_order,
                     default_weight: e.default_weight,
-                    load: Arc::new(move || {
-                        CachedDict::load_at_with(&full, &cache_path(&full, "wdat"), is_english)
-                    }),
+                    load: Arc::new(move || Self::load_table_dict(&full, is_english, &schemas_dir)),
                 }
             })
             .collect()
@@ -7268,6 +7289,25 @@ impl EngineManager {
         ))
     }
 
+    /// 码表类词库（含英文）读盘的统一入口：英文词库额外叠英文词频名次表
+    /// （[`ENGLISH_FREQ_RANKS`]，见 `wind_dict::freq_rank`）。
+    ///
+    /// ⚠️ 读英文词库的每一处都要走这里：名次表参与 wdat 指纹，有的带有的不带，同一槽位就
+    /// 有两种指纹、两份缓存来回重建。名次表经 `resolve_dict_file` 定位，用户目录可整体替换。
+    fn load_table_dict(
+        full: &Path,
+        english: bool,
+        schemas_dir: &Path,
+    ) -> anyhow::Result<CachedDict> {
+        let wdat = cache_path(full, "wdat");
+        if english {
+            let ranks = Self::resolve_dict_file(ENGLISH_FREQ_RANKS, schemas_dir);
+            CachedDict::load_english_at(full, &wdat, &ranks)
+        } else {
+            CachedDict::load_at_with(full, &wdat, false)
+        }
+    }
+
     fn load_codetable_layers(schema: &Schema, schemas_dir: &Path) -> Vec<CodetableLayer> {
         let resolve =
             |rel: &str| -> std::path::PathBuf { Self::resolve_dict_file(rel, schemas_dir) };
@@ -7280,7 +7320,7 @@ impl EngineManager {
 
         let load_one = |e: &DictSpec| -> Option<CachedDict> {
             let full = resolve(&e.path);
-            match CachedDict::load_at_with(&full, &cache_path(&full, "wdat"), is_english(e)) {
+            match Self::load_table_dict(&full, is_english(e), schemas_dir) {
                 Ok(d) => Some(d),
                 Err(err) => {
                     warn!("Failed to load codetable dict {}: {}", full.display(), err);
@@ -7399,7 +7439,7 @@ impl EngineManager {
             "rime_pinyin" => Self::load_rime_pinyin_dict(&full),
             // english：code 列小写化，与 load_codetable_layers 的缓存 tag 一致，
             // 否则会另建一份大小写不同的 wdat。
-            t => CachedDict::load_at_with(&full, &cache_path(&full, "wdat"), t == "english").ok(),
+            t => Self::load_table_dict(&full, t == "english", schemas_dir).ok(),
         }
     }
 
@@ -7887,7 +7927,7 @@ impl EngineManager {
             } else {
                 // 英文词库：code 列小写化（大小写不敏感前缀匹配，text 保留原样）。
                 let lowercase = dtype(e) == "english";
-                match CachedDict::load_at_with(&full, &cache_path(&full, "wdat"), lowercase) {
+                match Self::load_table_dict(&full, lowercase, schemas_dir) {
                     Ok(d) => {
                         info!("Dictionary loaded: {} entries", d.len());
                         Some(d)
