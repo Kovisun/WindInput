@@ -25,13 +25,17 @@ impl Drop for Fixture {
 }
 
 fn fixture(tag: &str) -> Fixture {
+    fixture_with(tag, DICT)
+}
+
+fn fixture_with(tag: &str, dict: &str) -> Fixture {
     let dir = std::env::temp_dir().join(format!("wind_fuzzy_hint_{tag}_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let schemas = dir.join("schemas");
     std::fs::create_dir_all(schemas.join("fh")).unwrap();
     std::fs::write(
         schemas.join("fh/mini.dict.yaml"),
-        format!("---\nname: mini\nversion: \"1\"\nsort: by_weight\n...\n{DICT}"),
+        format!("---\nname: mini\nversion: \"1\"\nsort: by_weight\n...\n{dict}"),
     )
     .unwrap();
     std::fs::write(
@@ -45,6 +49,15 @@ fn fixture(tag: &str) -> Fixture {
 }
 
 fn open(f: &Fixture, hint: bool, scope: FuzzyHintScope) -> (Arc<Coordinator>, Receiver<UiCommand>) {
+    open_with(f, hint, scope, |_| {})
+}
+
+fn open_with(
+    f: &Fixture,
+    hint: bool,
+    scope: FuzzyHintScope,
+    edit: impl FnOnce(&mut Config),
+) -> (Arc<Coordinator>, Receiver<UiCommand>) {
     let mut c = Config::default();
     c.schema.available = vec!["fh".into()];
     c.schema.active = "fh".into();
@@ -54,6 +67,7 @@ fn open(f: &Fixture, hint: bool, scope: FuzzyHintScope) -> (Arc<Coordinator>, Re
     fz.in_ing = true;
     fz.hint = hint;
     fz.hint_scope = scope;
+    edit(&mut c);
     Coordinator::new_headless_with_ui(c, Some(&f.dir))
 }
 
@@ -182,4 +196,23 @@ fn commit_text_unchanged() {
         KeyAction::InsertText { text, .. } => assert_eq!(text, "苹果"),
         other => panic!("应上屏：{other:?}"),
     }
+}
+
+/// `first` 按**协调器能显示出提示**判第一条：首个带提示的候选（「平品」，提示在第 2 字）被
+/// `max_chars = 1` 截成「平…」、提示随之丢掉，顺延给下一条（「品平」，提示在第 1 字）。
+#[test]
+fn scope_first_skips_candidate_whose_hint_is_truncated_away() {
+    let f = fixture_with(
+        "first_trunc",
+        "平平\tping ping\t5000\n平品\tping pin\t3000\n品平\tpin ping\t100\n",
+    );
+    let (coord, rx) = open_with(&f, true, FuzzyHintScope::First, |c| {
+        c.ui.candidate.max_chars = 1;
+    });
+    type_str(&coord, "pingping");
+    let items = shown(&coord, &rx);
+    assert_eq!(texts(&items), vec!["平…", "平…", "品…"], "前提：排序与截断");
+    assert!(items[0].text_styled.is_empty(), "精确命中不标");
+    assert!(items[1].text_styled.is_empty(), "提示所在的字被截掉");
+    assert_eq!(items[2].text_styled.as_str(), "品(pin)…");
 }

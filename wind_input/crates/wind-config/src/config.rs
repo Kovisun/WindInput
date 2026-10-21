@@ -3038,7 +3038,7 @@ pub struct PinyinFuzzy {
     /// 模糊命中的候选正文内嵌正确全拼（「苹(ping)果」）。仅 `enabled` 时生效。
     #[serde(default)]
     pub hint: bool,
-    /// 提示范围：first = 只标第一个模糊命中的字，all = 全部。
+    /// 提示范围：first = 只标第一个带提示的候选；all = 标全部。
     #[serde(default, deserialize_with = "crate::tolerant_de::tolerant")]
     pub hint_scope: FuzzyHintScope,
 }
@@ -3047,10 +3047,10 @@ pub struct PinyinFuzzy {
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum FuzzyHintScope {
-    /// 只标第一个模糊命中的字。
+    /// 只标候选列表里第一个带提示的候选。
     #[default]
     First,
-    /// 标出全部模糊命中的字。
+    /// 每个带提示的候选都标。
     All,
 }
 
