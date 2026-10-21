@@ -410,6 +410,8 @@ impl MobileCore {
         // 惰性构建搬到后台（真机冷启动首键实测阻塞 2.8 秒）。走核心的就绪契约，
         // 宿主不再自己猜「喂哪几个键能触发惰性构建」。
         coord.prepare();
+        // 拼音类方案：各声母第一次查询的一次性开销提前在后台付掉（见该函数说明）
+        coord.prewarm_single_initials();
 
         Arc::new(Self {
             coord,
@@ -496,8 +498,16 @@ impl MobileCore {
             MobileCommand::ToggleS2t => MenuCmd::ToggleS2t,
             MobileCommand::ReloadConfig => MenuCmd::ReloadConfig,
         };
+        let switches = matches!(
+            menu_cmd,
+            MenuCmd::SchemaSelect(_) | MenuCmd::SchemaEnglish | MenuCmd::ReloadConfig
+        );
         self.coord
             .inject_ui_event(UiEvent::MenuAction(MenuKind::Command(menu_cmd)));
+        // 换到拼音类方案（或重载重建了引擎）后同样预热；不是拼音类时函数自己直接返回
+        if switches {
+            self.coord.prewarm_single_initials();
+        }
     }
 
     /// 可选方案列表。下标即 [`MobileCommand::SelectSchema`] 的取值
@@ -1787,6 +1797,42 @@ mod candidate_tooltip_tests {
         assert_eq!(more.items.len(), 60, "扩容后这一段应取满");
         let again = m.candidates(0, 24);
         assert!(!again.rebuilt, "已加载范围内再取不重建");
+        let _ = std::fs::remove_dir_all(&user);
+    }
+
+    /// 单字母预热只查引擎、不碰输入状态：预热完没有残留编码 / 候选，接着照常打字。
+    /// 码表方案直接跳过（函数自己判引擎类型）。
+    #[test]
+    fn prewarm_leaves_no_composition() {
+        let data =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../build_dev/data");
+        if !data.join("schemas/pinyin.schema.toml").exists() {
+            eprintln!("跳过：拼音方案不存在");
+            return;
+        }
+        let user = std::env::temp_dir().join(format!("wind_mobile_warm_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&user);
+        std::fs::create_dir_all(&user).unwrap();
+        let mut cfg = Config::default();
+        cfg.schema.available = vec!["pinyin".into()];
+        cfg.schema.active = "pinyin".into();
+        cfg.input.default.chinese_mode = true;
+        let (coord, _rx) = Coordinator::new_headless_with_ui_at(cfg, Some(&data), Some(&user));
+        let m = MobileCore {
+            coord,
+            warming: Arc::new(AtomicBool::new(false)),
+            data_dir: user.clone(),
+        };
+        m.coord.prewarm_single_initials();
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        assert_eq!(
+            m.candidates(0, 5).total,
+            0,
+            "预热不该留下候选（它不走按键路径）"
+        );
+        dispatch_key(&m.coord, 'N' as u32, 0);
+        dispatch_key(&m.coord, 'I' as u32, 0);
+        assert!(m.candidates(0, 5).total > 0, "预热后照常打字出候选");
         let _ = std::fs::remove_dir_all(&user);
     }
 }

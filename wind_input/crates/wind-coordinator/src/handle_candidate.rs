@@ -424,6 +424,37 @@ fn make_emoji_candidate(text: String) -> Candidate {
 pub(crate) const MOBILE_PINYIN_SINGLE_LIMIT: usize = 60;
 
 impl Coordinator {
+    /// 后台把当前拼音类方案的各个声母各查一遍（移动端在核心就绪、切方案后调）。
+    ///
+    /// 单声母每个字母在进程里**第一次**查询明显更慢（模拟器 20～50ms、之后 3～6ms：词库映射页
+    /// 首次缺页等一次性开销），手机上表现为「换个首字母就卡一下」。这里提前替用户付掉。
+    ///
+    /// ★ 直接查引擎、**不走按键路径**：`prepare` 那种喂假按键的做法会改输入状态，预热若与
+    /// 用户打字交错，假键与退格会插进用户的编码里。查引擎不碰状态、不出候选帧；
+    /// 引擎本就跨线程共享（按键线程、`prepare`、反查索引后台构建都在用）。
+    /// 上限与移动端单字母首批一致，查的正是用户第一下要的那一批。
+    pub fn prewarm_single_initials(self: &std::sync::Arc<Self>) {
+        if self.engine_mgr.current_engine_type() != Some(wind_engine::engine::EngineType::Pinyin) {
+            return;
+        }
+        let this = std::sync::Arc::clone(self);
+        let _ = std::thread::Builder::new()
+            .name("wind-prewarm-initials".into())
+            .spawn(move || {
+                let id = this.engine_mgr.active_schema_id();
+                let t0 = std::time::Instant::now();
+                for b in b"bpmfdtnlgkhjqxzcsrywaeo" {
+                    let key = (*b as char).to_string();
+                    let _ = this
+                        .engine_mgr
+                        .convert_with(&id, &key, MOBILE_PINYIN_SINGLE_LIMIT);
+                }
+                tracing::info!("单字母预热 {id} 用时 {:?}", t0.elapsed());
+            });
+    }
+}
+
+impl Coordinator {
     /// 记录一次选词到 redb FREQ（词频维度：count+1、last_used=now，按 schema+code+text）。
     /// 词频是与权重解耦的独立维度（frequency.md），仅记真实使用数据；redb 事务即时持久。
     /// 未开启「自动调频」（`schema.*.frequency.enabled`）时不记录，避免关闭功能后仍写库；
