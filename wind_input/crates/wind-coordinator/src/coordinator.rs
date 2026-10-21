@@ -682,6 +682,8 @@ pub(crate) struct State {
     pub(crate) grid_tab: wind_ui_types::GridTab,
     /// 筛选期间的完整候选列表；`grid_tab == All` 时为空。
     pub(crate) grid_full: Vec<Candidate>,
+    /// 连续切分类时的锚点，见 [`crate::candidate_grid::GridTabAnchor`]。
+    pub(crate) grid_tab_anchor: Option<crate::candidate_grid::GridTabAnchor>,
     /// 动态分级加载：当前候选对应的输入码
     pub(crate) candidate_input: String,
     /// 动态分级加载：当前加载上限
@@ -2978,6 +2980,7 @@ impl Coordinator {
                 grid_keep: false,
                 grid_tab: wind_ui_types::GridTab::All,
                 grid_full: Vec::new(),
+                grid_tab_anchor: None,
                 paged: false,
                 candidate_input: String::new(),
                 candidate_limit: 0,

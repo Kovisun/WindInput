@@ -36,6 +36,17 @@ pub(crate) struct ReorderPositions {
     pub(crate) last: usize,
 }
 
+/// 连续切分类时锚定的位置：用户最初高亮的词与它所在的可见行。
+///
+/// 只拿当前高亮当锚点会漂：高亮的词组在「单字」里没有，落到第一个单字；再切「词组」锚的就是
+/// 这个单字，又落到第一个词组；切回「全部」便停在这个词组上，不是用户原来那个。故切换之间
+/// 高亮没被挪过（仍是 `landed`）就沿用最初的锚点。
+pub(crate) struct GridTabAnchor {
+    text: String,
+    row: usize,
+    landed: Option<String>,
+}
+
 /// 展开态在原地重建前后要保住的位置，见 [`Coordinator::grid_snapshot`]。
 pub(crate) struct GridSnapshot {
     page: usize,
@@ -487,10 +498,18 @@ impl Coordinator {
         if tab == state.grid_tab || !Self::grid_active(state) {
             return false;
         }
-        let anchor = state
+        let current = state
             .candidates
             .get(self.highlighted_global_index(state))
             .map(|c| c.text.clone());
+        let anchor = match state.grid_tab_anchor.take() {
+            Some(a) if a.landed == current => a,
+            _ => GridTabAnchor {
+                text: current.unwrap_or_default(),
+                row: state.current_page - state.grid_top.unwrap_or(state.current_page),
+                landed: None,
+            },
+        };
         let prev = state.grid_tab;
         // 先回到完整列表：补加载（扩容）只认完整列表，筛选也从它出发。
         if prev != GridTab::All {
@@ -533,13 +552,13 @@ impl Coordinator {
                 if prev != GridTab::All {
                     self.grid_apply_tab(state, prev);
                 }
-                self.grid_land_on(state, anchor.as_deref());
+                self.grid_land_on(state, anchor);
                 return false;
             }
             state.grid_full = std::mem::replace(&mut state.candidates, filtered);
             state.grid_tab = tab;
         }
-        self.grid_land_on(state, anchor.as_deref());
+        self.grid_land_on(state, anchor);
         true
     }
 
@@ -556,20 +575,25 @@ impl Coordinator {
         state.grid_tab = tab;
     }
 
-    /// 切分类后把高亮落到 `text` 那个词上（找不到就第一个），可见区跟过去。
-    fn grid_land_on(&self, state: &mut State, text: Option<&str>) {
-        let idx = text
-            .and_then(|t| state.candidates.iter().position(|c| c.text == t))
+    /// 切分类后把高亮落到锚点那个词上（找不到就第一个），尽量留在原来那一可见行，
+    /// 并记下落点供下一次切换判断高亮是否被挪过。
+    fn grid_land_on(&self, state: &mut State, mut anchor: GridTabAnchor) {
+        let idx = state
+            .candidates
+            .iter()
+            .position(|c| c.text == anchor.text)
             .unwrap_or(0);
         let pp = self.per_page(state.active);
         // 直接写页码、不经 `turn_page`：切分类不是翻页，不该改变 `-` 键的翻页身份（同整句切换）。
         state.current_page = idx / pp;
         state.selected_index = idx % pp;
-        // 可见区从高亮行起、尽量凑满一屏（同在靠后的页上展开）。
+        // 可见区尽量凑满一屏（同在靠后的页上展开）。
         let full_top = self.total_pages(state).saturating_sub(self.grid_rows());
-        state.grid_top = Some(state.current_page.min(full_top));
+        state.grid_top = Some(state.current_page.saturating_sub(anchor.row).min(full_top));
         self.grid_follow(state);
         self.clear_hover();
+        anchor.landed = state.candidates.get(idx).map(|c| c.text.clone());
+        state.grid_tab_anchor = Some(anchor);
     }
 
     /// 候选整份重建（扩容、末页放宽）之后：分类筛选中的话，在新的完整列表上重新筛一遍。
@@ -1450,6 +1474,36 @@ mod tests {
         c.handle_key_event(&key(keymap::VK_TAB));
         let st = c.state.lock().unwrap();
         assert_eq!(st.candidates[c.highlighted_global_index(&st)].text, word);
+    }
+
+    /// Tab 转一圈回到「全部」：高亮回到原来那个词、原来那一可见行。中途某个分类里没有它
+    /// （落到第一个）也不改锚点，只要切换之间没挪过高亮。
+    #[test]
+    fn tab_round_trip_returns_to_the_same_cell() {
+        let Some((c, _rx)) = typed_expanded("SHIJIAN") else {
+            return;
+        };
+        // 第二页以后的第一个单字：它在「词组」里没有。
+        let idx = {
+            let st = c.state.lock().unwrap();
+            (PP..st.candidates.len())
+                .find(|&i| wind_candidate::semantic_units(&st.candidates[i].text) == 1)
+                .expect("shijian 第二页以后应有单字")
+        };
+        highlight_flat(&c, idx);
+        let before = {
+            let st = c.state.lock().unwrap();
+            (st.current_page, st.selected_index, st.grid_top)
+        };
+        assert!(before.2.unwrap() < before.0, "前提：高亮不在可见区首行");
+        let n = c.grid_tabs(&c.state.lock().unwrap()).len();
+        assert!(n >= 3, "前提：至少全部 / 单字 / 词组");
+        for _ in 0..n {
+            c.handle_key_event(&key(keymap::VK_TAB));
+        }
+        assert_eq!(tab_of(&c), GridTab::All);
+        let st = c.state.lock().unwrap();
+        assert_eq!((st.current_page, st.selected_index, st.grid_top), before);
     }
 
     /// 在「单字」里触发扩容：扩容重建的是完整列表（带词组），筛选要重新套上。
