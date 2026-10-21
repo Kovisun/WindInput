@@ -184,6 +184,45 @@ pub struct Phrase {
     pub enabled: bool,
     /// 出厂的系统短语（只能开关，删不掉）；否则是用户自己加的
     pub is_system: bool,
+    /// 打这个编码时候选上显示的样子（日期按此刻展开、符号组显示组名）；求值落空为空串。
+    /// 列表里只给模板原文（`$Y年$M月$D日`），普通用户看不懂这条是干什么的
+    pub preview: String,
+}
+
+/// 一条短语打出来在候选上的样子：只放这一条建层、查它的编码，前几个候选用「 · 」连起来
+/// （`$SS` 组打全码时展开成组里的各项）——与输入时同一条求值路径，不另写一份展开规则。
+/// 无宿主能力（剪贴板、反查）的求值落空，返回空串，列表回落显示原文。
+fn phrase_preview(code: &str, text: &str, now: chrono::DateTime<chrono::Local>) -> String {
+    let layer = wind_phrase::PhraseLayer::from_records([wind_phrase::PhraseSeed {
+        code: code.to_string(),
+        text: text.to_string(),
+        weight: 0,
+        position: 0,
+        is_system: false,
+        category: String::new(),
+    }]);
+    let hits = layer
+        .lookup_at(
+            code,
+            now,
+            &[],
+            &wind_phrase::PhraseHost::empty(),
+            &wind_phrase::PhraseScope::ALL,
+        )
+        .into_iter()
+        .map(|h| h.text)
+        .collect::<Vec<_>>();
+    const SHOWN: usize = 4;
+    let mut out = hits
+        .iter()
+        .take(SHOWN)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(" · ");
+    if hits.len() > SHOWN {
+        out.push_str(" · …");
+    }
+    out
 }
 
 /// 用户词的一页与命中总数。
@@ -904,15 +943,18 @@ impl MobileCore {
             return Vec::new();
         };
         match store.list_phrases() {
-            Ok(v) => v
-                .into_iter()
-                .map(|p| Phrase {
-                    code: p.code,
-                    text: p.text,
-                    enabled: p.enabled,
-                    is_system: p.is_system,
-                })
-                .collect(),
+            Ok(v) => {
+                let now = chrono::Local::now();
+                v.into_iter()
+                    .map(|p| Phrase {
+                        preview: phrase_preview(&p.code, &p.text, now),
+                        code: p.code,
+                        text: p.text,
+                        enabled: p.enabled,
+                        is_system: p.is_system,
+                    })
+                    .collect()
+            }
             Err(e) => {
                 tracing::warn!("列短语失败: {e}");
                 Vec::new()
@@ -1376,6 +1418,30 @@ mod user_words_tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// 预览走候选同一条求值：日期模板按此刻展开、组展开成各项、纯文本原样。
+    #[test]
+    fn phrase_preview_expands_like_a_candidate() {
+        use chrono::TimeZone;
+        let now = chrono::Local
+            .with_ymd_and_hms(2026, 10, 21, 9, 5, 0)
+            .unwrap();
+        assert_eq!(
+            phrase_preview("date", "$Y年$M月$D日", now),
+            "2026年10月21日"
+        );
+        assert_eq!(phrase_preview("dz", "北京市朝阳区", now), "北京市朝阳区");
+        assert_eq!(
+            phrase_preview("zzhf", r#"$SS("常用回复", "好的", "收到")"#, now),
+            "好的 · 收到",
+            "组打全码时展开成各项"
+        );
+        assert_eq!(
+            phrase_preview("x", r#"$SS("g", "1", "2", "3", "4", "5")"#, now),
+            "1 · 2 · 3 · 4 · …",
+            "多了只列前几个"
+        );
+    }
+
     /// 快捷短语：加 / 列 / 开关 / 删用户短语；只读时拒写。系统短语的叠加与出厂开关语义在
     /// wind-store 的测试里验，这里只验门面这一层。
     #[test]
@@ -1395,6 +1461,7 @@ mod user_words_tests {
                 text: "北京市朝阳区".into(),
                 enabled: true,
                 is_system: false,
+                preview: "北京市朝阳区".into(),
             }],
             "编码与内容去掉首尾空白、默认启用、归属用户"
         );
