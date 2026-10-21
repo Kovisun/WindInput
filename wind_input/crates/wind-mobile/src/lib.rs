@@ -242,6 +242,16 @@ pub struct CandidateMenuItem {
     pub enabled: bool,
 }
 
+/// 一个已装方案（设置页「启用的方案」一行）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstalledSchema {
+    pub id: String,
+    pub name: String,
+    pub enabled: bool,
+    /// 关不掉（英文：中英键切换的目标）
+    pub locked: bool,
+}
+
 /// 候选提示的一段（段名 + 原始行），见 [`MobileCore::candidate_tooltip`]。
 pub use wind_coordinator::handle_tooltip::CandidateTooltipSection;
 
@@ -359,10 +369,14 @@ impl MobileCore {
         // - 加：清单**没列但装了**的照样要能用（英文方案就是这样——桌面把它当作
         //   临时英文的目标引擎、不放进 available，移动端却要把它当一等方案切换）。
         // 移动端的语义就是「装了什么就能用什么」，以文件系统为准最省心。
-        let mut available = scan_installed_schemas(data_dir);
-        if !available.iter().any(|s| s == fallback_schema) {
-            available.push(fallback_schema.to_string());
+        let mut installed = scan_installed_schemas(data_dir);
+        if !installed.iter().any(|s| s == fallback_schema) {
+            installed.push(fallback_schema.to_string());
         }
+        config_api::set_installed_schemas(installed.clone());
+        // 启用的 = 装了的 ∩ 用户在设置里选的（没选过 = 全部），见 `config_api::apply_enabled_schemas`；
+        // 重载时覆盖钩子按同一规则重算
+        let available = config_api::enabled_schemas();
 
         // 激活方案：**用户上次选的优先**，`fallback_schema` 只是首装兜底。
         //
@@ -719,6 +733,27 @@ impl MobileCore {
     /// 候选提示各段及当前开关（长按候选那张卡显示哪些段，见 [`config_api::tooltip_sections`]）。
     pub fn tooltip_sections(&self) -> Vec<config_api::TooltipSectionState> {
         config_api::tooltip_sections(&self.data_dir)
+    }
+
+    /// 全部已装方案（含没启用的）及其启用状态，顺序同已装列表（设置页「启用的方案」）。
+    pub fn installed_schemas(&self) -> Vec<InstalledSchema> {
+        use wind_coordinator::web_host::WebDataHost;
+        let enabled = config_api::enabled_schemas();
+        config_api::installed_schemas()
+            .iter()
+            .map(|id| InstalledSchema {
+                name: self.coord.engine_mgr().schema_name(id),
+                enabled: enabled.contains(id),
+                locked: id == config_api::ENGLISH_SCHEMA,
+                id: id.clone(),
+            })
+            .collect()
+    }
+
+    /// 启用 / 停用一个已装方案。英文与最后一个中文方案关不掉（Err 里写原因）。
+    /// 只写盘，生效要另发 [`MobileCommand::ReloadConfig`]。
+    pub fn set_schema_enabled(&self, id: &str, on: bool) -> Result<(), String> {
+        config_api::set_schema_enabled(id, on)
     }
 
     /// 打开 / 关闭一段候选提示（如「拆字」）。只写盘，生效要另发 [`MobileCommand::ReloadConfig`]。
