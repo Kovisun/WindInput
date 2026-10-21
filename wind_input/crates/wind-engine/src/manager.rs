@@ -576,8 +576,13 @@ pub struct EngineManager {
     /// 与 [`Self::key_actions_cache`] 同批失效：`invalidate_schema` 按 id 移除、
     /// 配置热重载整表清空，两处都要接。
     behavior_cache: Mutex<HashMap<String, Arc<wind_config::SchemaBehavior>>>,
-    /// 方案显示名缓存（schema_id -> schema.name；缺则回退 id）。按需读盘一次。
-    name_cache: Mutex<HashMap<String, String>>,
+    /// 方案显示名与图标短称缓存（schema_id -> (schema.name 缺则回退 id, 截断后的 icon_label)）。
+    /// 两者出自同一次读方案文件，一并缓存、同批失效；按需读盘一次。
+    ///
+    /// 短称此前不缓存，每次 `schema_icon_label` 都读盘 + 整份解析方案文件：方案列表
+    /// （`schema_entries`）每项各一次，手机上每次弹键盘 / 换模式都要列一遍方案，装 5 个方案
+    /// 就是主线程上约 40ms（模拟器实测）。
+    name_cache: Mutex<HashMap<String, (String, String)>>,
     /// overlay 方案注册表缓存（见 [`Self::overlay_modes`]）。
     ///
     /// 与其它缓存不同，这是**整表**缓存而非 per-schema：它是一个集合，任何方案的
@@ -3707,27 +3712,38 @@ impl EngineManager {
 
     /// 方案显示名（schema.name 优先，缺/读不到回退 id）。带缓存避免重复读盘。
     pub fn schema_name(&self, schema_id: &str) -> String {
-        if let Some(n) = self
+        self.schema_labels(schema_id).0
+    }
+
+    /// (显示名, 图标短称)：读一次方案文件，进 `name_cache`。
+    fn schema_labels(&self, schema_id: &str) -> (String, String) {
+        if let Some(v) = self
             .name_cache
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .get(schema_id)
         {
-            return n.clone();
+            return v.clone();
         }
-        let name = Self::read_schema(
+        let schema = Self::read_schema(
             schema_id,
             self.data_dir.as_deref(),
             self.override_dir.as_deref(),
-        )
-        .map(|s| s.schema.name)
-        .filter(|n| !n.is_empty())
-        .unwrap_or_else(|| schema_id.to_string());
+        );
+        let name = schema
+            .as_ref()
+            .map(|s| s.schema.name.clone())
+            .filter(|n| !n.is_empty())
+            .unwrap_or_else(|| schema_id.to_string());
+        let icon = schema
+            .map(|s| wind_config::icon_label_trunc(&s.schema.icon_label))
+            .unwrap_or_default();
+        let v = (name, icon);
         self.name_cache
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .insert(schema_id.to_string(), name.clone());
-        name
+            .insert(schema_id.to_string(), v.clone());
+        v
     }
 
     /// 指定方案的图标短称（`schema.icon_label` 截断到 [`wind_config::ICON_LABEL_MAX_WIDTH`]）；
@@ -3736,13 +3752,7 @@ impl EngineManager {
     /// 截断口径见 [`wind_config::icon_label_trunc`]——上限由渲染宽度与 C++ 侧缓冲共同决定，
     /// 与"是不是方案"无关，故与非中文态标签（`[ui.labels]`）共用同一个函数。
     pub fn schema_icon_label(&self, schema_id: &str) -> String {
-        Self::read_schema(
-            schema_id,
-            self.data_dir.as_deref(),
-            self.override_dir.as_deref(),
-        )
-        .map(|s| wind_config::icon_label_trunc(&s.schema.icon_label))
-        .unwrap_or_default()
+        self.schema_labels(schema_id).1
     }
 
     /// 指定方案的引擎类型字符串（小写，如 "pinyin"|"codetable"|"mixed"）；读不到返回 None。
