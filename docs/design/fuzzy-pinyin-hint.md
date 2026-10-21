@@ -169,7 +169,7 @@ FuzzyHint { char_index: u16,  // 候选文字里第几个字（按 char 计）�
 
 - 键盘误触纠错（相邻键、漏打、颠倒）及其提示。
 - 人工误读表（雾凇 corrector 那类「馄饨读 hún tun」）——不是模糊音规则产生的。
-- 带声调的拼音、ruby（拼音悬在字上方）排版。
+- ruby（拼音悬在字上方）排版。（带声调已改为可选，见 §9）
 - 改写编码区 / 上屏内容。
 - 码表方案的任何提示。
 
@@ -202,3 +202,30 @@ FuzzyHint { char_index: u16,  // 候选文字里第几个字（按 char 计）�
 - `hint=false` 或 `enabled=false`：显示与现状逐字节一致（golden 不变）。
 - 截断：长候选截断时不出现半截提示。
 - Android：候选栏与展开面板都显示带色提示；开关在 Android 设置里可切换。
+
+## 9 追加（2026-10-21，对照 GH#230 补齐）
+
+GH#230 楼主的两条诉求首版未覆盖，维护者定补：
+
+### 9.1 带声调（可选）
+
+- 配置 `[schema.pinyin.fuzzy] hint_tone`（bool，默认 `false`）；设置端 label「提示带声调」，`hint` 关时禁用/隐藏。
+- 开启后内嵌提示与 §9.2 变量都用带调拼音：`苹(píng)果`。
+- 取调复用 `wind-reverse` 的 `toned_pinyin_of(text, Some(&syllables), …)`：用词库音节筛读音表；同音异调（「为」wéi/wèi）
+  取读音表里最常用的那个——与现有 `${pinyin}` 同一口径，是数据下界。某字读音表里查不到匹配音节时，该处退回不带调的
+  词库音节（宁可少调，不可错音）。
+- 只影响显示；`(…)` 宽度变化同样走现有截断规则。
+
+### 9.2 模板变量 `${fuzzy_pinyin}`
+
+- 只在候选**带模糊提示**（`fuzzy_hints` 非空）时有值，否则为空串——可写成 `${code_hint|code_rev}{ ${fuzzy_pinyin}}`。
+- 值为该候选**整词的正确拼音**，音节以空格分隔（`zhong guo`），按 `hint_tone` 决定带不带调；字数与音节数对不上时为空。
+- 不受 `hint_scope` 约束（它只管正文内嵌）；用模板的人自己决定放哪。
+- 引擎计算条件改为 `enabled && (hint || 任一生效注释模板引用了 fuzzy_pinyin)`：只想在注释里看、不想正文内嵌的人可以关
+  `hint`、只写模板。模板变化时按现有配置重载路径重建。
+- 角色 `fuzzy_pinyin`（同其他模板变量各有同名角色），登记 `TEXT_ROLES`；出厂 `_base` 的 `[comment.roles]` 给它与
+  `text.roles.fuzzy_hint` 同色，主题未配时随注释色。
+- 设置端注释模板的变量清单 / 预览值、文档站模板变量表同步。
+
+验收补充：`hint_tone=true` 下 `pinguo` → 「苹(píng)果」；模板含 `${fuzzy_pinyin}`、`hint=false` 时 `zongguo` 的「中国」注释出
+`zhōng guo`/`zhong guo`（视 `hint_tone`），正文不内嵌；非模糊候选该变量为空。
