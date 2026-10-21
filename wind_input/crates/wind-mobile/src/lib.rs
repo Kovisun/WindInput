@@ -175,6 +175,17 @@ pub struct UserWord {
     pub weight: i32,
 }
 
+/// 一条快捷短语（设置页「快捷短语」列表项）：系统与用户短语的叠加视图。
+#[derive(Debug, Clone, PartialEq)]
+pub struct Phrase {
+    pub code: String,
+    /// 真实文本（存储域，模板原文如 `$Y年$M月$D日`；移动端直接显示原文）
+    pub text: String,
+    pub enabled: bool,
+    /// 出厂的系统短语（只能开关，删不掉）；否则是用户自己加的
+    pub is_system: bool,
+}
+
 /// 用户词的一页与命中总数。
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct UserWordPage {
@@ -884,6 +895,84 @@ impl MobileCore {
             .map_err(|e| e.to_string())
     }
 
+    /// 全部快捷短语（系统 + 用户的叠加视图，按编码升序）。无存储时为空。
+    ///
+    /// 与桌面设置页 `phrase.list` 同一份数据（`Store::list_phrases`），只是不做那层 `\n` 转义。
+    pub fn phrases(&self) -> Vec<Phrase> {
+        use wind_coordinator::web_host::WebDataHost;
+        let Some(store) = self.coord.user_store() else {
+            return Vec::new();
+        };
+        match store.list_phrases() {
+            Ok(v) => v
+                .into_iter()
+                .map(|p| Phrase {
+                    code: p.code,
+                    text: p.text,
+                    enabled: p.enabled,
+                    is_system: p.is_system,
+                })
+                .collect(),
+            Err(e) => {
+                tracing::warn!("列短语失败: {e}");
+                Vec::new()
+            }
+        }
+    }
+
+    /// 开 / 关一条短语（系统短语出厂关着的，如时间戳 tmts，在这里打开）。立即重建输入层。
+    pub fn phrase_set_enabled(&self, code: &str, text: &str, enabled: bool) -> Result<(), String> {
+        use wind_coordinator::web_host::WebDataHost;
+        self.ensure_writable()?;
+        let store = self.coord.user_store().ok_or("无持久化存储")?;
+        store
+            .set_phrase_enabled(code, text, enabled)
+            .map_err(|e| e.to_string())?;
+        self.coord.rebuild_phrases();
+        Ok(())
+    }
+
+    /// 加一条用户短语。权重取 [`wind_store::phrases::DEFAULT_USER_PHRASE_WEIGHT`]，与桌面设置页
+    /// 手动添加同一个缺省值（用户自己加的排在系统短语前）。
+    pub fn phrase_add(&self, code: &str, text: &str) -> Result<(), String> {
+        use wind_coordinator::web_host::WebDataHost;
+        self.ensure_writable()?;
+        let (code, text) = (code.trim(), text.trim());
+        if code.is_empty() || text.is_empty() {
+            return Err("编码和内容都不能为空".into());
+        }
+        let store = self.coord.user_store().ok_or("无持久化存储")?;
+        store
+            .add_phrase(
+                code,
+                text,
+                0,
+                wind_store::phrases::DEFAULT_USER_PHRASE_WEIGHT,
+            )
+            .map_err(|e| e.to_string())?;
+        self.coord.rebuild_phrases();
+        Ok(())
+    }
+
+    /// 删一条用户短语。删的若是遮蔽了系统条目的那条，系统默认那条随之露出来（同桌面
+    /// `phrase.remove`：补回缺失的系统条目再重建）。
+    pub fn phrase_remove(&self, code: &str, text: &str) -> Result<(), String> {
+        use wind_coordinator::web_host::WebDataHost;
+        self.ensure_writable()?;
+        let store = self.coord.user_store().ok_or("无持久化存储")?;
+        store.remove_phrase(code, text).map_err(|e| e.to_string())?;
+        self.coord.restore_missing_system_phrases("删除短语");
+        self.coord.rebuild_phrases();
+        Ok(())
+    }
+
+    /// 系统短语恢复默认：开关回到出厂值（出厂关着的仍关着），返回改动条数。用户短语不动。
+    pub fn phrases_restore_defaults(&self) -> Result<u64, String> {
+        use wind_coordinator::web_host::WebDataHost;
+        self.ensure_writable()?;
+        Ok(self.coord.restore_system_phrases() as u64)
+    }
+
     /// 清空该方案（折叠后的数据方案）的全部用户词，返回删除条数。
     pub fn user_words_clear(&self, schema_id: &str) -> Result<u64, String> {
         use wind_coordinator::web_host::WebDataHost;
@@ -1287,6 +1376,36 @@ mod user_words_tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// 快捷短语：加 / 列 / 开关 / 删用户短语；只读时拒写。系统短语的叠加与出厂开关语义在
+    /// wind-store 的测试里验，这里只验门面这一层。
+    #[test]
+    fn phrase_add_list_toggle_remove() {
+        let (m, dir) = core("phrases", None);
+        m.phrase_add(" dz ", " 北京市朝阳区 ").unwrap();
+        let mine = |m: &MobileCore| {
+            m.phrases()
+                .into_iter()
+                .filter(|p| p.code == "dz")
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            mine(&m),
+            [Phrase {
+                code: "dz".into(),
+                text: "北京市朝阳区".into(),
+                enabled: true,
+                is_system: false,
+            }],
+            "编码与内容去掉首尾空白、默认启用、归属用户"
+        );
+        m.phrase_set_enabled("dz", "北京市朝阳区", false).unwrap();
+        assert!(!mine(&m)[0].enabled);
+        m.phrase_remove("dz", "北京市朝阳区").unwrap();
+        assert!(mine(&m).is_empty());
+        assert!(m.phrase_add("dz", "  ").is_err(), "空内容拒收");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     /// 暂停学习只是转发：开关落到协调器上（学习路径的覆盖在 wind-coordinator 的
     /// `tests/learning_suspended.rs` 验）。
     #[test]
@@ -1309,6 +1428,7 @@ mod user_words_tests {
         assert!(m.user_word_remove("pinyin", "ni hao", "你好").is_err());
         assert!(m.user_words_clear("pinyin").is_err());
         assert_eq!(m.user_words("pinyin", "", 0, 50), UserWordPage::default());
+        assert!(m.phrase_add("dz", "地址").is_err(), "短语写入同样受只读闸");
         let _ = std::fs::remove_dir_all(dir);
     }
 }
