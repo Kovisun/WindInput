@@ -1129,7 +1129,7 @@ mod tests {
             .expect("应下发展开态的帧")
     }
 
-    /// 只补整行（出厂）：每页 5 个时高亮行 1–5、下一行 6–10（第 10 个由数字键 0 选，序号沿用
+    /// 只补整行（出厂）：每页 5 个时高亮行 1–5、下一行 6–9、0（第 10 个由数字键 0 选，序号沿用
     /// 普通候选窗的写法），数字键的选择范围跟着延到下一行。
     #[test]
     fn indices_continue_onto_whole_rows() {
@@ -1141,7 +1141,7 @@ mod tests {
         assert_eq!((from, count), (5, 10), "高亮在第 2 行：第 2、3 行带号");
         assert_eq!(
             &labels[5..15],
-            &["1", "2", "3", "4", "5", "6", "7", "8", "9", "10"]
+            &["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"]
         );
         let st = c.state.lock().unwrap();
         assert_eq!(c.select_range(&st), (5, 15), "数字键的范围跟着序号走");
@@ -1160,7 +1160,7 @@ mod tests {
         assert_eq!((from, count), ((ROWS as u16 - 1) * 5, 5));
     }
 
-    /// 逐格档：每页 7 个时编满 10 个，下一行前 3 格带 8、9、10；off 档只编高亮行。
+    /// 逐格档：每页 7 个时编满 10 个，下一行前 3 格带 8、9、0；off 档只编高亮行。
     #[test]
     fn index_fill_cells_and_off() {
         let (c, rx) = coord_with(7, "cells");
@@ -1168,7 +1168,7 @@ mod tests {
         c.handle_key_event(&key(keymap::VK_EQUAL));
         let (from, count, labels) = index_frame(&rx);
         assert_eq!((from, count), (0, 10));
-        assert_eq!(&labels[7..10], &["8", "9", "10"]);
+        assert_eq!(&labels[7..10], &["8", "9", "0"]);
         let (c, rx) = coord_with(5, "off");
         seed(&c, 5 * 4);
         c.handle_key_event(&key(keymap::VK_EQUAL));
