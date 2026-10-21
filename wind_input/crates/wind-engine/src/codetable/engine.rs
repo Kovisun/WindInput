@@ -668,9 +668,13 @@ fn decide_auto_commit(
     // `hhnu` 下常用「X」+生僻「愳」判不唯一不上屏，滤掉「愳」后复评才放行）。放宽把它们补回
     // 列表却不在此排除，会让一批原本满码即上屏的字退化成要多按一次空格——**而且是静默退化**，
     // 用户只觉得「上屏时灵时不灵」。排除后，自动上屏口径在自动补充/手动放宽下均与放宽前一致。
+    //
+    // ⚠️ **也排除整句候选**（`is_sentence`）：它的 `code` 是整串，超码长时又常是唯一一条
+    // `code == input`、且超码长串没有更长后继 ⇒ 不排除的话，开了满码上屏后每多打一码
+    // 整句就把自己上屏了（`trntw` → 「我人」），句子永远组不起来（论坛 t350）。
     let mut exact = candidates
         .iter()
-        .filter(|c| c.code == input && !c.is_scope_filtered);
+        .filter(|c| c.code == input && !c.is_scope_filtered && !c.is_sentence);
     let first = exact.next()?;
     if exact.next().is_some() {
         return None; // 多个精确匹配，不自动上屏
@@ -1813,6 +1817,18 @@ mod tests {
         let first = r.candidates.first().expect("应有候选");
         assert_eq!(first.text, "工作工作");
         assert!(first.is_sentence, "整句候选须带 is_sentence 供顶部锚定");
+    }
+
+    #[test]
+    fn sentence_candidate_never_auto_commits() {
+        // 整句候选是超码长串上唯一一条 `code == input`，满码上屏不得把它当唯一全码上屏。
+        let opts = CommitOptions {
+            auto_commit_at_full: true,
+            ..sentence_opts()
+        };
+        let r = sentence_engine(&[], opts).convert("aawtaawt", 50).unwrap();
+        assert!(r.candidates[0].is_sentence, "前提：应解出整句");
+        assert!(!r.should_commit, "整句候选不得触发满码上屏");
     }
 
     #[test]
