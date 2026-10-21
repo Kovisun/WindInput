@@ -22,6 +22,7 @@
 //! - `WIND_PINYIN_EVAL_N`     每类抽样数（默认 600）
 //! - `WIND_PINYIN_EVAL_SEED`  随机种子（默认 20260721）
 //! - `WIND_PINYIN_EVAL_DUMP`  每类导出的未命中明细条数（默认 40）
+//! - `WIND_PINYIN_EVAL_FUZZY` 开模糊音：逗号分隔的组名（`in_ing,an_ang`）或 `all`
 //!
 //! ## 样本分类判据
 //!
@@ -103,6 +104,33 @@ fn manager(dir: &Path) -> EngineManager {
     // 质量与开销差别都很大，标定时要能一键切换。
     if let Ok(m) = std::env::var("WIND_GRAM_MODEL") {
         cfg.schema.pinyin.grammar.model = m;
+    }
+    // 模糊音：逗号分隔的组名（`in_ing,an_ang`），`all` = 13 组全开。不设 = 出厂（全关）。
+    if let Ok(groups) = std::env::var("WIND_PINYIN_EVAL_FUZZY") {
+        let f = &mut cfg.schema.pinyin.fuzzy;
+        f.enabled = true;
+        for g in groups.split(',').map(str::trim) {
+            let all = g == "all";
+            for (name, slot) in [
+                ("zh_z", &mut f.zh_z),
+                ("ch_c", &mut f.ch_c),
+                ("sh_s", &mut f.sh_s),
+                ("n_l", &mut f.n_l),
+                ("f_h", &mut f.f_h),
+                ("r_l", &mut f.r_l),
+                ("an_ang", &mut f.an_ang),
+                ("en_eng", &mut f.en_eng),
+                ("in_ing", &mut f.in_ing),
+                ("ian_iang", &mut f.ian_iang),
+                ("uan_uang", &mut f.uan_uang),
+                ("un_ong", &mut f.un_ong),
+                ("eng_ong", &mut f.eng_ong),
+            ] {
+                if all || g == name {
+                    *slot = true;
+                }
+            }
+        }
     }
     EngineManager::new(&cfg, Some(dir))
 }
