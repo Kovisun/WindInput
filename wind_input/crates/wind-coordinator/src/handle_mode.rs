@@ -1095,6 +1095,47 @@ impl Coordinator {
             .filter(|h| !h.is_empty())
     }
 
+    /// `state.candidates[start..end]` 逐条的带提示正文（空 = 不标），按 `scope` 定哪些候选标。
+    ///
+    /// `styled(c)` 是该候选在**宿主自己的显示形态**（截断、前缀标注…）下的带提示正文——桌面候选窗
+    /// 与移动端拉取窗口显示形态不同，各自传入，标哪条的规则只此一份。`first` 只标最终界面顺序里
+    /// 第一个 `styled` 非空的候选（换算或截断丢光了提示的顺延给下一条）：在排好序的完整列表上找，
+    /// 与翻页 / 窗口无关，之后的永不带提示；`all` 每个都标。
+    pub(crate) fn fuzzy_hint_texts(
+        &self,
+        state: &State,
+        scope: wind_config::FuzzyHintScope,
+        start: usize,
+        end: usize,
+        styled: impl Fn(&Candidate) -> wind_ui_types::StyledText,
+    ) -> Vec<wind_ui_types::StyledText> {
+        let hinted = |c: &Candidate| {
+            if c.meta.fuzzy_hints.is_empty() {
+                Default::default()
+            } else {
+                styled(c)
+            }
+        };
+        let first = match scope {
+            wind_config::FuzzyHintScope::All => None,
+            wind_config::FuzzyHintScope::First => {
+                Some(state.candidates.iter().enumerate().find_map(|(at, c)| {
+                    let s = hinted(c);
+                    (!s.is_empty()).then_some((at, s))
+                }))
+            }
+        };
+        state.candidates[start..end]
+            .iter()
+            .enumerate()
+            .map(|(i, c)| match &first {
+                None => hinted(c),
+                Some(Some((at, s))) if *at == start + i => s.clone(),
+                Some(_) => Default::default(),
+            })
+            .collect()
+    }
+
     /// 逆切分次选的 `(被隐藏的前段, 所见的后段)`；不是只显示后段的候选 ⇒ `("", text)`。
     /// 内部文本域（未做简繁），供以词定字按所见取字。`c` 须借自 `state.candidates`。
     pub(crate) fn split_front_and_shown(&self, state: &State, c: &Candidate) -> (String, String) {

@@ -7504,24 +7504,17 @@ impl Coordinator {
                 .map(|h| crate::fuzzy_hint_text::styled_for_shown(full, disp, prefix_of(c), &h))
                 .unwrap_or_default()
         };
-        // `first` 只标**最终界面顺序**里第一个在这里还显示得出提示的候选（换算或截断丢光了提示的
-        // 顺延给下一条）——在排好序的完整列表上找，与翻页 / 展开无关，之后的永不带提示；
-        // `all` 每个都标。
-        let hint_first = match rt.config.schema.pinyin.fuzzy.hint_scope {
-            wind_config::FuzzyHintScope::All => None,
-            wind_config::FuzzyHintScope::First => Some(
-                state
-                    .candidates
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, c)| !c.meta.fuzzy_hints.is_empty())
-                    .find_map(|(at, c)| {
-                        let full = self.cand_display_text(state, c);
-                        let styled = hint_styled(c, &full, &truncate(&full));
-                        (!styled.is_empty()).then_some((at, styled))
-                    }),
-            ),
-        };
+        // 哪些候选标（`first` / `all`）见 `fuzzy_hint_texts`。
+        let mut hint_texts = self.fuzzy_hint_texts(
+            state,
+            rt.config.schema.pinyin.fuzzy.hint_scope,
+            start,
+            end,
+            |c| {
+                let full = self.cand_display_text(state, c);
+                hint_styled(c, &full, &truncate(&full))
+            },
+        );
         let items: Vec<CandidateItem> = state.candidates[start..end]
             .iter()
             .enumerate()
@@ -7571,11 +7564,7 @@ impl Coordinator {
                     (wind_ui_types::StyledText::new(), comment)
                 };
                 let prefix = prefix_of(c);
-                let text_styled = match &hint_first {
-                    None => hint_styled(c, &full, &disp),
-                    Some(Some((at, styled))) if *at == start + i => styled.clone(),
-                    Some(_) => Default::default(),
-                };
+                let text_styled = std::mem::take(&mut hint_texts[i]);
                 let text = if prefix.is_empty() {
                     disp
                 } else {
