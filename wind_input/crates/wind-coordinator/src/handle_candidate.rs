@@ -1975,6 +1975,8 @@ impl Coordinator {
             // 惰性：`filter` 只在引擎已放行（`Some`）时才求值，故全量扫短语码表的代价不落在
             // 每次按键上——与 `phrase_vetoes_top_code` 的调用点选择同源。
             .filter(|_| !self.phrase_vetoes_auto_commit(state, &state.input_buffer))
+            // 追加候选否决（`input.emoji.block_auto_commit`，出厂关）：见 `emoji_vetoes_auto_commit`。
+            .filter(|_| !self.emoji_vetoes_auto_commit(&state.candidates))
         {
             Some(_) => {
                 // 一致性：自动上屏文本取「实际显示的首候选」，与空格/点选同源，杜绝
@@ -2068,6 +2070,10 @@ impl Coordinator {
         // 引擎侧的 `decide_auto_commit` 不需要这道闸：它按 `c.code == input` 筛码表候选子集，
         // 而 emoji 候选 `code` 恒空（同短语、同英文头部候选）。两处判据不同源，别互相照抄。
         let c = sole_non_emoji(&state.candidates)?;
+        // 同码表侧：用户选择让追加候选阻止自动上屏时，这里同口径否决。
+        if self.emoji_vetoes_auto_commit(&state.candidates) {
+            return None;
+        }
         // 精确码短语（非前缀枚举 / 非组）。命令留待下方按纯文本/副作用分流。
         if !c.is_phrase || c.is_prefix || c.is_group {
             return None;
@@ -2179,6 +2185,16 @@ impl Coordinator {
             ct.auto_commit_min_len,
             self.engine_mgr.active_full_code_length(),
         )
+    }
+
+    /// 候选里有追加出来的 emoji / 附加模块符号，且用户开了 `input.emoji.block_auto_commit`
+    /// ⇒ 否决全码唯一自动上屏（码表与短语两侧共用）。
+    ///
+    /// 判据是「列表里有追加候选」而不追溯宿主：走到自动上屏时列表通常只剩上屏目标这一条
+    /// 词库候选，追加候选也就挂在它身上。
+    fn emoji_vetoes_auto_commit(&self, candidates: &[Candidate]) -> bool {
+        self.rt().config.input.emoji.block_auto_commit
+            && candidates.iter().any(|c| c.is_emoji_suggestion)
     }
 
     /// `$CC` 命令候选的自动上屏结局分流（短语命令 / 词库命令词条共用）：

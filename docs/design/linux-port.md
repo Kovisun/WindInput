@@ -355,7 +355,7 @@ DBus 客户端能直接断言 `ForwardKey` 序列；代价是只作用于当前�
 - **托盘 / 常驻（`run_resident`）缺失不影响设置端**：`wind_setting` 不用常驻模式也不用托盘；
   输入法自己的状态指示改由 Fcitx5 托盘图标承担（见 §5d）。
 - **已知问题**（windui Linux 后端）：设置程序已开着时，深链转来的切页要等下一次输入事件才显示；
-  文件对话框依赖 xdg-desktop-portal 或 zenity，都没有时点了无反应。
+  文件对话框走 xdg-desktop-portal，弹不出时退 zenity、再退 kdialog；都不行时设置端提示安装 zenity 或 kdialog。
 
 ## 7. 待验证的风险
 

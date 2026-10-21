@@ -518,6 +518,7 @@ static REGISTRY: &[ConfigField] = &[
     f("input.emoji.max_hosts", Int),
     f("input.emoji.min_word_chars", Int),
     f("input.emoji.categories", Bool),
+    f("input.emoji.block_auto_commit", Bool),
     // 附加模块开关（id → bool）。键由内置注册表与用户放进 `emoji/` 的文件共同决定，不是
     // 固定集合，故整体登记为 Map；设置端由对话框整体读写。
     f("input.emoji.modules", Map(&[])),

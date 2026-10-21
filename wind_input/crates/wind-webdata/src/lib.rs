@@ -4096,6 +4096,7 @@ pub trait WebDataRpc: WebDataHost {
                         fallback,
                         sp.role,
                         sp.in_title,
+                        sp.separator,
                         sp.color.as_deref(),
                     );
                     (c != body).then(|| json!({"start": sp.start, "end": sp.end, "rgba": c}))
@@ -4199,6 +4200,7 @@ pub trait WebDataRpc: WebDataHost {
                     TextState::Normal,
                     fallback,
                     None,
+                    false,
                     false,
                     Some(&c),
                 );

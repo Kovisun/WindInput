@@ -1104,6 +1104,9 @@ min_word_chars = 2
 # 是否启用分类词表：「动物」「水果」等分类词会带出整组 emoji，数量受 max_per_word 约束
 categories = false
 
+# 候选里追加了 emoji 或附加模块的符号时，不做全码唯一自动上屏，留出选它的机会
+block_auto_commit = false
+
 # 附加模块：来自白霜拼音（rime-frost）的 emoji / 符号表，按模块单独开关。查询时排在上面的
 # 主表（与分类表）之后，同一个词多张表都有时依次拼接，再按 max_per_word 截断。
 [input.emoji.modules]

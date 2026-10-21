@@ -4606,6 +4606,13 @@ pub struct EmojiConfig {
     /// 入口，故做成独立开关而不是不引入。
     #[serde(default)]
     pub categories: bool,
+    /// 候选里有追加出来的 emoji / 附加模块符号时，**不**做全码唯一自动上屏（码表与短语两侧）。
+    ///
+    /// 出厂关：追加候选不是这个码检索出的词条，默认不计入唯一性判据（见
+    /// `Candidate::is_emoji_suggestion`）。开了附加模块（如偏旁部首）的用户要的往往正是那条
+    /// 追加候选（`rrup` 提手旁 → 扌），自动上屏会让它来不及出现。
+    #[serde(default)]
+    pub block_auto_commit: bool,
     /// 附加模块开关（`[input.emoji.modules]`，键 = [`EMOJI_MODULES`] 的 id）。缺的键按该模块
     /// 的出厂值（[`EmojiConfig::module_enabled`]）；不认识的键忽略。
     ///
@@ -4847,6 +4854,7 @@ impl Default for EmojiConfig {
             max_hosts: default_emoji_max_hosts(),
             min_word_chars: default_emoji_min_word_chars(),
             categories: false,
+            block_auto_commit: false,
             modules: default_emoji_modules(),
         }
     }

@@ -10,6 +10,7 @@
 //!
 //! 候选生成委托给 [`EngineManager`]，运行时词频 boost + 最终排序在本层应用。
 
+use crate::comment::VarValue;
 use crate::handle_mode::MixLens;
 use crate::pipeline::{ModeKind, Rewind};
 // 子模块（src/coordinator/ 目录）：这批切片重度访问本模块**私有**字段/函数，
@@ -10222,8 +10223,8 @@ impl Coordinator {
             self.comment_dict_scope(state, c, ctx.mix_comment_scope, &ctx.comment_dict_schema);
         // 调试正文要点查 redb 词频，按需算且一个候选只算一次。
         let debug_body = std::cell::OnceCell::new();
-        let cand_eval = |name: &str, arg: Option<&str>| -> Option<String> {
-            Some(match name {
+        let cand_eval = |name: &str, arg: Option<&str>| -> Option<VarValue> {
+            Some(VarValue::from(match name {
                 "word_code" => word_code.clone(),
                 "code_source" => ctx.code_source_name.clone().unwrap_or_default(),
                 "debug" => ctx
@@ -10238,10 +10239,11 @@ impl Coordinator {
                 _ => {
                     return self.eval_var(name, arg, c, reverse, ctx.hint_source, &dict_schema);
                 }
-            })
+            }))
         };
         let char_eval = |ch: char, name: &str, arg: Option<&str>| {
             crate::tooltip::char_var(name, arg, ch, reverse)
+                .map(VarValue::from)
                 .or_else(|| self.eval_text_var(name, arg, &ch.to_string(), reverse))
         };
         tip.render(disp, full, &cand_eval, &char_eval)
@@ -11207,7 +11209,7 @@ mod mode_comment_e2e_tests {
         let vars: Vec<&str> = wind_ui_types::TEXT_ROLES
             .iter()
             .copied()
-            .filter(|r| !matches!(*r, "title" | "literal"))
+            .filter(|r| !matches!(*r, "title" | "literal" | "separator"))
             .collect();
         let whole: String = vars
             .iter()
