@@ -216,6 +216,41 @@ pub fn span_color(
     body
 }
 
+/// 候选正文里模糊音提示段（`(ping)`）的颜色，角色名 [`FUZZY_HINT_ROLE`]。
+///
+/// - `text`：`views.text`（提示段在候选正文里，角色色写在 `[text.roles]`）；`comment`：`views.comment`。
+/// - `comment_fallback`：注释节点未配正文色时的渲染层兜底（候选窗的 `COMMENT_FALLBACK`）。
+///
+/// 顺序：① 该状态的 `text.<state>.roles` → ② 该状态改了正文色（有效色值比较，同 [`span_color`]
+/// 规则 3）则取该状态下的注释色（固定色放进改了底色的高亮项里看不清）→ ③ `text.roles`
+/// → ④ 注释在该状态下的正文色。即主题不配时提示段与注释同色，含选中 / 悬停态。
+/// 正文其余部分无角色，直接用 [`body_color`]`(text, state, 候选正文兜底)`。
+pub fn fuzzy_hint_color(
+    text: &RvNode,
+    comment: &RvNode,
+    state: TextState,
+    text_fallback: Rgba,
+    comment_fallback: Rgba,
+) -> Rgba {
+    if let Some(c) = state_patch(text, state).and_then(|n| n.roles.get(FUZZY_HINT_ROLE)) {
+        return *c;
+    }
+    let comment_color = body_color(comment, state, comment_fallback);
+    if state != TextState::Normal
+        && body_color(text, state, text_fallback)
+            != body_color(text, TextState::Normal, text_fallback)
+    {
+        return comment_color;
+    }
+    text.roles
+        .get(FUZZY_HINT_ROLE)
+        .copied()
+        .unwrap_or(comment_color)
+}
+
+/// 模糊音提示段的角色名（与 wind-ui-types `TEXT_ROLES` 里的 `fuzzy_hint` 同名）。
+pub const FUZZY_HINT_ROLE: &str = "fuzzy_hint";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1226,5 +1261,59 @@ mod tests {
             got, want,
             "引擎求值与检入的期望表不一致；有意改变时 WIND_THEME_BLESS=1 重录"
         );
+    }
+
+    // ---------------- 模糊音提示 ----------------
+
+    const CMT: Rgba = [10, 20, 30, 255];
+    const CMT_SEL: Rgba = [40, 50, 60, 255];
+    const TXT: Rgba = [1, 2, 3, 255];
+    const TXT_SEL: Rgba = [4, 5, 6, 255];
+    const TXT_FB: Rgba = [30, 30, 30, 255];
+
+    fn hint(text: &RvNode, comment: &RvNode, st: TextState) -> Rgba {
+        fuzzy_hint_color(text, comment, st, TXT_FB, BODY)
+    }
+
+    fn comment_node() -> RvNode {
+        let mut c = RvNode {
+            text_color: Some(CMT),
+            ..Default::default()
+        };
+        c.selected = Some(Box::new(body_patch(CMT_SEL)));
+        c
+    }
+
+    #[test]
+    fn fuzzy_hint_falls_back_to_comment() {
+        let (t, c) = (node(), comment_node());
+        assert_eq!(hint(&t, &c, Normal), CMT);
+        assert_eq!(hint(&t, &c, Selected), CMT_SEL);
+        assert_eq!(hint(&t, &c, Hover), CMT, "悬停没配色，回退注释基态色");
+        assert_eq!(hint(&t, &node(), Normal), BODY, "注释也没配 => 渲染层兜底");
+    }
+
+    #[test]
+    fn fuzzy_hint_theme_override() {
+        let t = with_roles(node(), &[("fuzzy_hint", RED)]);
+        let c = comment_node();
+        assert_eq!(hint(&t, &c, Normal), RED);
+        assert_eq!(hint(&t, &c, Selected), RED, "正文色没变的状态沿用常态配色");
+        // 状态单列优先。
+        let t = selected(t, with_roles(node(), &[("fuzzy_hint", GREEN)]));
+        assert_eq!(hint(&t, &c, Selected), GREEN);
+        assert_eq!(hint(&t, &c, Normal), RED);
+    }
+
+    /// 选中态把正文色改了（底色变了）：常态配的固定色不带进去，改取该态注释色。
+    #[test]
+    fn fuzzy_hint_yields_to_comment_when_state_changes_body() {
+        let mut t = with_roles(body_patch(TXT), &[("fuzzy_hint", RED)]);
+        t.selected = Some(Box::new(body_patch(TXT_SEL)));
+        assert_eq!(hint(&t, &comment_node(), Selected), CMT_SEL);
+        assert_eq!(hint(&t, &comment_node(), Normal), RED);
+        // 写回同一个色值不算改了正文色。
+        t.selected = Some(Box::new(body_patch(TXT)));
+        assert_eq!(hint(&t, &comment_node(), Selected), RED);
     }
 }

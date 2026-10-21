@@ -1444,6 +1444,11 @@ border = { color = \"#BB0000\", radius = 0, width = \"2px\" }
                         let Some(st) = st else { continue };
                         let want = match (k, i) {
                             ("tooltip", 0) => &want_tooltip,
+                            ("text", 0) if st.roles.len() == 1 => {
+                                // 模糊音提示段的角色色（候选正文里的 `(ping)`）；亮暗各自可解析。
+                                assert!(st.roles.contains_key("fuzzy_hint"), "{name} text.roles");
+                                continue;
+                            }
                             _ => {
                                 assert!(
                                     st.roles.is_empty(),
@@ -1455,6 +1460,52 @@ border = { color = \"#BB0000\", radius = 0, width = \"2px\" }
                         assert_eq!(&st.roles, want, "{name} dark={dark} {k}");
                     }
                 }
+            }
+        }
+    }
+
+    /// 出厂主题的 `fuzzy_hint` 与窗口底色对比度 >= 3:1，且不与候选正文色 / 注释色相同。
+    #[test]
+    fn factory_fuzzy_hint_is_readable_and_distinct() {
+        fn lum(c: Rgba) -> f64 {
+            let f = |v: u8| {
+                let v = v as f64 / 255.0;
+                if v <= 0.03928 {
+                    v / 12.92
+                } else {
+                    ((v + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * f(c[0]) + 0.7152 * f(c[1]) + 0.0722 * f(c[2])
+        }
+        fn contrast(a: Rgba, b: Rgba) -> f64 {
+            let (x, y) = (lum(a), lum(b));
+            (x.max(y) + 0.05) / (x.min(y) + 0.05)
+        }
+        let ids = crate::list_theme_ids(&data_dir_for_roles());
+        for name in ids
+            .iter()
+            .filter(|n| ["_base", "_qingfeng", "default"].contains(&n.as_str()))
+        {
+            for dark in [false, true] {
+                let t = roles_theme(name, dark);
+                let v = &t.views;
+                let hint = crate::fuzzy_hint_color(
+                    &v.text,
+                    &v.comment,
+                    crate::TextState::Normal,
+                    [30, 30, 30, 255],
+                    [150, 150, 150, 255],
+                );
+                assert_eq!(hint, v.text.roles["fuzzy_hint"], "{name} dark={dark}");
+                let bg = v.window.bg_color.expect("window 底色");
+                assert!(
+                    contrast(hint, bg) >= 3.0,
+                    "{name} dark={dark} 对比度 {}",
+                    contrast(hint, bg)
+                );
+                assert_ne!(Some(hint), v.text.text_color);
+                assert_ne!(Some(hint), v.comment.text_color);
             }
         }
     }

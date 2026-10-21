@@ -124,6 +124,11 @@ padding = { left = 3, right = 3 }
 margin = { left = 4 }
 color = "${text}"
 
+# 模糊音提示段（候选里的 (ping)）：与候选文字、注释色都区分开的橙，对白/深底 >= 3:1。
+# 选中态改了正文色的主题自动回落注释色；不配则整体回退注释色。
+[text.roles]
+fuzzy_hint = { light = "#C2410C", dark = "#FDBA74" }
+
 [comment]
 margin = { left = 6 }
 color = "${text_hint}"
