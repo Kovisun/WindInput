@@ -47,6 +47,45 @@ pub(crate) fn color_runs(
         .collect()
 }
 
+/// 候选正文的颜色区间：只有模糊音提示段（`fuzzy_hint`）着色，取色走
+/// [`wind_theme::fuzzy_hint_color`]；其余段按正文色、不建区间。与 [`color_runs`] 同样丢掉
+/// 等于正文色的区间（不带提示的候选恒为空 ⇒ 绘制路径与改动前相同）。
+pub(crate) fn fuzzy_hint_runs(
+    text_node: &RvNode,
+    comment_node: &RvNode,
+    state: TextState,
+    text_fallback: Rgba,
+    comment_fallback: Rgba,
+    text: &StyledText,
+) -> Vec<ColorRun> {
+    let mut hints = text
+        .spans()
+        .iter()
+        .filter(|s| s.role == Some(wind_theme::FUZZY_HINT_ROLE))
+        .peekable();
+    if hints.peek().is_none() {
+        return Vec::new();
+    }
+    let body = wind_theme::body_color(text_node, state, text_fallback);
+    let rgba = wind_theme::fuzzy_hint_color(
+        text_node,
+        comment_node,
+        state,
+        text_fallback,
+        comment_fallback,
+    );
+    if rgba == body {
+        return Vec::new();
+    }
+    hints
+        .map(|s| ColorRun {
+            start: s.start,
+            end: s.end,
+            rgba,
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
