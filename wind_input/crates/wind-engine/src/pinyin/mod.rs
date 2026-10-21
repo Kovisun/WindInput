@@ -13,6 +13,7 @@
 
 pub mod dag;
 pub mod fuzzy;
+pub(crate) mod fuzzy_hint;
 pub mod generate;
 pub mod grammar;
 pub mod interp;

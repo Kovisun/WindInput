@@ -559,6 +559,33 @@ impl FuzzyMatcher {
         variants
     }
 
+    /// 单音节的**拼写级**模糊变体（只看用户模糊组，不含双拼同键）：合法变体之外，再收
+    /// 非法错音串（`ding`→`din`），但不收零声母的非法串（与 [`fuzzy_spellings`] 同口径）。
+    ///
+    /// 供「模糊音提示」判定用户敲的段是不是这个音节的模糊拼写；[`Self::fuzzy_variants`]
+    /// 对合法音节会滤掉非法产物，`din` 这类真实误打因此判不出来。
+    pub(crate) fn fuzzy_spelling_variants(input: &str, config: &FuzzyConfig) -> Vec<String> {
+        let (initial, final_) = split_initial_final(input);
+        let initials = part_options(initial, INITIAL_GROUPS, config);
+        let finals = part_options(final_, FINAL_GROUPS, config);
+        let mut out = Vec::new();
+        for (i, init) in initials.iter().enumerate() {
+            for (j, fin) in finals.iter().enumerate() {
+                if i == 0 && j == 0 {
+                    continue;
+                }
+                let variant = format!("{init}{fin}");
+                if variant == input
+                    || (init.is_empty() && !VALID_SYLLABLES.contains(variant.as_str()))
+                {
+                    continue;
+                }
+                out.push(variant);
+            }
+        }
+        out
+    }
+
     /// [`Self::fuzzy_variants_scored`] 的丢弃计数版本。
     pub fn fuzzy_variants(input: &str, config: &FuzzyConfig) -> Vec<String> {
         Self::fuzzy_variants_scored(input, config)
