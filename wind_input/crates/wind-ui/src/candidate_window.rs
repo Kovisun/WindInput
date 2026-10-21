@@ -1501,22 +1501,53 @@ impl CandidateWindow {
     /// 与 host-render 路径共用单一渲染逻辑，确保几何完全一致。
     #[cfg(windows)]
     pub fn show(&mut self) {
-        match self.render_frame() {
+        // 分段计时：远程桌面下每帧上屏都要编码传输，需定位耗时与重复帧（像素与上帧相同）。
+        let was_visible = self.visible;
+        let t_start = Instant::now();
+        let frame = self.render_frame();
+        let t_render = t_start.elapsed();
+        match frame {
             None => {
                 self.hide();
             }
             Some(frame) => {
+                let len = (frame.width * frame.height * 4) as usize;
+                let same_pixels = was_visible
+                    && self.window.buffer().len() == len
+                    && self.window.buffer()[..] == frame.buf[..len];
                 self.window.resize(frame.width, frame.height);
                 {
                     let buf = self.window.buffer_mut();
-                    buf[..(frame.width * frame.height * 4) as usize].copy_from_slice(&frame.buf);
+                    buf[..len].copy_from_slice(&frame.buf);
                 }
+                let t_blit0 = Instant::now();
                 if let Err(e) = self.window.update() {
                     tracing::warn!("CandidateWindow update failed: {}", e);
                 }
+                let t_blit = t_blit0.elapsed();
                 // render_frame() 已设 visible=true；screen_x/y 为窗口左上（含阴影偏移）。
+                let t_pos0 = Instant::now();
                 self.window.show(frame.screen_x, frame.screen_y);
+                let t_pos = t_pos0.elapsed();
                 self.update_tooltip(frame.screen_x, frame.screen_y);
+                tracing::debug!(
+                    "render[{}x{} n={}] pos=({},{}) same={} rdp={}: render={:?} blit={:?} setpos={:?} | total={:?}",
+                    frame.width,
+                    frame.height,
+                    self.candidates.len(),
+                    frame.screen_x,
+                    frame.screen_y,
+                    same_pixels,
+                    unsafe {
+                        windows::Win32::UI::WindowsAndMessaging::GetSystemMetrics(
+                            windows::Win32::UI::WindowsAndMessaging::SM_REMOTESESSION,
+                        ) != 0
+                    },
+                    t_render,
+                    t_blit,
+                    t_pos,
+                    t_start.elapsed()
+                );
             }
         }
     }
