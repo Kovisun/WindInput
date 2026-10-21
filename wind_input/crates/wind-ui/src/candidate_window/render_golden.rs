@@ -99,6 +99,7 @@ fn role_text(text: &str, role: &'static str) -> StyledText {
 /// （§18），这些片段必须全部解析到正文色而被丢弃，候选窗部分才与分段着色之前逐字节相同（§6.4）。
 fn candidates() -> Vec<CandidateItem> {
     let c = |text: &str, comment: StyledText| CandidateItem {
+        text_styled: Default::default(),
         text: text.to_string(),
         code: String::new(),
         label: String::new(),
@@ -290,6 +291,7 @@ fn golden_covers_comments_and_tooltip() {
 /// 产物，守的是之后的回归）。
 fn above_candidates() -> Vec<CandidateItem> {
     let c = |text: &str, above: StyledText, comment: StyledText| CandidateItem {
+        text_styled: Default::default(),
         text: text.to_string(),
         code: String::new(),
         label: String::new(),

@@ -7476,6 +7476,17 @@ impl Coordinator {
         // 本页每个候选的气泡原文，右键菜单按段 / 按行复制、上屏时从这里取（见 handle_tooltip）。
         let mut tip_page: Vec<crate::handle_tooltip::TooltipPageEntry> =
             Vec::with_capacity(end.saturating_sub(start));
+        // 模糊音提示（「苹(ping)果」）：`first` 只标**最终界面顺序**里第一个带提示的候选——在排好序
+        // 的完整列表上找，与翻页 / 展开无关，第一个之后的永不带提示；`all` 每个都标。
+        let hint_only = match rt.config.schema.pinyin.fuzzy.hint_scope {
+            wind_config::FuzzyHintScope::All => None,
+            wind_config::FuzzyHintScope::First => Some(
+                state
+                    .candidates
+                    .iter()
+                    .position(|c| !c.meta.fuzzy_hints.is_empty()),
+            ),
+        };
         let items: Vec<CandidateItem> = state.candidates[start..end]
             .iter()
             .enumerate()
@@ -7531,17 +7542,31 @@ impl Coordinator {
                     );
                     (wind_ui_types::StyledText::new(), comment)
                 };
+                // 命令候选加前缀标注（截断后再加,保证前缀不被截掉）。
+                // 检索范围放宽补进来的候选同理加标注（`input.scope_relax.prefix`），让用户
+                // 一眼看出「这几条是超出当前检索范围补来的」，而非词库里本该有的常用字。
+                let prefix = if c.is_command && !cmd_prefix.is_empty() {
+                    cmd_prefix
+                } else if c.is_scope_filtered {
+                    scope_prefix
+                } else {
+                    ""
+                };
+                let text_styled = match hint_only {
+                    Some(first) if first != Some(start + i) => Default::default(),
+                    _ => self
+                        .cand_display_hints(state, c, &full)
+                        .map(|h| crate::fuzzy_hint_text::styled_for_shown(&full, &disp, prefix, &h))
+                        .unwrap_or_default(),
+                };
+                let text = if prefix.is_empty() {
+                    disp
+                } else {
+                    format!("{prefix}{disp}")
+                };
                 CandidateItem {
-                    // 命令候选加前缀标注（截断后再加,保证前缀不被截掉）。
-                    // 检索范围放宽补进来的候选同理加标注（`input.scope_relax.prefix`），让用户
-                    // 一眼看出「这几条是超出当前检索范围补来的」，而非词库里本该有的常用字。
-                    text: if c.is_command && !cmd_prefix.is_empty() {
-                        format!("{cmd_prefix}{disp}")
-                    } else if c.is_scope_filtered && !scope_prefix.is_empty() {
-                        format!("{scope_prefix}{disp}")
-                    } else {
-                        disp
-                    },
+                    text,
+                    text_styled,
                     code: c.code.clone(),
                     label: if alpha {
                         ((b'a' + i as u8) as char).to_string()
@@ -11209,7 +11234,7 @@ mod mode_comment_e2e_tests {
         let vars: Vec<&str> = wind_ui_types::TEXT_ROLES
             .iter()
             .copied()
-            .filter(|r| !matches!(*r, "title" | "literal" | "separator"))
+            .filter(|r| !wind_ui_types::STRUCTURAL_ROLES.contains(r))
             .collect();
         let whole: String = vars
             .iter()

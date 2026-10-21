@@ -134,7 +134,7 @@ fn spec_notes(spec: &str) -> Vec<String> {
 
 /// 求值入口认得的变量：契约清单里的变量 + 兼容别名。
 fn is_known(name: &str) -> bool {
-    !matches!(name, "title" | "literal" | "separator")
+    !wind_ui_types::STRUCTURAL_ROLES.contains(&name)
         && wind_ui_types::TEXT_ROLES.contains(&role_of(name))
 }
 
@@ -584,7 +584,7 @@ mod tests {
     #[test]
     fn every_listed_role_has_a_sample_value() {
         for r in wind_ui_types::TEXT_ROLES {
-            if matches!(*r, "title" | "literal" | "separator") {
+            if wind_ui_types::STRUCTURAL_ROLES.contains(r) {
                 continue;
             }
             assert!(sample_value(r, None, Some('你')).is_some(), "{r}");

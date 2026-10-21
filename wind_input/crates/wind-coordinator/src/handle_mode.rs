@@ -1069,6 +1069,32 @@ impl Coordinator {
         }
     }
 
+    /// 候选的模糊音提示换算到显示文字 `display`（[`Self::cand_display_text`] 的结果）上；
+    /// 没有提示、或显示文字与引擎文字字数对不上（简繁转换改了字数）⇒ `None`。
+    ///
+    /// 逆切分次选只显示后段时，字数要与引擎的后段（`display_text`）相同才按后段扣前段——
+    /// [`crate::fuzzy_hint_text::remap_hints`] 单凭字数分不清这两种情形，在这里先判掉。
+    pub(crate) fn cand_display_hints(
+        &self,
+        state: &State,
+        c: &Candidate,
+        display: &str,
+    ) -> Option<Vec<wind_candidate::FuzzyHint>> {
+        if c.meta.fuzzy_hints.is_empty() {
+            return None;
+        }
+        let engine_shown = if Self::split_back_only(state, c) {
+            &c.display_text
+        } else {
+            &c.text
+        };
+        if display.chars().count() != engine_shown.chars().count() {
+            return None;
+        }
+        crate::fuzzy_hint_text::remap_hints(&c.text, display, &c.meta.fuzzy_hints)
+            .filter(|h| !h.is_empty())
+    }
+
     /// 逆切分次选的 `(被隐藏的前段, 所见的后段)`；不是只显示后段的候选 ⇒ `("", text)`。
     /// 内部文本域（未做简繁），供以词定字按所见取字。`c` 须借自 `state.candidates`。
     pub(crate) fn split_front_and_shown(&self, state: &State, c: &Candidate) -> (String, String) {

@@ -5169,6 +5169,7 @@ mod pixel_release_tests {
         let items = ["一", "二", "三"]
             .iter()
             .map(|t| CandidateItem {
+                text_styled: Default::default(),
                 text: t.to_string(),
                 code: String::new(),
                 label: String::new(),
@@ -5223,6 +5224,7 @@ mod grid_tests {
 
     fn cand(text: &str) -> CandidateItem {
         CandidateItem {
+            text_styled: Default::default(),
             text: text.to_string(),
             code: String::new(),
             label: String::new(),
@@ -5258,6 +5260,7 @@ mod grid_tests {
             .iter()
             .enumerate()
             .map(|(i, t)| CandidateItem {
+                text_styled: Default::default(),
                 label: (i % cols as usize + 1).to_string(),
                 ..cand(t)
             })
@@ -5474,6 +5477,7 @@ mod min_size_tests {
 
     fn cand_c(text: &str, comment: &str) -> CandidateItem {
         CandidateItem {
+            text_styled: Default::default(),
             text: text.to_string(),
             code: String::new(),
             label: String::new(),
@@ -6061,6 +6065,7 @@ mod pager_inline_tests {
 
     fn cand(text: &str) -> CandidateItem {
         CandidateItem {
+            text_styled: Default::default(),
             text: text.to_string(),
             code: String::new(),
             label: String::new(),
@@ -6601,6 +6606,7 @@ mod width_budget_tests {
 
     fn cand(text: &str) -> CandidateItem {
         CandidateItem {
+            text_styled: Default::default(),
             text: text.to_string(),
             code: String::new(),
             label: String::new(),
@@ -7071,6 +7077,7 @@ mod vertical_comment_budget_tests {
 
     fn cand(text: &str, comment: &str) -> CandidateItem {
         CandidateItem {
+            text_styled: Default::default(),
             text: text.to_string(),
             code: String::new(),
             label: String::new(),
@@ -7197,6 +7204,7 @@ mod schema_font_tests {
 
     fn cand(text: &str) -> CandidateItem {
         CandidateItem {
+            text_styled: Default::default(),
             text: text.to_string(),
             code: String::new(),
             label: String::new(),
@@ -7953,6 +7961,7 @@ mod font_precedence_tests {
         let items = ["候选", "词"]
             .iter()
             .map(|t| CandidateItem {
+                text_styled: Default::default(),
                 text: t.to_string(),
                 code: String::new(),
                 label: String::new(),
@@ -8420,6 +8429,7 @@ mod tip_hold_tests {
         let (tx, rx) = channel();
         let mut w = CandidateWindow::new(CandidateWindowConfig::default(), tx).unwrap();
         let item = |t: &str| CandidateItem {
+            text_styled: Default::default(),
             text: t.into(),
             code: String::new(),
             label: String::new(),
@@ -8869,6 +8879,7 @@ mod comment_color_tests {
 
     fn cand(c: StyledText) -> CandidateItem {
         CandidateItem {
+            text_styled: Default::default(),
             text: "你".into(),
             code: String::new(),
             label: String::new(),
@@ -9053,6 +9064,7 @@ mod comment_above_tests {
 
     fn cand_above(text: &str, above: &str, comment: &str) -> CandidateItem {
         CandidateItem {
+            text_styled: Default::default(),
             text: text.to_string(),
             code: String::new(),
             label: String::new(),
