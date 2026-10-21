@@ -1108,6 +1108,28 @@ impl MobileCore {
         })
     }
 
+    // ── 系统词库统计（设置页「词库 → 词库统计」）────────────────────────
+    //
+    // 本体与桌面 `dict.systemStats` 同一份（`wind_coordinator::dict_stats_api`）：选库、混输按
+    // 成员并排、结果缓存、用户词 / 临时词计数都不在本层重写。
+
+    /// 统计方案的系统词库，回包为 JSON 文本（形态同桌面 `dict.systemStats`：码表 / 拼音 /
+    /// 英文方案一份，混输方案 `members` 并排各成员）。`top_n` 为重码 Top 列表条数（上限
+    /// [`wind_coordinator::dict_stats_api::TOP_N_MAX`]），`refresh` 绕过缓存重算。
+    ///
+    /// ⚠️ O(全表)：拼音大词库一遍几十 MB 峰值、百毫秒级以上，宿主须在后台线程调用。
+    /// 未知方案 / 混输未配成员 → Err(原因)。
+    pub fn dict_stats(&self, schema_id: &str, top_n: u32, refresh: bool) -> Result<String, String> {
+        wind_coordinator::dict_stats_api::system_stats(
+            &*self.coord,
+            schema_id,
+            top_n as usize,
+            refresh,
+        )
+        .map(|v| v.to_string())
+        .map_err(|e| e.to_string())
+    }
+
     // ── 方案附加词库（设置页「方案 → 拼音」等）────────────────────────
     //
     // 本体与桌面 `schema.setDictEnabled` 同一份（`wind_coordinator::schema_dicts_api`）：
@@ -1753,6 +1775,31 @@ mod schema_dicts_tests {
                 .is_err()
         );
         assert!(m.schema_dicts("nope").is_empty(), "未知方案列空、不 panic");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 词库统计门面：回包是桌面 `dict.systemStats` 同形态的 JSON，第二次命中缓存；
+    /// 未知方案带原因报错。统计口径在 wind-engine / wind-webdata 的用例里验。
+    #[test]
+    fn dict_stats_returns_json_and_caches() {
+        if !data_dir().join("schemas/wubi86.schema.toml").exists() {
+            eprintln!("!!! 跳过：build_dev 词库不存在");
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("wind_mobile_ds_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let m = core_at(&root);
+        let first = m.dict_stats("wubi86", 5, false).unwrap();
+        assert!(first.contains(r#""schemaId":"wubi86""#), "{first}");
+        assert!(first.contains(r#""engineType":"codetable""#), "{first}");
+        assert!(first.contains(r#""total":{"#), "{first}");
+        let again = m.dict_stats("wubi86", 5, false).unwrap();
+        assert!(again.contains(r#""cached":true"#), "第二次走缓存: {again}");
+        let fresh = m.dict_stats("wubi86", 5, true).unwrap();
+        assert!(fresh.contains(r#""cached":false"#), "refresh 绕过缓存");
+        let err = m.dict_stats("no_such_schema", 5, false).unwrap_err();
+        assert!(err.contains("no_such_schema"), "原因要点名: {err}");
         let _ = std::fs::remove_dir_all(&root);
     }
 
