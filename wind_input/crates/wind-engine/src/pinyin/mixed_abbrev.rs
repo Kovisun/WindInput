@@ -150,7 +150,7 @@ impl MixedPattern {
     /// 真机现场：`senrikl` 想要「生日快乐」。声母投影键两边都是 `srkl`，
     /// `search_abbrev` 已经把 `shengrikuaile` 召回来了，却在这里被
     /// `"sen" == "sheng"` 判否丢弃 —— 模糊音在召回侧生效、在校验侧不生效，
-    /// 于是整条路白走。判据的方向必须与 `lookup_with_fuzzy::expand_code` 一致：
+    /// 于是整条路白走。判据的方向必须与 `PinyinEngine::fuzzy_codes` 一致：
     /// 对**用户输入段**做扩展，去匹配**词典音节**。
     pub fn matches_with<S: AsRef<str>>(
         &self,
