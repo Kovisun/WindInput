@@ -6623,8 +6623,11 @@ impl EngineManager {
                 phrase_seg_anywhere,
                 lookup_disabled_dicts,
                 Some(MixedRole::Primary {
-                    // 取**混输方案自己**声明的值，不继承 primary_schema 的（见 MixedRole::Primary）。
-                    sentence_input: schema.engine.codetable.sentence_input,
+                    // 取**混输方案自己**声明的值，不继承 primary_schema 的（见 MixedRole::Primary）；
+                    // 且只在整句**真能触发**（没配拼音子引擎）时才传真——整句开着会让满码上屏 /
+                    // 满码空码清空 / 顶码让位，一个不触发的整句不该白白关掉它们。
+                    sentence_input: schema.engine.codetable.sentence_input
+                        && m.secondary_schema.is_empty(),
                 }),
                 english_provider,
             )?;
@@ -6634,7 +6637,8 @@ impl EngineManager {
             if schema.engine.codetable.sentence_input && !m.secondary_schema.is_empty() {
                 warn!(
                     "混输方案 {} 声明了 [engine.codetable] sentence_input，但它配有拼音子引擎 \
-                     {}：超码长输入由拼音接管，码表整句不会触发。混输下的整句尚未接线。",
+                     {}：超码长输入由拼音接管，码表整句不会触发，已忽略（顶码 / 满码上屏 / \
+                     满码空码清空照常生效）。混输下的整句尚未接线。",
                     schema_id, m.secondary_schema
                 );
             }

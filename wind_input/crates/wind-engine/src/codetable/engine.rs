@@ -277,6 +277,20 @@ impl CodeTableEngine {
         let sentence = opts
             .sentence_input
             .then(|| super::sentence::CodeSentenceDecoder::new(max_code_length));
+        // ★ 整句开启时满码上屏与满码空码清空**就地让位**（同顶码，判据看功能开没开）：
+        // 两者都在第 4 码截断正在组的句子——唯一全码当场上屏、空码当场清空，而那 4 码
+        // 很可能只是句子的前几个编码单元。在这里关掉，`convert` / `should_auto_commit` /
+        // `recheck_auto_commit` 与清空资格（协调器只在引擎给了 `should_clear` 时才裁决）
+        // 一处覆盖。见设计文档 §7.2。
+        if opts.sentence_input && (opts.auto_commit_at_full || opts.clear_on_empty_max) {
+            tracing::info!(
+                auto_commit_at_full = opts.auto_commit_at_full,
+                clear_on_empty_max = opts.clear_on_empty_max,
+                "[engine.codetable] sentence_input 开启：满码上屏与满码空码清空不生效"
+            );
+            opts.auto_commit_at_full = false;
+            opts.clear_on_empty_max = false;
+        }
         // 前段恒 2 码（`SPLIT_FRONT_LEN`），后段至少 1 码 ⇒ 满码长至少 3 才切得动。
         // **就地关掉并告警**，而不是每次按键静默什么都不做：配置者只会观察到「开了没反应」，
         // 拿不到任何线索。
@@ -668,9 +682,13 @@ fn decide_auto_commit(
     // `hhnu` 下常用「X」+生僻「愳」判不唯一不上屏，滤掉「愳」后复评才放行）。放宽把它们补回
     // 列表却不在此排除，会让一批原本满码即上屏的字退化成要多按一次空格——**而且是静默退化**，
     // 用户只觉得「上屏时灵时不灵」。排除后，自动上屏口径在自动补充/手动放宽下均与放宽前一致。
+    //
+    // ⚠️ **也排除整句候选**（`is_sentence`）：它的 `code` 是整串，超码长时又常是唯一一条
+    // `code == input`、且超码长串没有更长后继 ⇒ 不排除的话，开了满码上屏后每多打一码
+    // 整句就把自己上屏了（`trntw` → 「我人」），句子永远组不起来（论坛 t350）。
     let mut exact = candidates
         .iter()
-        .filter(|c| c.code == input && !c.is_scope_filtered);
+        .filter(|c| c.code == input && !c.is_scope_filtered && !c.is_sentence);
     let first = exact.next()?;
     if exact.next().is_some() {
         return None; // 多个精确匹配，不自动上屏
@@ -1836,6 +1854,50 @@ mod tests {
         let first = r.candidates.first().expect("应有候选");
         assert_eq!(first.text, "工作工作");
         assert!(first.is_sentence, "整句候选须带 is_sentence 供顶部锚定");
+    }
+
+    #[test]
+    fn sentence_candidate_never_auto_commits() {
+        // 整句候选是超码长串上唯一一条 `code == input`，满码上屏不得把它当唯一全码上屏。
+        let opts = CommitOptions {
+            auto_commit_at_full: true,
+            ..sentence_opts()
+        };
+        let r = sentence_engine(&[], opts).convert("aawtaawt", 50).unwrap();
+        assert!(r.candidates[0].is_sentence, "前提：应解出整句");
+        assert!(!r.should_commit, "整句候选不得触发满码上屏");
+    }
+
+    #[test]
+    fn sentence_input_disables_full_auto_commit_and_clear() {
+        // 两向对照：同一配置只差 `sentence_input`。`aawt` 唯一全码、`zzzz` 空码。
+        let with = |sentence_input| CommitOptions {
+            auto_commit_at_full: true,
+            clear_on_empty_max: true,
+            sentence_input,
+            ..Default::default()
+        };
+        let off = sentence_engine(&[], with(false));
+        assert!(
+            off.convert("aawt", 50).unwrap().should_commit,
+            "前提：关整句时唯一全码上屏"
+        );
+        assert!(
+            off.convert("zzzz", 50).unwrap().should_clear,
+            "前提：关整句时空码清空"
+        );
+        let cands = off.convert("aawt", 50).unwrap().candidates;
+        assert!(off.should_auto_commit("aawt", &cands).is_some());
+
+        let on = sentence_engine(&[], with(true));
+        let r = on.convert("aawt", 50).unwrap();
+        assert!(!r.should_commit, "开整句时满码上屏让位");
+        assert!(on.should_auto_commit("aawt", &r.candidates).is_none());
+        assert!(on.recheck_auto_commit("aawt", &r.candidates).is_none());
+        assert!(
+            !on.convert("zzzz", 50).unwrap().should_clear,
+            "开整句时空码清空让位"
+        );
     }
 
     #[test]
