@@ -1381,6 +1381,7 @@ impl Coordinator {
         // ★ 分段续转排在通配之前（spec §10）：续转态的剩余串是拼音后半截。
         // `wildcard_pattern_of` 在续转态本就给 `None`，这里的先后是第二道保险。
         let t_convert = std::time::Instant::now();
+        let faults0 = crate::process_memory::page_faults();
         let result = match pinyin_schema {
             Some(ps) if self.engine_mgr.ensure_schema(&ps) => {
                 self.engine_mgr
@@ -1395,8 +1396,15 @@ impl Coordinator {
             },
         };
         let t_convert = t_convert.elapsed();
-        if t_convert >= SLOW_STAGE {
-            debug!("convert 慢: {:?} buf='{}'", t_convert, state.input_buffer);
+        let faults = faults0
+            .zip(crate::process_memory::page_faults())
+            .map(|(a, b)| b.saturating_sub(a));
+        // 缺页多但不慢的也记：用来区分软缺页（内存里换个映射）和真去读盘的硬缺页。
+        if t_convert >= SLOW_STAGE || faults.is_some_and(|n| n >= 100) {
+            debug!(
+                "convert 慢或缺页多: {:?} faults={:?} buf='{}'",
+                t_convert, faults, state.input_buffer
+            );
         }
         // 拼音音节拆分形态（供「混输高亮跟随」按高亮候选类型选择显示原始码 / 拆分串）。
         // 码表 / 无拼音 → 空串（恒原始码）。state.preedit 本身由 sync_preedit_to_highlight
