@@ -250,7 +250,7 @@ pub fn fuzzy_hint_color(
     {
         return match (normal, state_bg) {
             (Some(c), Some(bg))
-                if crate::palette::contrast_ratio(c, bg) >= FUZZY_HINT_MIN_CONTRAST =>
+                if crate::palette::meets_contrast(c, bg, FUZZY_HINT_MIN_CONTRAST) =>
             {
                 c
             }
