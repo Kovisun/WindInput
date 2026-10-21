@@ -246,10 +246,10 @@ pub fn apply_enabled_schemas(cfg: &mut Config) {
         return;
     }
     let list = enabled_schemas();
-    if !list.contains(&cfg.schema.active) {
-        if let Some(first) = list.iter().find(|s| *s != ENGLISH_SCHEMA) {
-            cfg.schema.active = first.clone();
-        }
+    if !list.contains(&cfg.schema.active)
+        && let Some(first) = list.iter().find(|s| *s != ENGLISH_SCHEMA)
+    {
+        cfg.schema.active = first.clone();
     }
     cfg.schema.available = list;
 }
