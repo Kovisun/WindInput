@@ -14,8 +14,13 @@
 //! ## 只填 0 权重的条目，值域压在 [`RANK_WEIGHT_MAX`] 以下
 //!
 //! - 写了权重的条目（扩展库的 `iPhone 999`、`shell 2 / she'll 1` 这类消歧对）一律不动；
-//! - 名次权重上限 799，低于英文临时词的初始权重（协调器 `LEARN_ADD_WEIGHT` = 800）与手工
-//!   加词的 1200：用户词、临时词与系统词的先后和加名次之前一样（之前系统词全是 0）；
+//! - 名次权重上限 799，低于英文临时词的初始权重（协调器 `LEARN_ADD_WEIGHT` = 800）、晋升权重
+//!   1000 与手工加词的 1200（协调器里有编译期断言）；用户层另按 `RANK_WEIGHT_MAX + 1` 托底
+//!   （`StoreUserLayer::with_min_weight`），导入的 0 权重用户词与同码系统词相比也在前（前缀补全档
+//!   另有层级键：用户词补全本就排在系统补全之后，与权重无关）。用户词、临时词
+//!   与系统词的先后因此和加名次之前一样（之前系统词全是 0）；
+//! - 扩展库里写了**小权重**的条目（`macOS` 各版本名、`ID` / `I'd` 这类消歧对，权重个位数）
+//!   原先压在全部 0 权重词之上，现在排到有名次的常用词之后，彼此先后不变。上游数据不改；
 //! - 查不到名次的词保持 0，排在所有有名次的词之后，彼此仍按文件顺序。
 
 use std::collections::HashMap;
@@ -53,8 +58,11 @@ impl FreqRanks {
             if w.is_empty() || w.starts_with('#') {
                 continue;
             }
-            rank += 1;
-            ranks.entry(w.to_lowercase()).or_insert(rank);
+            // 重复的词不占名次：名次连续，末名才等于表长，映射的分母与之一致。
+            if let std::collections::hash_map::Entry::Vacant(e) = ranks.entry(w.to_lowercase()) {
+                rank += 1;
+                e.insert(rank);
+            }
         }
         Self { ranks }
     }
@@ -91,6 +99,16 @@ mod tests {
         assert!(r.weight_of("of") > r.weight_of("and"));
         assert_eq!(r.weight_of("THE"), r.weight_of("the"), "大小写不敏感");
         assert_eq!(r.weight_of("missing"), None);
+    }
+
+    /// 重复词不消耗名次：有重复与没重复的两份表，同一个词拿到的权重相同，末名仍大于 0。
+    #[test]
+    fn duplicates_do_not_consume_ranks() {
+        let dup = FreqRanks::parse("a\nb\nA\nB\nc\n");
+        let plain = FreqRanks::parse("a\nb\nc\n");
+        for w in ["a", "b", "c"] {
+            assert_eq!(dup.weight_of(w), plain.weight_of(w), "{w}");
+        }
     }
 
     #[test]

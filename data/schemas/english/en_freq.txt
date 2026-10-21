@@ -12,14 +12,22 @@
 #   出厂英文主库 en.dict.yaml（rime-ice / rime-frost）的词表即取自同一份 20k.txt，
 #   只是上游没有保留名次。
 #
-# 加工：原样保留行序，只删去下列成人 / 粗俗词——网页语料里它们的名次偏高，赋了权会在
-# 前缀补全里压过常用词。删去后它们与没有名次的词一样排在最后（与加工前的表现相同）：
-#   porn porno pornography pornstar sexy nude nudes nudity naked fuck fucked fucking shit
-#   bitch bitches dick cock cocks pussy ass anal tits boob boobs erotic erotica whore slut
-#   sluts cum cumshot hardcore fetish orgy escorts hentai incest rape cialis viagra xxx milf
-#   bdsm horny dildo dildos blowjob blowjobs bukkake gangbang threesome masturbation
-#   masturbating handjob shemale tranny transexual cunt upskirt voyeur busty babes hottie
-#   lingerie panties thong swinger swingers stripper strippers
+# 加工：原样保留行序，只删去下列成人 / 粗俗词（按词干逐一查过复数、-ing 等变形与拼写变体）
+# ——网页语料里它们的名次偏高，赋了权会在前缀补全里压过常用词。删去后它们与没有名次的词一样
+# 排在最后（与加工前的表现相同）：
+#   porn porno pornstar pornstars pornography sexy sexo sexe sexcam livesex worldsex
+#   telefonsex animalsex xxx xxxx xnxx nude nudes nudity nudist nudists naked erotic erotica
+#   orgy orgasm orgasms escorts hentai incest rape raped milf milfs milfhunter milfseeker
+#   bdsm horny dildo dildos blowjob blowjobs bukkake gangbang threesome threesomes
+#   masturbating masturbation handjob handjobs shemale shemales tranny transexual
+#   transexuals transexuales transsexual cum cumshot cumshots cumfiesta upskirt upskirts
+#   voyeur voyeurweb busty babe babes hottie lingerie panties panty pantie pantyhose thong
+#   thongs swinger swingers stripper strippers beastiality bestiality zoophilia bondage
+#   spanking spank ejaculation nipple nipples clit squirting fisting lolita lolitas
+#   spermshack cameltoe tits titten tittens boob boobs pussy fetish whore whores slut sluts
+#   hardcore lesbo lesbos lesbianas kinky hooker cialis viagra anal fuck fucked fucks fuckin
+#   fuckers fucking shit bullshit bitch bitches dick dicks cock cocks cunt ass bastard piss
+#   pissing pissed
 #
 # 上游许可（LICENSE.md 原文）：
 #   Data files are derived from the *Google Web Trillion Word Corpus*, as described by [Thorsten Brants and Alex Franz](http://googleresearch.blogspot.com/2006/08/all-our-n-gram-are-belong-to-you.html), and distributed by the [Linguistic Data Consortium](http://www.ldc.upenn.edu/Catalog/CatalogEntry.jsp?catalogId=LDC2006T13). Subsets of this corpus distributed by [Peter Novig](http://norvig.com/ngrams/). Corpus editing and cleanup by Josh Kaufman.
@@ -2127,7 +2135,6 @@ louis
 steps
 errors
 shops
-bondage
 del
 efforts
 informed
@@ -2998,7 +3005,6 @@ runs
 trends
 yeah
 discover
-sexo
 ap
 patterns
 boxes
@@ -3376,7 +3382,6 @@ inventory
 converter
 suck
 organisation
-babe
 checks
 reached
 becoming
@@ -3820,7 +3825,6 @@ investments
 latina
 nasa
 wheels
-sexcam
 specify
 accessibility
 dutch
@@ -3845,7 +3849,6 @@ pulse
 universities
 technique
 contractors
-milfhunter
 voting
 courts
 notices
@@ -3881,7 +3884,6 @@ arrangements
 smooth
 conferences
 uniprotkb
-beastiality
 strike
 consumption
 birmingham
@@ -3920,7 +3922,6 @@ exam
 logos
 residence
 attorneys
-milfs
 antiques
 density
 hundred
@@ -4139,7 +4140,6 @@ giant
 achieved
 injuries
 shipped
-bestiality
 seats
 approaches
 biz
@@ -4177,7 +4177,6 @@ dangerous
 garage
 exciting
 reliability
-thongs
 gcc
 unfortunately
 respectively
@@ -4883,7 +4882,6 @@ balls
 afghanistan
 dd
 boost
-spanking
 scholarship
 governance
 mill
@@ -4921,7 +4919,6 @@ crm
 rf
 conversation
 decrease
-cumshots
 chest
 pension
 billy
@@ -5127,7 +5124,6 @@ chapters
 pee
 charlie
 quebec
-nipples
 passenger
 convenient
 dennis
@@ -5392,7 +5388,6 @@ fails
 aging
 nike
 intervention
-pissing
 fed
 plugin
 attraction
@@ -5420,7 +5415,6 @@ intro
 mercedes
 zus
 assurance
-fisting
 clerk
 happening
 vast
@@ -5663,7 +5657,6 @@ rr
 dispute
 portuguese
 tired
-titten
 adverse
 everywhere
 excerpt
@@ -5952,7 +5945,6 @@ alien
 locator
 selecting
 processors
-pantyhose
 plc
 broke
 nepal
@@ -6243,7 +6235,6 @@ vb
 damaged
 cams
 receptor
-piss
 laugh
 joel
 surgical
@@ -6345,7 +6336,6 @@ prescribed
 catherine
 timely
 talked
-upskirts
 debug
 delayed
 chuck
@@ -6418,7 +6408,6 @@ mason
 diagram
 burns
 pumps
-ejaculation
 footwear
 sg
 vic
@@ -6516,7 +6505,6 @@ scored
 enhancement
 newcastle
 clone
-dicks
 velocity
 lambda
 relay
@@ -6677,7 +6665,6 @@ compressed
 bahamas
 powell
 mixture
-zoophilia
 bench
 univ
 tub
@@ -6976,7 +6963,6 @@ alleged
 limitation
 widescreen
 compile
-squirting
 webster
 struck
 rx
@@ -7129,7 +7115,6 @@ assumption
 jerusalem
 hobby
 tries
-transexuales
 invention
 nickname
 fiji
@@ -7200,7 +7185,6 @@ ons
 geek
 uncle
 defining
-xnxx
 counting
 reflection
 sink
@@ -7280,7 +7264,6 @@ tgp
 hazard
 retro
 leo
-livesex
 statewide
 semiconductor
 gregory
@@ -7306,7 +7289,6 @@ olympics
 fruits
 identifier
 geo
-worldsex
 ribbon
 calculations
 doe
@@ -7536,7 +7518,6 @@ leonard
 lending
 oops
 reminder
-nipple
 xi
 searched
 behavioral
@@ -8098,7 +8079,6 @@ queens
 academics
 pubs
 quantitative
-shemales
 lucas
 screensavers
 subdivision
@@ -8145,7 +8125,6 @@ readily
 affiliation
 soc
 fence
-nudist
 infinite
 diana
 ensures
@@ -8188,7 +8167,6 @@ failing
 shortcuts
 ka
 retained
-voyeurweb
 pamela
 andrews
 marble
@@ -8523,7 +8501,6 @@ panic
 explicitly
 sticks
 leone
-transsexual
 ez
 citizenship
 excuse
@@ -8751,7 +8728,6 @@ remedies
 validity
 trustee
 maui
-handjobs
 weighted
 angola
 squirt
@@ -9099,7 +9075,6 @@ mpg
 retrieval
 qualities
 cindy
-lolita
 fathers
 carb
 charging
@@ -9472,7 +9447,6 @@ confidentiality
 electoral
 changelog
 welding
-orgasm
 deferred
 alternatively
 heel
@@ -9525,7 +9499,6 @@ deutschland
 picnic
 souls
 arrivals
-spank
 cw
 practitioner
 motivated
@@ -10064,7 +10037,6 @@ vet
 sided
 claiming
 psychiatric
-tittens
 teenagers
 courtyard
 presidents
@@ -11292,7 +11264,6 @@ registering
 seth
 warn
 conservatives
-clit
 bonnie
 laying
 cops
@@ -11376,7 +11347,6 @@ pursuing
 newswire
 aston
 hf
-spermshack
 mugs
 brokerage
 washed
@@ -11632,7 +11602,6 @@ uncertain
 fgets
 citrus
 paramount
-cameltoe
 upright
 breakfasts
 inspectors
@@ -11798,7 +11767,6 @@ assay
 jacuzzi
 reconciliation
 pots
-lesbianas
 recognizing
 parser
 leigh
@@ -12206,7 +12174,6 @@ ornaments
 oppose
 sata
 terrific
-xxxx
 megan
 allergies
 definite
@@ -12386,7 +12353,6 @@ disappear
 lever
 redundant
 regency
-milfseeker
 tasty
 sbc
 midland
@@ -12427,7 +12393,6 @@ thr
 examiner
 vineyard
 meadow
-panty
 feeder
 mercer
 roms
@@ -12592,7 +12557,6 @@ pricetool
 circa
 revise
 contributes
-threesomes
 surroundings
 proficiency
 quinn
@@ -13139,7 +13103,6 @@ boca
 exodus
 compartment
 gemini
-kinky
 brittany
 dove
 testified
@@ -13287,7 +13250,6 @@ hummer
 reciprocal
 accelerate
 hatred
-telefonsex
 questioning
 putative
 manifest
@@ -13646,7 +13608,6 @@ monogram
 philippe
 enhances
 aix
-fucks
 relational
 ornament
 graffiti
@@ -14831,7 +14792,6 @@ shelley
 batting
 borrowed
 heh
-transexuals
 rests
 toss
 prentice
@@ -14955,7 +14915,6 @@ chatham
 roadmap
 ogg
 becky
-lesbo
 farrell
 elders
 interpreters
@@ -15037,7 +14996,6 @@ recycle
 shave
 sos
 lsu
-sexe
 disruption
 galway
 colt
@@ -15301,7 +15259,6 @@ reeves
 songwriter
 suspicion
 disadvantage
-bastard
 shania
 coaster
 spends
@@ -16067,7 +16024,6 @@ obituary
 multinational
 painters
 thistle
-pornstars
 tem
 sleepy
 nope
@@ -16240,7 +16196,6 @@ traverse
 vengeance
 organisers
 dolly
-pissed
 garrison
 nite
 sal
@@ -16292,7 +16247,6 @@ owed
 ethan
 cao
 ladyboys
-orgasms
 plantronics
 ftd
 kissed
@@ -16629,7 +16583,6 @@ gigantic
 abdul
 sheldon
 ryder
-animalsex
 mayhem
 washers
 grep
@@ -16755,7 +16708,6 @@ utilizes
 confession
 deprived
 benedict
-lesbos
 vodka
 molding
 zaire
@@ -17286,7 +17238,6 @@ indictment
 apology
 wmd
 pms
-raped
 collars
 configurable
 andover
@@ -17519,7 +17470,6 @@ vols
 revolving
 ssk
 bundled
-pantie
 bombers
 covert
 crater
@@ -18020,7 +17970,6 @@ punta
 flavour
 smes
 ionamin
-fuckin
 crypt
 charlottesville
 accomplishment
@@ -18068,7 +18017,6 @@ nel
 extremes
 puff
 underlined
-whores
 galileo
 bloomfield
 obsessed
@@ -18292,7 +18240,6 @@ raspberry
 cancellations
 paging
 coe
-nudists
 illusions
 fac
 spikes
@@ -18313,7 +18260,6 @@ siam
 latent
 marcia
 drowning
-bullshit
 casper
 spun
 shalt
@@ -18338,7 +18284,6 @@ curricular
 downtime
 takeover
 wicker
-lolitas
 balm
 thessalonians
 figs
@@ -18820,7 +18765,6 @@ torso
 occult
 expeditions
 nok
-hooker
 ramon
 longhorn
 lorenzo
@@ -18947,7 +18891,6 @@ intangible
 westfield
 compassionate
 catastrophic
-fuckers
 blower
 substitutes
 tata
@@ -19336,7 +19279,6 @@ piazza
 fre
 denoted
 nazis
-cumfiesta
 oneself
 royalties
 newbies

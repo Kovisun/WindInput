@@ -32,7 +32,7 @@ use wind_ipc::protocol::{EVENT_KEY_DOWN, MOD_SHIFT};
 use wind_store::Store;
 
 /// 观测词取一个**没有词频名次**的词库词：英文候选按词频名次排序后，有名次的常用词
-/// （如反馈里的 `tranquil`）已在 `t` 的 300 条池内，测不出「池外召回」。无名次的词排在
+/// （如反馈里的 `translation`）已在 `t` 的 300 条池内，测不出「池外召回」。无名次的词排在
 /// 所有有名次的词之后（`t` 下有名次的有八百多条），必在池外。
 const WORD: &str = "tranquil";
 const VK_ESCAPE: u32 = 0x1B;

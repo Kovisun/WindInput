@@ -6657,10 +6657,12 @@ impl EngineManager {
             //
             // 注册顺序 User → Temp → System 与码表分支一致（用户词在前）。
             if let Some(store) = &store {
-                dm.register_layer(Box::new(wind_store::StoreUserLayer::new(
-                    store.clone(),
-                    schema_id,
-                )));
+                // 用户词托底到名次权重之上：系统词按词频名次赋了权，权重为 0（导入的词表
+                // 没有权重列）或手填小值的用户词不托底就会沉到常用系统词之后。
+                dm.register_layer(Box::new(
+                    wind_store::StoreUserLayer::new(store.clone(), schema_id)
+                        .with_min_weight(wind_dict::freq_rank::RANK_WEIGHT_MAX + 1),
+                ));
                 dm.register_layer(Box::new(wind_store::StoreTempLayer::new(
                     store.clone(),
                     schema_id,
