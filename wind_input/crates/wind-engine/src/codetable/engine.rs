@@ -277,6 +277,20 @@ impl CodeTableEngine {
         let sentence = opts
             .sentence_input
             .then(|| super::sentence::CodeSentenceDecoder::new(max_code_length));
+        // ★ 整句开启时满码上屏与满码空码清空**就地让位**（同顶码，判据看功能开没开）：
+        // 两者都在第 4 码截断正在组的句子——唯一全码当场上屏、空码当场清空，而那 4 码
+        // 很可能只是句子的前几个编码单元。在这里关掉，`convert` / `should_auto_commit` /
+        // `recheck_auto_commit` 与清空资格（协调器只在引擎给了 `should_clear` 时才裁决）
+        // 一处覆盖。见设计文档 §7.2。
+        if opts.sentence_input && (opts.auto_commit_at_full || opts.clear_on_empty_max) {
+            tracing::info!(
+                auto_commit_at_full = opts.auto_commit_at_full,
+                clear_on_empty_max = opts.clear_on_empty_max,
+                "[engine.codetable] sentence_input 开启：满码上屏与满码空码清空不生效"
+            );
+            opts.auto_commit_at_full = false;
+            opts.clear_on_empty_max = false;
+        }
         // 前段恒 2 码（`SPLIT_FRONT_LEN`），后段至少 1 码 ⇒ 满码长至少 3 才切得动。
         // **就地关掉并告警**，而不是每次按键静默什么都不做：配置者只会观察到「开了没反应」，
         // 拿不到任何线索。
@@ -1829,6 +1843,38 @@ mod tests {
         let r = sentence_engine(&[], opts).convert("aawtaawt", 50).unwrap();
         assert!(r.candidates[0].is_sentence, "前提：应解出整句");
         assert!(!r.should_commit, "整句候选不得触发满码上屏");
+    }
+
+    #[test]
+    fn sentence_input_disables_full_auto_commit_and_clear() {
+        // 两向对照：同一配置只差 `sentence_input`。`aawt` 唯一全码、`zzzz` 空码。
+        let with = |sentence_input| CommitOptions {
+            auto_commit_at_full: true,
+            clear_on_empty_max: true,
+            sentence_input,
+            ..Default::default()
+        };
+        let off = sentence_engine(&[], with(false));
+        assert!(
+            off.convert("aawt", 50).unwrap().should_commit,
+            "前提：关整句时唯一全码上屏"
+        );
+        assert!(
+            off.convert("zzzz", 50).unwrap().should_clear,
+            "前提：关整句时空码清空"
+        );
+        let cands = off.convert("aawt", 50).unwrap().candidates;
+        assert!(off.should_auto_commit("aawt", &cands).is_some());
+
+        let on = sentence_engine(&[], with(true));
+        let r = on.convert("aawt", 50).unwrap();
+        assert!(!r.should_commit, "开整句时满码上屏让位");
+        assert!(on.should_auto_commit("aawt", &r.candidates).is_none());
+        assert!(on.recheck_auto_commit("aawt", &r.candidates).is_none());
+        assert!(
+            !on.convert("zzzz", 50).unwrap().should_clear,
+            "开整句时空码清空让位"
+        );
     }
 
     #[test]

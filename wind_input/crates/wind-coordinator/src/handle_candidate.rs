@@ -2039,6 +2039,11 @@ impl Coordinator {
         if !ct.auto_commit_at_full {
             return None;
         }
+        // 码表整句开启时满码上屏整体让位（引擎侧在 `CodeTableEngine::new` 关掉，短语这条
+        // 读的是配置、绕过了引擎，须在此同判）。
+        if self.engine_mgr.sentence_input_enabled() {
+            return None;
+        }
         // 无「满码」概念的引擎（拼音 / 双拼）**整体不参与**（论坛 t308）。
         //
         // 开关读的是 `schema.codetable`，拼音方案照样继承全局那一份；而下面的最短码长闸在码长
