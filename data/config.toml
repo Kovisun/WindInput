@@ -362,6 +362,8 @@ eng_ong = false
 hint = false
 # 提示范围：first = 只标第一个带提示的候选；all = 标全部。
 hint_scope = "first"
+# 提示带声调（「苹(píng)果」）；注释变量 ${fuzzy_pinyin} 同样跟随。
+hint_tone = false
 
 # 拼音调频（衰减参数；三个数值 0 = 用词频 store 的内置默认）。
 [schema.pinyin.frequency]

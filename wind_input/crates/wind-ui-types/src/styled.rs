@@ -27,6 +27,7 @@ pub const TEXT_ROLES: &[&str] = &[
     "code_rev_all",
     "shuangpin",
     "pinyin",
+    "fuzzy_pinyin",
     "chaizi",
     "chaizi_code",
     "chaizi_all",

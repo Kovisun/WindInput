@@ -174,18 +174,14 @@ impl Coordinator {
             Vec::new()
         } else {
             let rt = self.rt();
-            self.fuzzy_hint_texts(
-                &state,
-                rt.config.schema.pinyin.fuzzy.hint_scope,
-                offset,
-                end,
-                |c| {
-                    let full = self.cand_display_text(&state, c);
-                    self.cand_display_hints(&state, c, &full)
-                        .map(|h| crate::fuzzy_hint_text::hint_styled_text(&full, &h))
-                        .unwrap_or_default()
-                },
-            )
+            let reverse = self.reverse.read().unwrap_or_else(|e| e.into_inner());
+            let tone = rt.config.schema.pinyin.fuzzy.hint_tone.then_some(&*reverse);
+            self.fuzzy_hint_texts(&state, &rt.config.schema.pinyin.fuzzy, offset, end, |c| {
+                let full = self.cand_display_text(&state, c);
+                self.cand_display_hints(&state, c, &full, tone)
+                    .map(|h| crate::fuzzy_hint_text::hint_styled_text(&full, &h))
+                    .unwrap_or_default()
+            })
             .iter()
             .map(segments_of)
             .collect()

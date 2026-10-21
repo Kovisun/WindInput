@@ -338,6 +338,7 @@ static REGISTRY: &[ConfigField] = &[
         "schema.pinyin.fuzzy.hint_scope",
         Enum(crate::config::FuzzyHintScope::VALUES),
     ),
+    f("schema.pinyin.fuzzy.hint_tone", Bool),
     f("schema.pinyin.frequency.enabled", Bool),
     f("schema.pinyin.frequency.record_always", Bool),
     f("schema.pinyin.frequency.half_life", Float),

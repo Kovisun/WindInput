@@ -1452,6 +1452,14 @@ border = { color = \"#BB0000\", radius = 0, width = \"2px\" }
                                 );
                                 continue;
                             }
+                            ("comment", 0) => {
+                                // comment 常态只允许 `${fuzzy_pinyin}` 的角色色（与 fuzzy_hint 同色）。
+                                assert!(
+                                    st.roles.keys().all(|r| r == "fuzzy_pinyin"),
+                                    "{name} dark={dark} comment.roles 只允许 fuzzy_pinyin"
+                                );
+                                continue;
+                            }
                             _ => {
                                 assert!(
                                     st.roles.is_empty(),
@@ -1488,6 +1496,11 @@ border = { color = \"#BB0000\", radius = 0, width = \"2px\" }
                     None,
                 );
                 assert_eq!(hint, v.text.roles["fuzzy_hint"], "{name} dark={dark}");
+                assert_eq!(
+                    v.comment.roles.get("fuzzy_pinyin"),
+                    Some(&hint),
+                    "{name} dark={dark}：${{fuzzy_pinyin}} 与内嵌提示同色"
+                );
                 let bg = v.window.bg_color.expect("window 底色");
                 assert!(
                     contrast(hint, bg) >= 3.0,

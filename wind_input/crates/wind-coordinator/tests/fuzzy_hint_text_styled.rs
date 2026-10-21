@@ -246,3 +246,87 @@ fn scope_first_later_pages_have_no_hint() {
             .collect::<Vec<_>>()
     );
 }
+
+/// 读音表（pinyin-data 格式），带调提示与 `${fuzzy_pinyin}` 带调值取自它。
+fn write_pinyin_map(f: &Fixture) {
+    std::fs::write(
+        f.dir.join("pinyin_map.txt"),
+        "U+4E2D: zhōng,zhòng  # 中\nU+56FD: guó  # 国\nU+5E73: píng  # 平\n\
+         U+62FC: pīn  # 拼\nU+82F9: píng  # 苹\nU+8FC7: guò,guō  # 过\n",
+    )
+    .unwrap();
+}
+
+/// `hint_tone`（§9.1）：内嵌提示用词库音节筛读音表取调。
+#[test]
+fn hint_tone_marks_toned_syllable() {
+    let f = fixture("tone");
+    write_pinyin_map(&f);
+    let (coord, rx) = open_with(&f, true, FuzzyHintScope::All, |c| {
+        c.schema.pinyin.fuzzy.hint_tone = true;
+    });
+    type_str(&coord, "pinguo");
+    let items = shown(&coord, &rx);
+    let pg = item(&items, "苹果");
+    assert_eq!(pg.text_styled.as_str(), "苹(píng)果");
+    assert_eq!(hint_span(pg), vec![("(píng)", Some("fuzzy_hint"))]);
+}
+
+/// 读音表里查不到该字的读音：退回不带调的词库音节（宁少调不错音）。
+#[test]
+fn hint_tone_falls_back_to_plain_syllable_without_reading() {
+    let f = fixture("tone_fb");
+    let (coord, rx) = open_with(&f, true, FuzzyHintScope::All, |c| {
+        c.schema.pinyin.fuzzy.hint_tone = true;
+    });
+    type_str(&coord, "pinguo");
+    let items = shown(&coord, &rx);
+    assert_eq!(item(&items, "苹果").text_styled.as_str(), "苹(ping)果");
+}
+
+const ZG: &str = "中国\tzhong guo\t3000\n宗\tzong\t100\n";
+
+/// `zongguo`（开 zh↔z）、`hint=false`、注释模板只写 `${fuzzy_pinyin}`。
+fn zongguo(tag: &str, tone: bool) -> Vec<CandidateItem> {
+    let f = fixture_with(tag, ZG);
+    write_pinyin_map(&f);
+    let (coord, rx) = open_with(&f, false, FuzzyHintScope::First, |c| {
+        c.schema.pinyin.fuzzy.zh_z = true;
+        c.schema.pinyin.fuzzy.hint_tone = tone;
+        c.ui.candidate.comment_template_vertical = "${fuzzy_pinyin}".into();
+        c.ui.candidate.comment_template_horizontal = "${fuzzy_pinyin}".into();
+    });
+    type_str(&coord, "zongguo");
+    shown(&coord, &rx)
+}
+
+/// §9.2：只写模板、不开 `hint`，注释出整词正确拼音，正文不内嵌。
+#[test]
+fn fuzzy_pinyin_var_fills_comment_without_inline_hint() {
+    let items = zongguo("var", false);
+    let zg = item(&items, "中国");
+    assert_eq!(zg.comment.as_str(), "zhong guo");
+    let s = zg.comment.as_str();
+    let roles: Vec<_> = zg
+        .comment
+        .spans()
+        .iter()
+        .map(|sp| (&s[sp.start as usize..sp.end as usize], sp.role))
+        .collect();
+    assert_eq!(roles, vec![("zhong guo", Some("fuzzy_pinyin"))]);
+    assert!(zg.text_styled.is_empty(), "hint 关：正文不内嵌");
+}
+
+/// 带调随 `hint_tone`。
+#[test]
+fn fuzzy_pinyin_var_toned() {
+    let items = zongguo("var_tone", true);
+    assert_eq!(item(&items, "中国").comment.as_str(), "zhōng guó");
+}
+
+/// 非模糊候选（精确命中的「宗」）该变量为空。
+#[test]
+fn fuzzy_pinyin_var_empty_for_exact_candidate() {
+    let items = zongguo("var_exact", false);
+    assert!(item(&items, "宗").comment.is_empty());
+}

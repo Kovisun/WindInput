@@ -3,7 +3,7 @@
 //!
 //! 宁漏不错：显示文字与引擎文字对不上（简繁转换改了字数、截断截掉了被标的字）就不标。
 
-use wind_candidate::FuzzyHint;
+use wind_candidate::{Candidate, FuzzyHint};
 use wind_config::config::TRUNCATION_MARK;
 use wind_ui_types::{SpanStyle, StyledText};
 
@@ -93,6 +93,69 @@ pub(crate) fn styled_for_shown(
         return StyledText::new();
     }
     hint_styled_text(&format!("{prefix}{disp}"), &shifted)
+}
+
+/// 单字 `ch` 在词库音节 `syl` 下的带调读音（读音表筛音，同 `${pinyin}` 口径）；读音表里没有
+/// 与 `syl` 相符的读音 ⇒ 退回 `syl` 本身（宁可少调，不可错音）。
+fn toned_reading(reverse: &wind_reverse::ReverseLookup, ch: char, syl: &str) -> String {
+    let t = reverse.toned_pinyin_of(ch.encode_utf8(&mut [0; 4]), Some(&[syl]), "");
+    if t.is_empty() { syl.to_string() } else { t }
+}
+
+/// `hint_tone`（§9.1）：提示里的正确音节换成带调读音。`hints` 是引擎文字 `text` 的字下标。
+pub(crate) fn toned_hints(
+    text: &str,
+    hints: &[FuzzyHint],
+    reverse: &wind_reverse::ReverseLookup,
+) -> Vec<FuzzyHint> {
+    hints
+        .iter()
+        .map(|h| FuzzyHint {
+            char_index: h.char_index,
+            correct: match text.chars().nth(h.char_index as usize) {
+                Some(ch) => toned_reading(reverse, ch, &h.correct),
+                None => h.correct.clone(),
+            },
+        })
+        .collect()
+}
+
+/// 候选整词的词库音节：`learn_code`（没有则候选自身的码，同引擎 `fill_fuzzy_hints`）按边界切开，
+/// 一字一音节；无边界信息或字数对不上 ⇒ `None`。
+fn word_syllables(c: &Candidate) -> Option<Vec<&str>> {
+    let (code, boundary) = match &c.meta.learn_code {
+        Some((code, b)) => (code.as_str(), *b),
+        None => (c.code.as_str(), c.boundary),
+    };
+    if code.is_empty() || boundary == 0 {
+        return None;
+    }
+    let syls = crate::comment::syllables_of(code, boundary);
+    (syls.len() == c.text.chars().count()).then_some(syls)
+}
+
+/// `${fuzzy_pinyin}`（§9.2）：带模糊音提示的候选的整词正确拼音，音节以空格分隔；`tone` 有值即
+/// 带调。没有提示、或取不到逐字音节 ⇒ 空串。
+pub(crate) fn fuzzy_pinyin_text(
+    c: &Candidate,
+    tone: Option<&wind_reverse::ReverseLookup>,
+) -> String {
+    if c.meta.fuzzy_hints.is_empty() {
+        return String::new();
+    }
+    let Some(syls) = word_syllables(c) else {
+        return String::new();
+    };
+    match tone {
+        Some(reverse) => c
+            .text
+            .chars()
+            .zip(syls)
+            .map(|(ch, s)| toned_reading(reverse, ch, s))
+            .collect::<Vec<_>>()
+            .join(" "),
+        None => syls.join(" "),
+    }
 }
 
 #[cfg(test)]

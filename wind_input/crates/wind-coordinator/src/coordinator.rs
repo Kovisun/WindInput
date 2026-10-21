@@ -2665,6 +2665,8 @@ impl Coordinator {
             &bundle.config,
             &crate::data_needs::SchemaFacts::collect(&engine_mgr),
         );
+        // 模板引用 `${fuzzy_pinyin}` 时拼音引擎要算提示；变了会重建已建的活跃方案引擎。
+        engine_mgr.set_fuzzy_pinyin_in_templates(needs.fuzzy_pinyin);
 
         // 短语层（方案 B）：TOML 变更时同步进 store，再从 store（仅 enabled）建层。
         // 启动解析的条目缓存进结构体，作为"恢复默认"重读文件失败时的回退。
@@ -7499,22 +7501,18 @@ impl Coordinator {
             }
         };
         // 模糊音提示（「苹(ping)果」）：换算到显示文字、过了截断与前缀后的带提示正文。
+        let hint_tone = rt.config.schema.pinyin.fuzzy.hint_tone.then_some(&*reverse);
         let hint_styled = |c: &Candidate, full: &str, disp: &str| {
-            self.cand_display_hints(state, c, full)
+            self.cand_display_hints(state, c, full, hint_tone)
                 .map(|h| crate::fuzzy_hint_text::styled_for_shown(full, disp, prefix_of(c), &h))
                 .unwrap_or_default()
         };
         // 哪些候选标（`first` / `all`）见 `fuzzy_hint_texts`。
-        let mut hint_texts = self.fuzzy_hint_texts(
-            state,
-            rt.config.schema.pinyin.fuzzy.hint_scope,
-            start,
-            end,
-            |c| {
+        let mut hint_texts =
+            self.fuzzy_hint_texts(state, &rt.config.schema.pinyin.fuzzy, start, end, |c| {
                 let full = self.cand_display_text(state, c);
                 hint_styled(c, &full, &truncate(&full))
-            },
-        );
+            });
         let items: Vec<CandidateItem> = state.candidates[start..end]
             .iter()
             .enumerate()
@@ -8090,6 +8088,8 @@ impl Coordinator {
     ///   改了要重启才生效（沿用原有行为，已加载的那份不重读）。
     pub(crate) fn apply_data_needs(&self) {
         let needs = self.data_needs();
+        self.engine_mgr
+            .set_fuzzy_pinyin_in_templates(needs.fuzzy_pinyin);
         self.sync_chaizi_assets_with(&needs);
         if needs.reverse_index {
             self.spawn_index_warm(&self.engine_mgr.code_source_schema(), false);

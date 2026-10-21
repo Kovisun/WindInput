@@ -620,6 +620,9 @@ pub struct EngineManager {
     single_char_used: std::sync::atomic::AtomicU64,
     /// 全局拼音配置（fuzzy/code_hint_source/...）。Mutex 以支持热重载。
     pinyin: Mutex<wind_config::config::PinyinGlobalConfig>,
+    /// 有模板引用 `${fuzzy_pinyin}`（协调器按全部模板位判定后告知，见
+    /// [`Self::set_fuzzy_pinyin_in_templates`]）：`hint` 关着也要让拼音引擎算模糊音提示。
+    fuzzy_pinyin_in_templates: std::sync::atomic::AtomicBool,
     /// 双拼韵母键集缓存：(已缓存的活跃方案 id, Option<HashSet<u8>>)。
     /// None = 当前活跃方案不是双拼；Some = 双拼布局的 finals 键集合。
     /// 活跃方案 id 变化时按需重建（惰性），避免每键读盘。
@@ -1004,6 +1007,7 @@ impl EngineManager {
             single_char_codes: Mutex::new(None),
             single_char_used: std::sync::atomic::AtomicU64::new(0),
             pinyin: Mutex::new(config.schema.pinyin.clone()),
+            fuzzy_pinyin_in_templates: std::sync::atomic::AtomicBool::new(false),
             shuangpin_finals_cache: Mutex::new((String::new(), None)),
             shuangpin_reverse_cache: Mutex::new((String::new(), None)),
             build_locks: Mutex::new(HashMap::new()),
@@ -3221,6 +3225,8 @@ impl EngineManager {
                 &mix_cfg,
                 self.override_dir.as_deref(),
                 &pinyin_cfg,
+                self.fuzzy_pinyin_in_templates
+                    .load(std::sync::atomic::Ordering::Acquire),
                 phrase_seg_anywhere,
                 lookup_disabled_dicts,
                 // 顶层入口：方案自身是拼音时不加约束（简拼开）。混输在其内部为 secondary 注入。
@@ -5041,6 +5047,30 @@ impl EngineManager {
         table
     }
 
+    /// 告知「有模板引用 `${fuzzy_pinyin}`」（协调器的 `DataNeeds::fuzzy_pinyin`）。引擎算不算
+    /// 模糊音提示因此变了才重建引擎（同 [`Self::reload_from_config`] 的清表），未变即空操作。
+    pub fn set_fuzzy_pinyin_in_templates(&self, on: bool) {
+        use std::sync::atomic::Ordering;
+        if self.fuzzy_pinyin_in_templates.swap(on, Ordering::AcqRel) == on {
+            return;
+        }
+        let fuzzy = self
+            .pinyin
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .fuzzy
+            .clone();
+        if fuzzy_config_from_global(&fuzzy, on).hint == fuzzy_config_from_global(&fuzzy, !on).hint {
+            return;
+        }
+        {
+            let mut g = self.engines.lock().unwrap_or_else(|e| e.into_inner());
+            self.engines_gen.fetch_add(1, Ordering::AcqRel);
+            g.clear();
+        }
+        self.ensure_loaded(&self.active_schema_id());
+    }
+
     /// 当前方案的**行为覆盖三段**（`[punct]` / `[candidate]` / `[phrases]`，方案文件内联 +
     /// `schema_overrides` 已合并）。
     ///
@@ -6575,6 +6605,8 @@ impl EngineManager {
         mix_cfg: &wind_config::MixGlobal,
         override_dir: Option<&Path>,
         pinyin_cfg: &wind_config::config::PinyinGlobalConfig,
+        // `fuzzy_pinyin_tpl`：有模板引用 `${fuzzy_pinyin}`，见 `fuzzy_config_from_global`。
+        fuzzy_pinyin_tpl: bool,
         // `phrase_seg_anywhere`：三个作用域（英文方案 / 临英 / 快捷输入英文）里是否
         // **有任何一个**开着词组分词。不按作用域分别开关，是因为英文引擎实例是三者
         // **共用**的（进程里只有 `engines["english"]` 这一个实例，见 [`EnglishProvider`]）
@@ -6630,6 +6662,7 @@ impl EngineManager {
                 mix_cfg,
                 override_dir,
                 pinyin_cfg,
+                fuzzy_pinyin_tpl,
                 phrase_seg_anywhere,
                 lookup_disabled_dicts,
                 Some(MixedRole::Primary {
@@ -6676,6 +6709,7 @@ impl EngineManager {
                     mix_cfg,
                     override_dir,
                     pinyin_cfg,
+                    fuzzy_pinyin_tpl,
                     phrase_seg_anywhere,
                     lookup_disabled_dicts,
                     Some(MixedRole::Secondary(MixPinyinOpts {
@@ -6823,7 +6857,7 @@ impl EngineManager {
             // 从全局拼音配置构建引擎配置和模糊音（Task 1.4：修 fuzzy 从未生效 bug）。
             // enabled 作总开关：未启用时所有模糊标志归零（与 Go 行为一致）。
             let pg = pinyin_cfg;
-            let fuzzy = fuzzy_config_from_global(&pg.fuzzy);
+            let fuzzy = fuzzy_config_from_global(&pg.fuzzy, fuzzy_pinyin_tpl);
             let pcfg = PinyinConfig {
                 use_smart_compose: pg.use_smart_compose,
                 // 纯拼音方案看 `[schema.pinyin.abbrev] enabled`；混输看 `mix.enable_pinyin_abbrev`，
@@ -8609,7 +8643,13 @@ mod dict_stats;
 
 /// 全局模糊音配置 → 引擎 `FuzzyConfig`：`enabled` 作总开关，未启用时所有标志（含 `hint`）归零。
 /// 双拼同键音节不来自用户配置，由 `with_shuangpin` 从布局推出。
-fn fuzzy_config_from_global(f: &wind_config::PinyinFuzzy) -> crate::pinyin::fuzzy::FuzzyConfig {
+///
+/// 引擎侧 `hint` 是「算不算提示」：正文内嵌（`f.hint`）或模板引用 `${fuzzy_pinyin}`
+/// （`fuzzy_pinyin_tpl`）任一要它就算；内嵌与否由协调器只按 `f.hint` 判。
+fn fuzzy_config_from_global(
+    f: &wind_config::PinyinFuzzy,
+    fuzzy_pinyin_tpl: bool,
+) -> crate::pinyin::fuzzy::FuzzyConfig {
     let on = f.enabled;
     crate::pinyin::fuzzy::FuzzyConfig {
         zh_z: on && f.zh_z,
@@ -8625,7 +8665,7 @@ fn fuzzy_config_from_global(f: &wind_config::PinyinFuzzy) -> crate::pinyin::fuzz
         uan_uang: on && f.uan_uang,
         un_ong: on && f.un_ong,
         eng_ong: on && f.eng_ong,
-        hint: on && f.hint,
+        hint: on && (f.hint || fuzzy_pinyin_tpl),
         ..Default::default()
     }
 }
@@ -8658,9 +8698,25 @@ mod tests {
             hint: true,
             ..Default::default()
         };
-        assert!(!fuzzy_config_from_global(&f).hint);
+        assert!(!fuzzy_config_from_global(&f, true).hint);
         f.enabled = true;
-        assert!(fuzzy_config_from_global(&f).hint);
+        assert!(fuzzy_config_from_global(&f, false).hint);
+    }
+
+    /// 引擎算提示的条件：`enabled && (hint || 模板引用 ${fuzzy_pinyin})`。
+    #[test]
+    fn fuzzy_hint_computed_for_template_variable() {
+        let mut f = wind_config::PinyinFuzzy {
+            enabled: true,
+            ..Default::default()
+        };
+        assert!(
+            !fuzzy_config_from_global(&f, false).hint,
+            "hint 关、模板不引用：不算"
+        );
+        assert!(fuzzy_config_from_global(&f, true).hint, "模板引用即算");
+        f.enabled = false;
+        assert!(!fuzzy_config_from_global(&f, true).hint, "总开关关：不算");
     }
 
     /// 混输引用环的路径要能直接贴进日志：自引用、互指、下游成环、菱形（非环）四种形状。

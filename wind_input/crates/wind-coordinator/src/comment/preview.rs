@@ -173,6 +173,7 @@ fn sample_value(name: &str, arg: Option<&str>, ch: Option<char>) -> Option<VarVa
         "code_rev_all" => return joined(&["wq", "wqvb"], "/"),
         "shuangpin" => "nihk".into(),
         "pinyin" => "nǐ hǎo".into(),
+        "fuzzy_pinyin" => "ni hao".into(),
         "chaizi" => match ch {
             Some('好') => "女子".into(),
             _ => "亻尔".into(),

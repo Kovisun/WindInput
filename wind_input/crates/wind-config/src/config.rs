@@ -3041,6 +3041,9 @@ pub struct PinyinFuzzy {
     /// 提示范围：first = 只标第一个带提示的候选；all = 标全部。
     #[serde(default, deserialize_with = "crate::tolerant_de::tolerant")]
     pub hint_scope: FuzzyHintScope,
+    /// 提示带声调（「苹(píng)果」），内嵌提示与注释变量 `${fuzzy_pinyin}` 共用。
+    #[serde(default)]
+    pub hint_tone: bool,
 }
 
 /// 模糊音提示范围（`[schema.pinyin.fuzzy] hint_scope`）。
@@ -13772,6 +13775,13 @@ scripts = { latin = 42 }
         let c = merged_with("[schema.pinyin.fuzzy]\nhint = true\nhint_scope = \"all\"\n");
         assert!(c.schema.pinyin.fuzzy.hint);
         assert_eq!(c.schema.pinyin.fuzzy.hint_scope, FuzzyHintScope::All);
+    }
+
+    #[test]
+    fn pinyin_fuzzy_hint_tone_defaults_off_and_parses() {
+        assert!(!Config::default().schema.pinyin.fuzzy.hint_tone);
+        let c = merged_with("[schema.pinyin.fuzzy]\nhint_tone = true\n");
+        assert!(c.schema.pinyin.fuzzy.hint_tone);
     }
 
     /// `auto_learn.max_word_length` 的默认值必须**两条路一致**：代码默认

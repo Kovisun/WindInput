@@ -833,7 +833,7 @@ const SYLLABLE_SEP: &str = " ";
 ///
 /// 超过 64 字节的部分不再有边界信息（bitmask 装不下），并入最后一个音节 —— 拼音词长上限
 /// 远小于此，实际不触发，但不加这个界会读到 `>> 64` 的未定义移位。
-fn syllables_of(code: &str, boundary: u64) -> Vec<&str> {
+pub(crate) fn syllables_of(code: &str, boundary: u64) -> Vec<&str> {
     let mut out = Vec::new();
     let mut start = 0usize;
     for i in 1..code.len().min(64) {
@@ -1014,6 +1014,7 @@ pub(crate) const EVAL_VAR_NAMES: &[&str] = &[
     "code_all",
     "shuangpin",
     "pinyin",
+    "fuzzy_pinyin",
     "chaizi",
     "chaizi_code",
     "chaizi_all",
@@ -1564,6 +1565,14 @@ impl crate::coordinator::Coordinator {
                 |t| self.engine_mgr.word_pinyin_syllables(t),
                 |t, syls| reverse.toned_pinyin_of(t, syls, SYLLABLE_SEP),
             ),
+            // `fuzzy_pinyin` —— 模糊音救回来的候选的整词正确拼音（`zhong guo`），带调随
+            // `[schema.pinyin.fuzzy] hint_tone`。只在候选带模糊音提示时有值，不受 `hint_scope`
+            // 约束；引擎在模板引用它时即使 `hint` 关着也会算提示（`DataNeeds::fuzzy_pinyin`）。
+            "fuzzy_pinyin" => {
+                let tone = !c.meta.fuzzy_hints.is_empty()
+                    && self.rt().config.schema.pinyin.fuzzy.hint_tone;
+                crate::fuzzy_hint_text::fuzzy_pinyin_text(c, tone.then_some(reverse))
+            }
             "chaizi" if single => reverse.radicals_of(&c.text, ""),
             "chaizi" => String::new(),
             "chaizi_code" if single => reverse.chaizi_code_of(&c.text),
