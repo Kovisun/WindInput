@@ -4546,14 +4546,13 @@ impl EngineManager {
             //
             // 例外是可选的 `prefix_complete`（拼音，出厂关）：中文侧有候选、但整串不是完整
             // 拼音时，在精确之外再补至多 2 条前缀词。判据见 `prefix_complete_applies`；
-            // 它按全拼音节定义，双拼下不生效（双拼码两键一音节，几乎任何串都解得开）。
+            // 双拼已在 `english_merge_cfg_for` 折掉。
             let english = if r.candidates.is_empty() {
                 crate::english_merge::lookup_prefix_fallback(eng.as_ref(), input, cfg.min_length)
             } else {
                 let mut v = crate::english_merge::lookup(eng.as_ref(), input, cfg.min_length);
                 if cfg.prefix_complete
                     && crate::english_merge::prefix_complete_applies(input, cfg.min_length)
-                    && !self.pinyin_is_shuangpin()
                 {
                     let extra =
                         crate::english_merge::lookup_prefix_complete(eng.as_ref(), input, &v);
@@ -4653,7 +4652,9 @@ impl EngineManager {
                     min_length: p.min_length,
                     // 见 `Effective::block_commit`：拼音没有满码上屏 / 顶码可否决。
                     block_commit: false,
-                    prefix_complete: p.prefix_complete,
+                    // 判据按全拼音节定义，双拼下不生效（双拼码两键一音节，几乎任何串都解得开）。
+                    // 开关关着时短路，不问方案；开着时是一次按方案 id 的缓存命中。
+                    prefix_complete: p.prefix_complete && !self.pinyin_is_shuangpin_of(schema_id),
                 })
             }
             // 混输有自带的英文混入（`schema.mix.enable_english`，带三方档位仲裁），

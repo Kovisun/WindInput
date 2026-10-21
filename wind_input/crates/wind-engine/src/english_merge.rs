@@ -268,6 +268,8 @@ pub fn lookup_prefix_complete(
         .map(|mut c| {
             // 同 `lookup`：码表域标志不跨来源带。
             c.is_exact_code = false;
+            // 协调器据此把它排在整串拼音真词之后（见该字段文档）。
+            c.meta.from_prefix_complete = true;
             c
         })
         .take(PREFIX_COMPLETE_MAX)
@@ -568,6 +570,10 @@ mod tests {
         let texts: Vec<&str> = extra.iter().map(|c| c.text.as_str()).collect();
         assert_eq!(texts, vec!["hellos", "Hellow"], "至多 2 条、跳过精确那条");
         assert!(extra.iter().all(|c| !c.is_exact_code));
+        assert!(
+            extra.iter().all(|c| c.meta.from_prefix_complete),
+            "补全候选要带标记，协调器靠它定位"
+        );
 
         // 无精确命中时照补。
         let none = lookup(&eng, "hell", 0);
