@@ -575,6 +575,7 @@ fn golden_fuzzy_hint_highlighted() {
             state,
             [30, 30, 30, 255],
             wind_theme::fallback::COMMENT_TEXT,
+            crate::span_runs::candidate_backdrop(v, state),
         );
         let body = wind_theme::body_color(&v.text, state, [30, 30, 30, 255]);
         let line = sec
@@ -596,15 +597,34 @@ fn golden_fuzzy_hint_highlighted() {
             );
         }
     }
-    // 防空转：出厂 default 的选中态改了正文色 ⇒ 提示回落选中态注释色，不是常态橙。
-    let sel = wind_theme::fuzzy_hint_color(
-        &v.text,
-        &v.comment,
-        wind_theme::TextState::Selected,
-        [30, 30, 30, 255],
-        wind_theme::fallback::COMMENT_TEXT,
+    // 防空转：出厂 default 的选中态改了正文色，但选中底是浅色、常态橙对它够醒目
+    // ⇒ 沿用常态橙（不回落注释色）。
+    let sel = wind_theme::TextState::Selected;
+    let sel_bg = crate::span_runs::candidate_backdrop(v, sel).expect("default 选中底可取色");
+    assert_ne!(
+        wind_theme::body_color(&v.text, sel, [30, 30, 30, 255]),
+        wind_theme::body_color(&v.text, wind_theme::TextState::Normal, [30, 30, 30, 255]),
+        "前提：default 选中态改了正文色"
     );
-    assert_ne!(sel, HINT_LIGHT, "选中态提示色应不同于常态");
+    let hint = |v: &wind_theme::RvViews| {
+        wind_theme::fuzzy_hint_color(
+            &v.text,
+            &v.comment,
+            sel,
+            [30, 30, 30, 255],
+            wind_theme::fallback::COMMENT_TEXT,
+            crate::span_runs::candidate_backdrop(v, sel),
+        )
+    };
+    assert_eq!(hint(v), HINT_LIGHT, "浅色选中底 {sel_bg:?} 上应沿用常态橙");
+    // 反向：把选中底换成深色实心 accent ⇒ 对比度不足，回落选中态注释色。
+    let mut dark = v.clone();
+    dark.item
+        .selected
+        .get_or_insert_with(Default::default)
+        .bg_color = Some([37, 99, 235, 255]);
+    let cmt_sel = wind_theme::body_color(&dark.comment, sel, wind_theme::fallback::COMMENT_TEXT);
+    assert_eq!(hint(&dark), cmt_sel, "深色选中底上应回落选中态注释色");
 }
 
 /// 展开网格：格宽按含提示的实宽算，同一行的格子互不重叠、各行同列对齐。

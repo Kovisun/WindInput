@@ -1470,21 +1470,7 @@ border = { color = \"#BB0000\", radius = 0, width = \"2px\" }
     /// 出厂主题的 `fuzzy_hint` 与窗口底色对比度 >= 3:1，且不与候选正文色 / 注释色相同。
     #[test]
     fn factory_fuzzy_hint_is_readable_and_distinct() {
-        fn lum(c: Rgba) -> f64 {
-            let f = |v: u8| {
-                let v = v as f64 / 255.0;
-                if v <= 0.03928 {
-                    v / 12.92
-                } else {
-                    ((v + 0.055) / 1.055).powf(2.4)
-                }
-            };
-            0.2126 * f(c[0]) + 0.7152 * f(c[1]) + 0.0722 * f(c[2])
-        }
-        fn contrast(a: Rgba, b: Rgba) -> f64 {
-            let (x, y) = (lum(a), lum(b));
-            (x.max(y) + 0.05) / (x.min(y) + 0.05)
-        }
+        use crate::palette::contrast_ratio as contrast;
         let ids = crate::list_theme_ids(&data_dir_for_roles());
         for name in ids
             .iter()
@@ -1499,6 +1485,7 @@ border = { color = \"#BB0000\", radius = 0, width = \"2px\" }
                     crate::TextState::Normal,
                     [30, 30, 30, 255],
                     [150, 150, 150, 255],
+                    None,
                 );
                 assert_eq!(hint, v.text.roles["fuzzy_hint"], "{name} dark={dark}");
                 let bg = v.window.bg_color.expect("window 底色");

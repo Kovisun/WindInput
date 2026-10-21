@@ -13,7 +13,7 @@ pub mod schema;
 pub mod span;
 pub mod theme;
 
-pub use palette::Rgba;
+pub use palette::{Rgba, composite_over, contrast_ratio};
 pub use resolve::{
     LangbarTextColors, Resolved, ResolvedBehavior, load_resolved, load_resolved_dirs, resolve,
 };

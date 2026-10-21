@@ -4123,12 +4123,14 @@ impl CandidateWindow {
             // 容器**上，整段文字仍是一个整体，不会每个字各画一个药丸。
             // 模糊音提示段的颜色区间（无提示 = 空，叶子与改动前逐字段相同）；直立态逐格切时
             // 每格只拿自己那几段，同注释。
+            let txt_state = text_state(is_sel, is_hover);
             let text_runs = crate::span_runs::fuzzy_hint_runs(
                 &v.text,
                 &v.comment,
-                text_state(is_sel, is_hover),
+                txt_state,
                 TEXT_FALLBACK,
                 COMMENT_FALLBACK,
+                crate::span_runs::candidate_backdrop(v, txt_state),
                 &display_text,
             );
             let mut tleaf = self

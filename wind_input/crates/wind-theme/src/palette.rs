@@ -42,6 +42,30 @@ pub fn parse_hex(s: &str) -> Option<Rgba> {
     }
 }
 
+/// WCAG 2 相对亮度对比度（1.0 – 21.0），只看 RGB、忽略 alpha。
+pub fn contrast_ratio(a: Rgba, b: Rgba) -> f64 {
+    fn lum(c: Rgba) -> f64 {
+        let f = |v: u8| {
+            let v = f64::from(v) / 255.0;
+            if v <= 0.03928 {
+                v / 12.92
+            } else {
+                ((v + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * f(c[0]) + 0.7152 * f(c[1]) + 0.0722 * f(c[2])
+    }
+    let (x, y) = (lum(a), lum(b));
+    (x.max(y) + 0.05) / (x.min(y) + 0.05)
+}
+
+/// `top` 按自身 alpha 叠在不透明的 `under` 上，结果不透明。
+pub fn composite_over(top: Rgba, under: Rgba) -> Rgba {
+    let a = f64::from(top[3]) / 255.0;
+    let mix = |i: usize| (f64::from(top[i]) * a + f64::from(under[i]) * (1.0 - a)).round() as u8;
+    [mix(0), mix(1), mix(2), 255]
+}
+
 /// 解析整个调色板：colors 段（Mapping）→ {名称: Rgba}。
 /// is_dark 选择 {light,dark} 变体。derive 等非颜色项被忽略。
 pub fn resolve_palette(colors: Option<&Value>, is_dark: bool) -> HashMap<String, Rgba> {
