@@ -7204,7 +7204,7 @@ impl Coordinator {
     /// 第 `i` 个候选（0 基）的序号标签，按「用户配置 > 主题 > 默认数字」裁决：
     /// ① 用户 `ui.candidate.index_labels` 显式设了该槽位 → 用之；
     /// ② 否则当前主题 `views.index.labels` 有非空槽位 → 用之；
-    /// ③ 否则回退默认 (i+1)。
+    /// ③ 否则回退默认 (i+1)，第 10 个写 `0`，与选它的物理键对应。
     fn resolve_index_label(
         &self,
         cand_cfg: &wind_config::config::UiCandidateConfig,
@@ -7221,6 +7221,9 @@ impl Coordinator {
             .filter(|s| !s.is_empty())
         {
             return s.clone();
+        }
+        if i == 9 {
+            return "0".to_string();
         }
         (i + 1).to_string()
     }
