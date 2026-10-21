@@ -236,10 +236,10 @@ const FUZZY_LAYER_BUDGET: usize = 256;
 
 /// 各音节边 `(起, 止)` 的变体表（首项恒为原音节、0 处改动）：同一条边会被许多起点、
 /// 许多前缀组合反复展开，算一次即可。
-type EdgeVariants = HashMap<(usize, usize), Vec<(String, usize)>>;
+pub(crate) type EdgeVariants = HashMap<(usize, usize), Vec<(String, usize)>>;
 
 /// 模糊变体到达某终点的一种形态：(变体边界, 所打码切分（相对起点的偏移）, 改动处数)。
-type FuzzyShape = (u64, Vec<usize>, usize);
+pub(crate) type FuzzyShape = (u64, Vec<usize>, usize);
 
 /// 用户词入图时的**对数域加成**（[`LatticeBuilder::add_store_nodes`]）。
 ///
@@ -945,7 +945,8 @@ impl LatticeBuilder {
 
     /// 从起点 `p` 出发、终点不超过 `end_limit` 的全部模糊变体码，按（终点, 变体码）归并，
     /// 各附到达它的全部形态（变体边界、所打码切分、改动处数）。系统词（[`Self::build`]）与
-    /// 用户词（[`Self::add_store_fuzzy_nodes`]）的模糊节点共用这一份。
+    /// 用户词（[`Self::add_store_fuzzy_nodes`]）的模糊节点、词候选的模糊变体码（`PinyinEngine::fuzzy_codes`）
+    /// 共用这一份。
     ///
     /// ## 为什么逐边展开而不取一条切分
     ///
@@ -970,7 +971,7 @@ impl LatticeBuilder {
     /// 变体码按（终点, 码）归并（`xi|an` 与 `xian` 都能展开出 `xiang`），调用方每个只点查一次；
     /// 上界 = 层数(≤ `max_word_len`) × [`FUZZY_LAYER_BUDGET`]，扣掉全原音节的组合。
     #[allow(clippy::too_many_arguments)]
-    fn fuzzy_spans(
+    pub(crate) fn fuzzy_spans(
         &self,
         p: usize,
         input: &str,

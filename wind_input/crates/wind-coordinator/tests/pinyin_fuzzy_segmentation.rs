@@ -103,3 +103,54 @@ fn an_ang_fanan_recalls_fangan() {
         cfg.schema.pinyin.fuzzy.an_ang = true
     });
 }
+
+/// 整串已有精确词时（`ji|nan` 济南），平安那类整句兜不住：`jin|an → jing|an`（静安）只能靠
+/// 词候选那一路查出来，而它此前只按 `maximum_match` 那一条切分展开变体。
+#[test]
+fn in_ing_jinan_recalls_jingan() {
+    if !has_pinyin() {
+        return;
+    }
+    assert_fuzzy_recalls("jinan", "静安", 9, |cfg| {
+        cfg.schema.pinyin.fuzzy.in_ing = true
+    });
+}
+
+/// 同上，另一组真实竞争：`xi|nan`（西南）占着整串，`xin|an → xing|an`（兴安）只能靠词候选。
+#[test]
+fn in_ing_xinan_recalls_xingan() {
+    if !has_pinyin() {
+        return;
+    }
+    assert_fuzzy_recalls("xinan", "兴安", 9, |cfg| {
+        cfg.schema.pinyin.fuzzy.in_ing = true
+    });
+}
+
+/// 前缀子码同口径：`jinanshi` 的前缀 `jinan` 也要按全部切分展开（静安）。
+#[test]
+fn in_ing_prefix_jinanshi_recalls_jingan() {
+    if !has_pinyin() {
+        return;
+    }
+    assert_fuzzy_recalls("jinanshi", "静安", 20, |cfg| {
+        cfg.schema.pinyin.fuzzy.in_ing = true
+    });
+}
+
+/// 词候选那一路同样核对边界：只开 an↔ang 时 `xian` 的 `xi|an → xi|ang` 不能借来单音节的「想」。
+#[test]
+fn an_ang_xian_word_candidates_do_not_borrow_xiang() {
+    if !has_pinyin() {
+        return;
+    }
+    let got = candidates_for("xian", |cfg| {
+        cfg.schema.pinyin.fuzzy.enabled = true;
+        cfg.schema.pinyin.fuzzy.an_ang = true;
+    });
+    let head = &got[..got.len().min(30)];
+    assert!(
+        !head.iter().any(|t| t == "想"),
+        "只开 an↔ang 时 xian 前 30 项不该有「想」，实际: {head:?}"
+    );
+}
