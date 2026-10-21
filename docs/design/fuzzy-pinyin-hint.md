@@ -230,4 +230,4 @@ GH#230 楼主的两条诉求首版未覆盖，维护者定补：
 - 设置端注释模板的变量清单 / 预览值、文档站模板变量表同步。
 
 验收补充：`hint_tone=true` 下 `pinguo` → 「苹(píng)果」；模板含 `${fuzzy_pinyin}`、`hint=false` 时 `zongguo` 的「中国」注释出
-`zhōng guo`/`zhong guo`（视 `hint_tone`），正文不内嵌；非模糊候选该变量为空。
+`zhōng guó`/`zhong guo`（视 `hint_tone`），正文不内嵌；非模糊候选该变量为空。
