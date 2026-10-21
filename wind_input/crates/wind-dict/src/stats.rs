@@ -11,10 +11,14 @@
 //!   私用区与「〇」）时按字数分单字（1）与词组（≥2）；含任何别的字符（emoji、符号、字母）
 //!   计「其他」，不进字数分档。英文方案不分这三类，按字母数分档。
 //! - **重码组**：一个编码下有 ≥2 个不同文字。「涉及条目」= 各组大小之和，「非首选」=
-//!   Σ(组大小 − 1)，「最大重码」= 最大组大小。
+//!   Σ(组大小 − 1)，「最大重码」= 最大组大小。**只算含汉字的条目**（英文方案全算）：纯
+//!   emoji / 符号条目不参与重码，也不参与同码排位——五笔把 71 个表情挂在 `emoj` 一个码上，
+//!   算进来「最大重码」就成了 71、重码 Top 全是表情，而它们并不跟汉字抢位。「T恤」「卡拉OK」
+//!   这类含汉字的真词照算。合计跨库算一份，主库另算一份（[`DupStats::main`]）。
 //! - **序位**：静态排序（`base_sort = weight` 时权重降 → 库档位升 → 自然序升，`natural`
 //!   时只看库档位与自然序），**未计**出简让全、单字模式、字符集过滤、调频与候选调整。
-//! - **全码**：一个字的最长码（不超过 `max_code_length`）；比全码短的码是简码，级别 = 码长。
+//! - **全码**：一个字的最长码（不超过 `max_code_length`，码长按字符数）；同字有多个最长码时
+//!   取序位最前者，再按码字典序。比全码短的码是简码，级别 = 码长。
 //! - **动态选重率**：Σ_{c 最优码序位 > 0} f(c) / Σ f(c)，c 取字集内已收录的字，最优码 =
 //!   各码中 (序位, 码长) 最小者；平均码长 = Σ f(c)·len(最优码) / Σ f(c)。
 
@@ -27,7 +31,7 @@ use crate::cached::GroupEntry;
 use crate::weight_norm::WeightNorm;
 
 /// 统计算法版本：口径一变就加一，进缓存键，旧结果自然失效。
-pub const STATS_ALGO_VERSION: u32 = 1;
+pub const STATS_ALGO_VERSION: u32 = 2;
 
 /// 重码 Top 列表里每组最多带几个成员（拼音同音组可达上千）。
 pub const TOP_MEMBERS_MAX: usize = 40;
@@ -85,6 +89,8 @@ pub struct StatsOptions<'o> {
     /// 重码 Top 列表取几组；0 = 不取。
     pub top_n: usize,
     pub layers: Vec<StatsLayer>,
+    /// 主库在 `layers` 里的下标；给了就另出一份只看主库的重码（[`DupStats::main`]）。
+    pub main_layer: Option<usize>,
     /// 字频（单字 → 频次）；`None` 时加权指标不出。
     pub freq: Option<&'o HashMap<char, u64>>,
     pub charsets: &'o [Charset],
@@ -134,6 +140,18 @@ pub struct CharFullDup {
     pub groups: u64,
     pub chars: u64,
     pub max: u64,
+    /// 按全码分组的前 `top_n` 组（组大小降、码升），成员按该码下的序位。
+    pub top: Vec<DupGroup>,
+}
+
+/// 只看主库那一层的重码（口径同合计，组内按文字去重）。
+#[derive(Serialize, Debug, Clone, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct MainDup {
+    pub groups: u64,
+    pub entries: u64,
+    pub max: u64,
+    pub max_code: String,
 }
 
 #[derive(Serialize, Debug, Clone, Default, PartialEq, Eq)]
@@ -155,6 +173,8 @@ pub struct DupStats {
     pub max_code: String,
     /// 只看单字全码（码表）。
     pub char_full: Option<CharFullDup>,
+    /// 只看主库（给了 [`StatsOptions::main_layer`] 时）。
+    pub main: Option<MainDup>,
     pub top: Vec<DupGroup>,
 }
 
@@ -232,6 +252,11 @@ fn classify(kind: StatsKind, text: &str) -> TextClass {
     } else {
         TextClass::Word(n)
     }
+}
+
+/// 该条目是否参与重码与同码排位：英文方案全算，其余要含汉字。
+fn ranked(kind: StatsKind, text: &str) -> bool {
+    kind == StatsKind::English || text.chars().any(is_han)
 }
 
 /// 分档下标：1、2、3、4、≥5。
@@ -313,6 +338,11 @@ pub struct StatsBuilder<'a, 'o> {
     zero_weight: u64,
     /// 组内去重 / 排序的复用缓冲：(文字, 排序键, 原始权重, 分类)。
     buf: Vec<(&'a str, RankKey, i32, TextClass)>,
+    /// `buf` 里参与重码与排位的那部分（见 [`ranked`]）。
+    rbuf: Vec<(&'a str, RankKey, i32, TextClass)>,
+    /// 主库那一层参与重码的文字（组内去重用）。
+    main_texts: Vec<&'a str>,
+    main_dup: MainDup,
     /// 组内已处理过的音节边界（同码各条的边界通常相同）。
     seen_boundaries: Vec<u64>,
 }
@@ -334,6 +364,9 @@ impl<'a, 'o> StatsBuilder<'a, 'o> {
             syllables: HashSet::default(),
             zero_weight: 0,
             buf: Vec::new(),
+            rbuf: Vec::new(),
+            main_texts: Vec::new(),
+            main_dup: MainDup::default(),
             seen_boundaries: Vec::new(),
         }
     }
@@ -367,7 +400,8 @@ impl<'a, 'o> StatsBuilder<'a, 'o> {
                     TextClass::Other => l.other += 1,
                 }
             }
-            buf.push((e.text, self.rank_key(e), e.weight, class));
+            // 去重与集合都按去掉首尾空白的文字：「 工」与「工」是同一条。
+            buf.push((e.text.trim(), self.rank_key(e), e.weight, class));
         }
 
         // 组内按文字去重（跨库同 (码, 文字) 只算一条，取排序最靠前的那条），再按序位排。
@@ -376,9 +410,8 @@ impl<'a, 'o> StatsBuilder<'a, 'o> {
         buf.sort_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(b.0)));
 
         let code_len = code.chars().count();
-        let n = buf.len();
-        self.total.entries += n as u64;
-        for (rank, &(text, _, raw_w, class)) in buf.iter().enumerate() {
+        self.total.entries += buf.len() as u64;
+        for &(text, _, raw_w, class) in &buf {
             if raw_w == 0 {
                 self.zero_weight += 1;
             }
@@ -386,19 +419,29 @@ impl<'a, 'o> StatsBuilder<'a, 'o> {
                 TextClass::Char => {
                     self.by_len[0] += 1;
                     self.code_len_char[bucket(code_len)] += 1;
-                    let info = self.chars.entry(text.trim()).or_default();
-                    if !info.codes.iter().any(|(c, _)| c == code) {
-                        info.codes.push((code.to_string(), rank as u32));
-                    }
                 }
                 TextClass::Word(k) => {
                     self.by_len[bucket(k)] += 1;
                     self.code_len_word[bucket(code_len)] += 1;
-                    self.words.insert(text.trim());
+                    self.words.insert(text);
                 }
                 TextClass::Other => self.total.other += 1,
             }
         }
+
+        // 重码与排位只看含汉字的条目：纯 emoji / 符号既不占位、也不凑重码组。
+        let mut rbuf = std::mem::take(&mut self.rbuf);
+        rbuf.clear();
+        rbuf.extend(buf.iter().filter(|x| ranked(kind, x.0)).copied());
+        for (rank, &(text, _, _, class)) in rbuf.iter().enumerate() {
+            if class == TextClass::Char {
+                let info = self.chars.entry(text).or_default();
+                if !info.codes.iter().any(|(c, _)| c == code) {
+                    info.codes.push((code.to_string(), rank as u32));
+                }
+            }
+        }
+        let n = rbuf.len();
 
         if kind == StatsKind::Pinyin {
             self.seen_boundaries.clear();
@@ -418,9 +461,29 @@ impl<'a, 'o> StatsBuilder<'a, 'o> {
                 self.dup.max = n as u64;
                 self.dup.max_code = code.to_string();
             }
-            self.offer_top(code, &buf);
+            self.offer_top(code, &rbuf);
+        }
+        if let Some(main) = self.opts.main_layer {
+            self.main_texts.clear();
+            for e in entries.iter().filter(|e| e.layer == main) {
+                let t = e.text.trim();
+                if ranked(kind, t) && !self.main_texts.contains(&t) {
+                    self.main_texts.push(t);
+                }
+            }
+            let m = self.main_texts.len() as u64;
+            if m >= 2 {
+                let d = &mut self.main_dup;
+                d.groups += 1;
+                d.entries += m;
+                if m > d.max {
+                    d.max = m;
+                    d.max_code = code.to_string();
+                }
+            }
         }
         self.buf = buf;
+        self.rbuf = rbuf;
     }
 
     fn add_syllables(&mut self, code: &str, boundary: u64) {
@@ -474,10 +537,11 @@ impl<'a, 'o> StatsBuilder<'a, 'o> {
     fn full_code(info: &CharInfo, max_len: usize) -> Option<&(String, u32)> {
         info.codes
             .iter()
-            .filter(|(c, _)| max_len == 0 || c.len() <= max_len)
+            .filter(|(c, _)| max_len == 0 || c.chars().count() <= max_len)
             .min_by(|a, b| {
-                b.0.len()
-                    .cmp(&a.0.len())
+                b.0.chars()
+                    .count()
+                    .cmp(&a.0.chars().count())
                     .then(a.1.cmp(&b.1))
                     .then(a.0.cmp(&b.0))
             })
@@ -485,7 +549,9 @@ impl<'a, 'o> StatsBuilder<'a, 'o> {
 
     /// 字的最优码：(序位, 码长) 最小。
     fn best_code(info: &CharInfo) -> Option<&(String, u32)> {
-        info.codes.iter().min_by_key(|(c, r)| (*r, c.len()))
+        info.codes
+            .iter()
+            .min_by_key(|(c, r)| (*r, c.chars().count()))
     }
 
     pub fn finish(mut self) -> DictStats {
@@ -515,8 +581,8 @@ impl<'a, 'o> StatsBuilder<'a, 'o> {
                 let mut lens: Vec<usize> = info
                     .codes
                     .iter()
-                    .map(|(c, _)| c.len())
-                    .filter(|l| *l < fc.len())
+                    .map(|(c, _)| c.chars().count())
+                    .filter(|l| *l < fc.chars().count())
                     .collect();
                 lens.sort_unstable();
                 lens.dedup();
@@ -545,16 +611,45 @@ impl<'a, 'o> StatsBuilder<'a, 'o> {
         };
 
         if codetable {
-            let mut by_full: HashMap<&str, u64> = HashMap::new();
-            for c in full.values() {
-                *by_full.entry(c).or_default() += 1;
+            // 全码 → [(该码下的序位, 字)]
+            let mut by_full: HashMap<&str, Vec<(u32, &str)>> = HashMap::new();
+            for (t, c) in &full {
+                let rank = self.chars[t]
+                    .codes
+                    .iter()
+                    .find(|(x, _)| x == c)
+                    .map_or(u32::MAX, |(_, r)| *r);
+                by_full.entry(*c).or_default().push((rank, *t));
             }
-            let dups = by_full.values().filter(|n| **n >= 2);
+            let mut groups: Vec<(&str, Vec<(u32, &str)>)> =
+                by_full.into_iter().filter(|(_, v)| v.len() >= 2).collect();
+            groups.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then(a.0.cmp(b.0)));
+            let top = groups
+                .iter()
+                .take(self.opts.top_n)
+                .map(|(code, members)| {
+                    let mut m = members.clone();
+                    m.sort();
+                    DupGroup {
+                        code: code.to_string(),
+                        size: m.len() as u64,
+                        texts: m
+                            .into_iter()
+                            .take(TOP_MEMBERS_MAX)
+                            .map(|(_, t)| t.to_string())
+                            .collect(),
+                    }
+                })
+                .collect();
             self.dup.char_full = Some(CharFullDup {
-                groups: dups.clone().count() as u64,
-                chars: dups.clone().sum(),
-                max: dups.max().copied().unwrap_or(0),
+                groups: groups.len() as u64,
+                chars: groups.iter().map(|(_, v)| v.len() as u64).sum(),
+                max: groups.first().map_or(0, |(_, v)| v.len() as u64),
+                top,
             });
+        }
+        if self.opts.main_layer.is_some() {
+            self.dup.main = Some(std::mem::take(&mut self.main_dup));
         }
 
         let charsets = self
@@ -614,7 +709,7 @@ impl<'a, 'o> StatsBuilder<'a, 'o> {
                 if *rank > 0 {
                     sel += f;
                 }
-                len_sum += f * code.len() as u64;
+                len_sum += f * code.chars().count() as u64;
             }
         }
         if codetable {
@@ -801,6 +896,7 @@ mod tests {
                 max_code_length: 4,
                 top_n,
                 layers: ls,
+                main_layer: Some(0),
                 freq: Some(&freq),
                 charsets: &cs,
             },
@@ -870,14 +966,34 @@ mod tests {
     #[test]
     fn codetable_dup_groups_and_top_follow_static_rank() {
         let s = ct_stats(RankOrder::Weight, layers(&[0, 1, 2]), 10);
-        assert_eq!((s.dup.groups, s.dup.entries, s.dup.non_first), (2, 8, 6));
-        assert_eq!((s.dup.max, s.dup.max_code.as_str()), (4, "aaaa"));
+        // aaaa 的 😀 不算：aaaa 3（式 戒 工）、bbbb 4（子 孑 孓 子孙）
+        assert_eq!((s.dup.groups, s.dup.entries, s.dup.non_first), (2, 7, 5));
+        assert_eq!((s.dup.max, s.dup.max_code.as_str()), (4, "bbbb"));
+        let cf = s.dup.char_full.clone().unwrap();
+        assert_eq!((cf.groups, cf.chars, cf.max), (2, 6, 3));
         assert_eq!(
-            s.dup.char_full,
-            Some(CharFullDup {
+            cf.top,
+            vec![
+                DupGroup {
+                    code: "aaaa".into(),
+                    size: 3,
+                    texts: strs(&["式", "戒", "工"])
+                },
+                DupGroup {
+                    code: "bbbb".into(),
+                    size: 3,
+                    texts: strs(&["子", "孑", "孓"])
+                },
+            ]
+        );
+        // 主库单算：aaaa 只有工、式；bbbb 四个都在主库。
+        assert_eq!(
+            s.dup.main,
+            Some(MainDup {
                 groups: 2,
-                chars: 6,
-                max: 3
+                entries: 6,
+                max: 4,
+                max_code: "bbbb".into()
             })
         );
         // 式、戒同权 80：档位 0 的式在前；孑、孓同权 30：自然序决定。
@@ -885,31 +1001,108 @@ mod tests {
             s.dup.top,
             vec![
                 DupGroup {
-                    code: "aaaa".into(),
-                    size: 4,
-                    texts: strs(&["式", "戒", "工", "😀"])
-                },
-                DupGroup {
                     code: "bbbb".into(),
                     size: 4,
                     texts: strs(&["子", "孑", "孓", "子孙"])
+                },
+                DupGroup {
+                    code: "aaaa".into(),
+                    size: 3,
+                    texts: strs(&["式", "戒", "工"])
                 },
             ]
         );
         let s1 = ct_stats(RankOrder::Weight, layers(&[0, 1, 2]), 1);
         assert_eq!(s1.dup.top.len(), 1);
-        assert_eq!(s1.dup.top[0].code, "aaaa", "同大小按码升序保留");
+        assert_eq!(s1.dup.top[0].code, "bbbb", "留最大的一组");
+        assert_eq!(
+            s1.dup.char_full.unwrap().top[0].code,
+            "aaaa",
+            "同大小按码升序"
+        );
     }
 
     #[test]
     fn natural_order_and_default_weight_change_rank() {
+        let aaaa = |s: &DictStats| {
+            s.dup
+                .top
+                .iter()
+                .find(|g| g.code == "aaaa")
+                .unwrap()
+                .texts
+                .clone()
+        };
         let s = ct_stats(RankOrder::Natural, layers(&[0, 1, 2]), 10);
-        assert_eq!(s.dup.top[0].texts, strs(&["工", "式", "戒", "😀"]));
+        assert_eq!(aaaa(&s), strs(&["工", "式", "戒"]));
         // 扩展库整体定档 10：戒沉到工之后；「式」取主库那条（80）。
         let mut ls = layers(&[0, 1, 2]);
         ls[1].default_weight = Some(10);
         let s = ct_stats(RankOrder::Weight, ls, 10);
-        assert_eq!(s.dup.top[0].texts, strs(&["式", "工", "戒", "😀"]));
+        assert_eq!(aaaa(&s), strs(&["式", "工", "戒"]));
+    }
+
+    /// 同码下 emoji 权重更高也不占位：汉字仍是首选、不成重码组；含汉字的「T恤」照算重码。
+    #[test]
+    fn emoji_and_symbols_neither_rank_nor_make_dup_groups() {
+        let rows: &[Row] = &[
+            (0, "xx", "😀", 100, 0, 0),
+            (0, "xx", "※", 90, 1, 0),
+            (0, "xx", "汉", 10, 2, 0),
+            (0, "tx", "T恤", 50, 3, 0),
+            (0, "tx", "体", 40, 4, 0),
+        ];
+        let cs = vec![Charset {
+            key: "k".into(),
+            label: "K".into(),
+            chars: strs(&["汉", "体"]),
+        }];
+        let freq: HashMap<char, u64> = [('汉', 10), ('体', 30)].into_iter().collect();
+        let s = run(
+            rows,
+            StatsOptions {
+                kind: StatsKind::Codetable,
+                rank: RankOrder::Weight,
+                max_code_length: 4,
+                top_n: 10,
+                layers: layers(&[0]),
+                main_layer: Some(0),
+                freq: Some(&freq),
+                charsets: &cs,
+            },
+        );
+        assert_eq!(
+            (s.dup.groups, s.dup.max, s.dup.max_code.as_str()),
+            (1, 2, "tx")
+        );
+        assert_eq!(s.dup.top[0].texts, strs(&["T恤", "体"]));
+        assert_eq!(s.dup.main.as_ref().unwrap().groups, 1);
+        assert_eq!(s.total.other, 3, "😀 ※ T恤 都仍计入「其他」");
+        // 汉 在 xx 下是首选；体 被 T恤 压在第 2 → 选重率 30/40
+        assert_eq!(s.charsets[0].dyn_rate, Some(30.0 / 40.0));
+    }
+
+    /// 跨库去重按去掉首尾空白的文字：「 工」与「工」是同一条，不凑成重码组。
+    #[test]
+    fn dedup_ignores_surrounding_whitespace() {
+        let rows: &[Row] = &[(0, "a", " 工", 9, 0, 0), (1, "a", "工", 5, 0, 0)];
+        let s = run(
+            rows,
+            StatsOptions {
+                kind: StatsKind::Codetable,
+                rank: RankOrder::Weight,
+                max_code_length: 4,
+                top_n: 0,
+                layers: layers(&[0, 1]),
+                main_layer: None,
+                freq: None,
+                charsets: &[],
+            },
+        );
+        assert_eq!(
+            (s.total.entries, s.dup.groups, s.total.unique_chars),
+            (1, 0, 1)
+        );
     }
 
     #[test]
@@ -942,6 +1135,7 @@ mod tests {
                 max_code_length: 4,
                 top_n: 0,
                 layers: layers(&[0, 1, 2]),
+                main_layer: None,
                 freq: None,
                 charsets: &cs,
             },
@@ -966,6 +1160,7 @@ mod tests {
                 max_code_length: 4,
                 top_n: 0,
                 layers: layers(&[0]),
+                main_layer: None,
                 freq: None,
                 charsets: &[],
             },
@@ -1000,6 +1195,7 @@ mod tests {
                 max_code_length: 0,
                 top_n: 2,
                 layers: layers(&[0]),
+                main_layer: None,
                 freq: None,
                 charsets: &cs,
             },
@@ -1047,6 +1243,7 @@ mod tests {
                 max_code_length: 0,
                 top_n: 0,
                 layers: layers(&[0]),
+                main_layer: None,
                 freq: None,
                 charsets: &[],
             },

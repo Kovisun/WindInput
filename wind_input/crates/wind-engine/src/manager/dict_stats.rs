@@ -135,6 +135,16 @@ impl EngineManager {
         top_n: usize,
         refresh: bool,
     ) -> anyhow::Result<(Arc<SystemDictStats>, bool)> {
+        // 同一方案 single-flight：设置页连点「重新统计」或两处入口同时打开时，后到的等前一个
+        // 算完再查缓存，不并发扫两遍大词库（拼音一遍几十 MB 峰值）。不同方案互不阻塞。
+        let gate = self
+            .dict_stats_gates
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(schema_id.to_string())
+            .or_default()
+            .clone();
+        let _flight = gate.lock().unwrap_or_else(|e| e.into_inner());
         let data_dir = self
             .data_dir
             .as_deref()
@@ -285,6 +295,9 @@ impl EngineManager {
             max_code_length,
             top_n,
             layers: loaded.iter().map(|(_, _, l)| *l).collect(),
+            main_layer: loaded
+                .iter()
+                .position(|(row, _, _)| layers[*row].kind == "main"),
             freq: freq_source.as_ref().map(|_| &freq),
             charsets: &charsets,
         });
@@ -508,14 +521,16 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    /// 真实出厂数据冒烟（需 build_dev/data），数值与草案原型（Python 直接解析 yaml）对照。
+    /// 真实出厂数据冒烟，数值与草案原型（Python 直接解析 yaml）对照。要 build_dev/data，
+    /// 故默认 ignore（缺数据时静默通过就是假绿）：`cargo test -p wind-engine -- --ignored real_data`。
     #[test]
+    #[ignore = "需 build_dev/data"]
     fn real_data_smoke_wubi86_and_pinyin() {
         let data = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../build_dev/data");
-        if !data.join("schemas/wubi86.schema.toml").exists() {
-            eprintln!("跳过：缺 build_dev/data");
-            return;
-        }
+        assert!(
+            data.join("schemas/wubi86.schema.toml").exists(),
+            "缺 build_dev/data：整份拷进来再跑"
+        );
         let mut cfg = Config::default();
         cfg.schema.available = vec!["wubi86".into(), "pinyin".into()];
         cfg.schema.active = "wubi86".into();
@@ -551,6 +566,22 @@ mod tests {
         assert!(w.freq_source.is_some());
         let rate = w.charsets[2].dyn_rate.unwrap();
         assert!(rate > 0.0 && rate < 0.01, "{rate}");
+        // 重码不计纯 emoji：最大组不再是 emoj，Top 成员都含汉字（数值以出厂词库为准）。
+        assert_ne!(w.dup.max_code, "emoj");
+        assert!(
+            w.dup.top[0]
+                .texts
+                .iter()
+                .all(|t| t.chars().any(wind_dict::stats::is_han)),
+            "{:?}",
+            w.dup.top[0]
+        );
+        assert_eq!((w.dup.max, w.dup.max_code.as_str()), (41, "cccc"));
+        let md = w.dup.main.as_ref().unwrap();
+        eprintln!("wubi86 main dup {md:?}");
+        assert_eq!(md.max, 13, "主库最大重码");
+        let cf = w.dup.char_full.as_ref().unwrap();
+        assert_eq!(cf.top[0].size, cf.max, "单字全码 Top 与那一行同口径");
 
         let (p, _) = m.dict_stats("pinyin", 10, true).unwrap();
         eprintln!("pinyin {}ms total {:?}", p.elapsed_ms, p.total);

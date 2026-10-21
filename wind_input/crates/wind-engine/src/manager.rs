@@ -528,6 +528,8 @@ pub struct EngineManager {
     /// 词库统计结果（方案 id → (缓存键, 结果)），见 [`Self::dict_stats`]。键含各库摘要，
     /// 词库一变自然失效，故不接 `invalidate_schema`；只存结果（KB 级），不存中间集合。
     dict_stats_cache: Mutex<HashMap<String, (String, Arc<dict_stats::SystemDictStats>)>>,
+    /// 词库统计按方案 single-flight 的闸（方案 id → 锁），见 [`Self::dict_stats`]。
+    dict_stats_gates: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     /// 已建引擎所用用户分库的指纹（方案 id → [(数据方案, 指纹)]），建引擎前记下。不带路径的
     /// `dict.reload` 据此判断分库变没变（[`Self::user_dicts_changed`]）。
     user_dicts_seen: Mutex<HashMap<String, Vec<(String, String)>>>,
@@ -957,6 +959,7 @@ impl EngineManager {
             codetable_settings_gen: std::sync::atomic::AtomicU64::new(0),
             schema_type_cache: Mutex::new(HashMap::new()),
             dict_stats_cache: Mutex::new(HashMap::new()),
+            dict_stats_gates: Mutex::new(HashMap::new()),
             user_dicts_seen: Mutex::new(HashMap::new()),
             key_actions_cache: Mutex::new(HashMap::new()),
             session_actions_cache: Mutex::new(HashMap::new()),
