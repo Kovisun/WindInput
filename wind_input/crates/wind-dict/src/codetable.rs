@@ -868,6 +868,11 @@ impl CodetableDict {
         }
     }
 
+    /// 按码升序逐组遍历（`entries` 本就是 BTreeMap，序与 wdat 的 DFS 同为字节序）。
+    pub fn groups(&self) -> impl Iterator<Item = (&str, &[CodetableEntry])> {
+        self.entries.iter().map(|(c, v)| (c.as_str(), v.as_slice()))
+    }
+
     /// 总条目数
     pub fn len(&self) -> usize {
         self.total_entries
