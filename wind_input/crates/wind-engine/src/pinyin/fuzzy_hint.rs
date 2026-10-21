@@ -65,7 +65,7 @@ pub(crate) fn align_hints(
     cfg: &FuzzyConfig,
     input_ends_here: bool,
 ) -> Vec<FuzzyHint> {
-    if !cfg.hint || dict_syllables.is_empty() || typed.is_empty() || !typed.is_ascii() {
+    if !cfg.hint.get() || dict_syllables.is_empty() || typed.is_empty() || !typed.is_ascii() {
         return Vec::new();
     }
     let n = dict_syllables.len();
@@ -124,13 +124,14 @@ pub(crate) fn align_hints(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pinyin::fuzzy::HintSwitch;
 
     fn cfg() -> FuzzyConfig {
         FuzzyConfig {
             in_ing: true,
             n_l: true,
             sh_s: true,
-            hint: true,
+            hint: HintSwitch::new(true),
             ..Default::default()
         }
     }
@@ -208,7 +209,7 @@ mod tests {
     fn illegal_spelling_marked() {
         let c = FuzzyConfig {
             in_ing: true,
-            hint: true,
+            hint: HintSwitch::new(true),
             ..Default::default()
         };
         assert_eq!(align_hints("din", &["ding"], &c, false), vec![h(0, "ding")]);
@@ -217,7 +218,7 @@ mod tests {
     #[test]
     fn hint_off_returns_empty() {
         let mut c = cfg();
-        c.hint = false;
+        c.hint = HintSwitch::new(false);
         assert!(align_hints("pinguo", &["ping", "guo"], &c, true).is_empty());
     }
 
@@ -230,7 +231,7 @@ mod tests {
     fn zero_initial_final_fuzzy_marked() {
         let c = FuzzyConfig {
             en_eng: true,
-            hint: true,
+            hint: HintSwitch::new(true),
             ..Default::default()
         };
         assert_eq!(align_hints("eng", &["en"], &c, false), vec![h(0, "en")]);

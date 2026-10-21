@@ -2398,6 +2398,7 @@ impl PinyinEngine {
                 continue;
             }
             c.meta.fuzzy_hints = hints;
+            c.meta.fuzzy_syllables = syllables.iter().map(|s| s.to_string()).collect();
         }
     }
 }
@@ -4719,7 +4720,7 @@ impl Engine for PinyinEngine {
             _ => String::new(),
         };
 
-        if self.fuzzy_config.hint {
+        if self.fuzzy_config.hint.get() {
             self.fill_fuzzy_hints(&mut candidates, query, raw_input, sp_result.as_ref());
             self.fill_fuzzy_hints(&mut sentence_pool, query, raw_input, sp_result.as_ref());
         }
@@ -8218,7 +8219,7 @@ s = ["ao"]
         FuzzyConfig {
             in_ing: true,
             n_l: true,
-            hint: true,
+            hint: fuzzy::HintSwitch::new(true),
             ..Default::default()
         }
     }
@@ -8260,10 +8261,39 @@ s = ["ao"]
         assert!(hints_of(&r, "拼过").is_empty(), "精确命中不标");
     }
 
+    /// 整词正确音节随提示一并给出；词条码无边界（`boundary == 0`）时按 DAG 现切。
+    #[test]
+    fn hint_fills_word_syllables() {
+        let r = hint_engine(hint_cfg()).convert("pinguo", 20).unwrap();
+        let c = r.candidates.iter().find(|c| c.text == "苹果").unwrap();
+        assert_eq!(
+            c.meta.learn_code.as_ref().map(|l| l.1),
+            Some(0),
+            "前提：词条码无边界"
+        );
+        assert_eq!(c.meta.fuzzy_syllables, ["ping", "guo"]);
+        let exact = r.candidates.iter().find(|c| c.text == "拼过").unwrap();
+        assert!(exact.meta.fuzzy_syllables.is_empty(), "无提示不填");
+    }
+
+    /// 开关是共享的：同一引擎实例上翻转即生效，不必重建。
+    #[test]
+    fn hint_switch_flips_without_rebuild() {
+        let fz = hint_cfg();
+        let switch = fz.hint.clone();
+        let eng = hint_engine(fz);
+        switch.set(false);
+        let r = eng.convert("pinguo", 20).unwrap();
+        assert!(r.candidates.iter().all(|c| c.meta.fuzzy_hints.is_empty()));
+        switch.set(true);
+        let r = eng.convert("pinguo", 20).unwrap();
+        assert_eq!(hints_of(&r, "苹果"), &[fh(0, "ping")]);
+    }
+
     #[test]
     fn hint_off_leaves_empty() {
         let mut fz = hint_cfg();
-        fz.hint = false;
+        fz.hint = fuzzy::HintSwitch::new(false);
         let r = hint_engine(fz).convert("pinguo", 20).unwrap();
         assert!(r.candidates.iter().any(|c| c.text == "苹果"));
         assert!(r.candidates.iter().all(|c| c.meta.fuzzy_hints.is_empty()));
@@ -8333,6 +8363,17 @@ s = ["ao"]
         assert_eq!(hints_of(&r, "苹果"), &[fh(0, "ping")]);
     }
 
+    /// 用户词码无边界（`boundary == 0`）：整词音节按 DAG 现切，与提示同源。
+    #[test]
+    fn hint_user_word_without_boundary_fills_syllables() {
+        let eng =
+            engine_with_user_words_fuzzy("fz_hint_user_b0", &[("pingguo", "苹果", 0)], hint_cfg());
+        let r = eng.convert("pinguo", 20).unwrap();
+        let c = r.candidates.iter().find(|c| c.text == "苹果").unwrap();
+        assert_eq!(c.meta.fuzzy_hints, [fh(0, "ping")]);
+        assert_eq!(c.meta.fuzzy_syllables, ["ping", "guo"]);
+    }
+
     fn sp_hint_engine(layout: &str, words: &[(&str, &str)], fz: FuzzyConfig) -> PinyinEngine {
         let schema_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../../data/schemas/shuangpin");
@@ -8347,7 +8388,7 @@ s = ["ao"]
     fn shuangpin_partner_marked() {
         let fz = FuzzyConfig {
             sh_s: true,
-            hint: true,
+            hint: fuzzy::HintSwitch::new(true),
             ..Default::default()
         };
         let eng = sp_hint_engine("xiaohe.toml", &[("shua", "刷")], fz.clone());
@@ -8363,7 +8404,10 @@ s = ["ao"]
         let r = eng.convert("ux", 20).unwrap();
         assert!(hints_of(&r, "刷").is_empty());
         // hint 关：不标。
-        let off = FuzzyConfig { hint: false, ..fz };
+        let off = FuzzyConfig {
+            hint: fuzzy::HintSwitch::new(false),
+            ..fz
+        };
         let r = sp_hint_engine("xiaohe.toml", &[("shua", "刷")], off)
             .convert("sx", 20)
             .unwrap();
@@ -8378,7 +8422,7 @@ s = ["ao"]
         let run = |hint: bool| {
             let fz = FuzzyConfig {
                 sh_s: true,
-                hint,
+                hint: fuzzy::HintSwitch::new(hint),
                 ..Default::default()
             };
             sp_hint_engine("xiaohe.toml", &words, fz)
@@ -8400,7 +8444,7 @@ s = ["ao"]
     fn shuangpin_wrong_spelling_marked() {
         let fz = FuzzyConfig {
             in_ing: true,
-            hint: true,
+            hint: fuzzy::HintSwitch::new(true),
             ..Default::default()
         };
         let eng = sp_hint_engine("ziranma.toml", &[("ding", "丁")], fz);
@@ -8428,7 +8472,7 @@ s = ["ao"]
         let layout = Layout::from_toml(&schema_dir.join("xiaohe.toml")).unwrap();
         let fz = FuzzyConfig {
             in_ing: true,
-            hint: true,
+            hint: fuzzy::HintSwitch::new(true),
             ..Default::default()
         };
         let cfg = Config {
@@ -8474,7 +8518,7 @@ q = ["iu", "ui"]
         raw.merge_single("diu".to_string(), "丢".to_string(), 100, 0);
         raw.merge_single("dui".to_string(), "对".to_string(), 300, 1);
         let fz = FuzzyConfig {
-            hint: true,
+            hint: fuzzy::HintSwitch::new(true),
             ..Default::default()
         };
         let mut conv = ShuangpinConverter::new(Layout::from_toml_str(layout_toml).unwrap());

@@ -209,7 +209,7 @@ GH#230 楼主的两条诉求首版未覆盖，维护者定补：
 
 ### 9.1 带声调（可选）
 
-- 配置 `[schema.pinyin.fuzzy] hint_tone`（bool，默认 `false`）；设置端 label「提示带声调」，`hint` 关时禁用/隐藏。
+- 配置 `[schema.pinyin.fuzzy] hint_tone`（bool，默认 `false`）；设置端 label「提示带声调」，**不依赖 `hint`**（它同时作用于 §9.2 变量，`hint` 关着也有用），不设 `enabled_when`。
 - 开启后内嵌提示与 §9.2 变量都用带调拼音：`苹(píng)果`。
 - 取调复用 `wind-reverse` 的 `toned_pinyin_of(text, Some(&syllables), …)`：用词库音节筛读音表；同音异调（「为」wéi/wèi）
   取读音表里最常用的那个——与现有 `${pinyin}` 同一口径，是数据下界。某字读音表里查不到匹配音节时，该处退回不带调的
@@ -220,9 +220,11 @@ GH#230 楼主的两条诉求首版未覆盖，维护者定补：
 
 - 只在候选**带模糊提示**（`fuzzy_hints` 非空）时有值，否则为空串——可写成 `${code_hint|code_rev}{ ${fuzzy_pinyin}}`。
 - 值为该候选**整词的正确拼音**，音节以空格分隔（`zhong guo`），按 `hint_tone` 决定带不带调；字数与音节数对不上时为空。
+  音节由引擎随提示一并填进 `meta.fuzzy_syllables`（与内嵌提示同一切法，码无边界时按音节图现切），协调器不另行切分。
 - 不受 `hint_scope` 约束（它只管正文内嵌）；用模板的人自己决定放哪。
 - 引擎计算条件改为 `enabled && (hint || 任一生效注释模板引用了 fuzzy_pinyin)`：只想在注释里看、不想正文内嵌的人可以关
-  `hint`、只写模板。模板变化时按现有配置重载路径重建。
+  `hint`、只写模板。条件值放在 `EngineManager` 持有的共享开关里，注入各拼音引擎与双拼转换器、`convert` 时读取；
+  模板引用变化只翻开关、不重建引擎（提示是收尾后处理，不影响候选集合与排序）。
 - 角色 `fuzzy_pinyin`（同其他模板变量各有同名角色），登记 `TEXT_ROLES`；出厂 `_base` 的 `[comment.roles]` 给它与
   `text.roles.fuzzy_hint` 同色，主题未配时随注释色。
 - 设置端注释模板的变量清单 / 预览值、文档站模板变量表同步。

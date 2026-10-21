@@ -120,32 +120,17 @@ pub(crate) fn toned_hints(
         .collect()
 }
 
-/// 候选整词的词库音节：`learn_code`（没有则候选自身的码，同引擎 `fill_fuzzy_hints`）按边界切开，
-/// 一字一音节；无边界信息或字数对不上 ⇒ `None`。
-fn word_syllables(c: &Candidate) -> Option<Vec<&str>> {
-    let (code, boundary) = match &c.meta.learn_code {
-        Some((code, b)) => (code.as_str(), *b),
-        None => (c.code.as_str(), c.boundary),
-    };
-    if code.is_empty() || boundary == 0 {
-        return None;
-    }
-    let syls = crate::comment::syllables_of(code, boundary);
-    (syls.len() == c.text.chars().count()).then_some(syls)
-}
-
 /// `${fuzzy_pinyin}`（§9.2）：带模糊音提示的候选的整词正确拼音，音节以空格分隔；`tone` 有值即
-/// 带调。没有提示、或取不到逐字音节 ⇒ 空串。
+/// 带调。音节取引擎随提示给出的 `meta.fuzzy_syllables`（与内嵌提示同一切法）；没有提示、或
+/// 音节数与字数对不上 ⇒ 空串。
 pub(crate) fn fuzzy_pinyin_text(
     c: &Candidate,
     tone: Option<&wind_reverse::ReverseLookup>,
 ) -> String {
-    if c.meta.fuzzy_hints.is_empty() {
+    let syls = &c.meta.fuzzy_syllables;
+    if c.meta.fuzzy_hints.is_empty() || syls.len() != c.text.chars().count() {
         return String::new();
     }
-    let Some(syls) = word_syllables(c) else {
-        return String::new();
-    };
     match tone {
         Some(reverse) => c
             .text
@@ -185,6 +170,26 @@ mod tests {
             out.push((&s[at..], None));
         }
         out
+    }
+
+    /// `${fuzzy_pinyin}` 用引擎给的整词音节，不看候选码边界：`boundary == 0`（用户手输码）
+    /// 也出值；音节数对不上字数则空。
+    #[test]
+    fn fuzzy_pinyin_text_uses_engine_syllables() {
+        let mut c = Candidate {
+            text: "中国".into(),
+            code: "zongguo".into(),
+            ..Default::default()
+        };
+        c.meta.learn_code = Some(("zhongguo".into(), 0));
+        c.meta.fuzzy_hints = vec![fh(0, "zhong")];
+        c.meta.fuzzy_syllables = vec!["zhong".into(), "guo".into()];
+        assert_eq!(fuzzy_pinyin_text(&c, None), "zhong guo");
+        c.meta.fuzzy_syllables.pop();
+        assert_eq!(fuzzy_pinyin_text(&c, None), "");
+        c.meta.fuzzy_hints.clear();
+        c.meta.fuzzy_syllables = vec!["zhong".into(), "guo".into()];
+        assert_eq!(fuzzy_pinyin_text(&c, None), "", "无提示即空");
     }
 
     #[test]

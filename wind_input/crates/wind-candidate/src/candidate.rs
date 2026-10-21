@@ -106,6 +106,11 @@ pub struct CandidateMeta {
     /// 模糊音提示（空 = 无提示）。仅在模糊音与 `hint` 都开启时由引擎填充。
     #[serde(skip)]
     pub fuzzy_hints: Vec<FuzzyHint>,
+    /// 带提示候选的整词正确音节（一字一个，`["zhong", "guo"]`）；与 `fuzzy_hints` 同时由引擎
+    /// 填，`fuzzy_hints` 空时也空。切法与提示同源（词条码无边界时按音节图现切），协调器的
+    /// `${fuzzy_pinyin}` 直接用它，不另行切分。
+    #[serde(skip)]
+    pub fuzzy_syllables: Vec<String>,
 }
 
 /// 命令栏动作

@@ -2665,7 +2665,7 @@ impl Coordinator {
             &bundle.config,
             &crate::data_needs::SchemaFacts::collect(&engine_mgr),
         );
-        // 模板引用 `${fuzzy_pinyin}` 时拼音引擎要算提示；变了会重建已建的活跃方案引擎。
+        // 模板引用 `${fuzzy_pinyin}` 时拼音引擎要算提示（只翻开关，不重建引擎）。
         engine_mgr.set_fuzzy_pinyin_in_templates(needs.fuzzy_pinyin);
 
         // 短语层（方案 B）：TOML 变更时同步进 store，再从 store（仅 enabled）建层。

@@ -1137,4 +1137,86 @@ mod tests {
         drop(c);
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    // ───────────────────── ${fuzzy_pinyin}：翻转不重建引擎 ─────────────────────
+
+    /// 自造拼音方案：「中国」一词，开 zh↔z，`hint` 关。
+    fn fuzzy_fixture() -> (PathBuf, Config) {
+        let dir = std::env::temp_dir().join(format!("wind_dn_{}_fzpy", std::process::id()));
+        let schemas = dir.join("schemas");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(schemas.join("fh")).unwrap();
+        std::fs::write(
+            schemas.join("fh/mini.dict.yaml"),
+            "---\nname: mini\nversion: \"1\"\nsort: by_weight\n...\n中国\tzhong guo\t3000\n",
+        )
+        .unwrap();
+        std::fs::write(
+            schemas.join("fh.schema.toml"),
+            "[schema]\nid = \"fh\"\nname = \"fh\"\n[engine]\ntype = \"pinyin\"\n\
+             [[dictionaries]]\nid = \"mini\"\npath = \"fh/mini.dict.yaml\"\n\
+             type = \"rime_pinyin\"\ndefault = true\n",
+        )
+        .unwrap();
+        let mut c = Config::default();
+        c.schema.available = vec!["fh".into()];
+        c.schema.active = "fh".into();
+        c.input.default.chinese_mode = true;
+        c.schema.pinyin.fuzzy.enabled = true;
+        c.schema.pinyin.fuzzy.zh_z = true;
+        c.schema.pinyin.fuzzy.hint = false;
+        (dir, c)
+    }
+
+    /// 清空输入后敲 `zongguo`，取候选「中国」的注释（候选窗同一求值链）。
+    fn zhongguo_comment(c: &Coordinator) -> String {
+        use wind_bridge::handler::{KeyEventData, MessageHandler};
+        let key = |key_code: u32| KeyEventData {
+            key_code,
+            scan_code: 0,
+            modifiers: 0,
+            event_type: wind_ipc::protocol::EVENT_KEY_DOWN,
+            toggles: 0,
+            event_seq: 0,
+            prev_char: 0,
+        };
+        c.handle_key_event(&key(0x1B));
+        for ch in "ZONGGUO".chars() {
+            c.handle_key_event(&key(ch as u32));
+        }
+        let st = c.state.lock().unwrap();
+        let cand = st
+            .candidates
+            .iter()
+            .find(|x| x.text == "中国")
+            .unwrap_or_else(|| panic!("应有「中国」：{:?}", st.candidates))
+            .clone();
+        c.alt_commit_text(&st, &cand, wind_config::config::AltCommit::Comment)
+    }
+
+    /// 热重载加上 / 去掉 `${fuzzy_pinyin}`：变量随之出现 / 消失，引擎不重建（只翻提示开关）。
+    #[test]
+    fn fuzzy_pinyin_template_toggle_does_not_rebuild_engine() {
+        let (dir, cfg) = fuzzy_fixture();
+        let c = Coordinator::new_headless(cfg, Some(&dir));
+        assert_eq!(zhongguo_comment(&c), "", "出厂模板不引用");
+        let built = c.engine_mgr.engines_generation();
+
+        let set_tpl = |tpl: &str| {
+            c.refresh_config_in_memory(|cfg| {
+                cfg.ui.candidate.comment_template_vertical = tpl.into();
+                cfg.ui.candidate.comment_template_horizontal = tpl.into();
+            });
+            c.apply_data_needs();
+        };
+        set_tpl("${fuzzy_pinyin}");
+        assert!(c.engine_mgr.fuzzy_hint_active());
+        assert_eq!(zhongguo_comment(&c), "zhong guo");
+        set_tpl("");
+        assert!(!c.engine_mgr.fuzzy_hint_active());
+        assert_eq!(zhongguo_comment(&c), "");
+        assert_eq!(c.engine_mgr.engines_generation(), built, "翻转不该重建引擎");
+        drop(c);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

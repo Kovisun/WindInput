@@ -833,7 +833,7 @@ const SYLLABLE_SEP: &str = " ";
 ///
 /// 超过 64 字节的部分不再有边界信息（bitmask 装不下），并入最后一个音节 —— 拼音词长上限
 /// 远小于此，实际不触发，但不加这个界会读到 `>> 64` 的未定义移位。
-pub(crate) fn syllables_of(code: &str, boundary: u64) -> Vec<&str> {
+fn syllables_of(code: &str, boundary: u64) -> Vec<&str> {
     let mut out = Vec::new();
     let mut start = 0usize;
     for i in 1..code.len().min(64) {

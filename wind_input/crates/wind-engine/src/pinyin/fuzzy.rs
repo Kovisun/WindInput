@@ -4,10 +4,30 @@
 //! 允许用户输入时忽略常见发音混淆（如 z/zh, c/ch, s/sh, n/l）。
 
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::sync::LazyLock;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, LazyLock};
 
 /// 笛卡尔积展开的组合数上限（超出即降级，见 [`FuzzyMatcher::expand_syllables`]）。
 pub const MAX_FUZZY_COMBOS: usize = 64;
+
+/// 「算不算模糊音提示」的运行时开关：克隆共享同一份值，`EngineManager` 持有一份并注入各引擎，
+/// 翻转即时生效、无需重建引擎。提示只是 `convert` 收尾的后处理，不影响候选集合与排序。
+#[derive(Debug, Clone, Default)]
+pub struct HintSwitch(Arc<AtomicBool>);
+
+impl HintSwitch {
+    pub fn new(on: bool) -> Self {
+        Self(Arc::new(AtomicBool::new(on)))
+    }
+
+    pub fn get(&self) -> bool {
+        self.0.load(Ordering::Relaxed)
+    }
+
+    pub fn set(&self, on: bool) {
+        self.0.store(on, Ordering::Relaxed);
+    }
+}
 
 /// 模糊音配置
 #[derive(Debug, Clone, Default)]
@@ -27,8 +47,9 @@ pub struct FuzzyConfig {
     pub un_ong: bool,
     /// `eng ↔ ong`（`deng`↔`dong`、`zheng`↔`zhong`）。
     pub eng_ong: bool,
-    /// 候选正文内嵌正确全拼提示（= 配置 `enabled && hint`）。不影响展开/匹配，仅供上层消费。
-    pub hint: bool,
+    /// 算不算模糊音提示（见 [`HintSwitch`]；管理器按 `enabled && (hint || 模板引用 ${fuzzy_pinyin})`
+    /// 置值）。不影响展开/匹配，仅供上层消费。
+    pub hint: HintSwitch,
     /// 双拼**同键韵母**推出的等价音节：音节 → 同一键对下其余的合法读音
     /// （自定义布局 `q = ["iu", "ui"]` 时 `diu` → `[dui]`、`dui` → `[diu]`）。
     ///
