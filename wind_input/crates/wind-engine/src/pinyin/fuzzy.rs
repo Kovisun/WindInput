@@ -27,6 +27,8 @@ pub struct FuzzyConfig {
     pub un_ong: bool,
     /// `eng ↔ ong`（`deng`↔`dong`、`zheng`↔`zhong`）。
     pub eng_ong: bool,
+    /// 候选正文内嵌正确全拼提示（= 配置 `enabled && hint`）。不影响展开/匹配，仅供上层消费。
+    pub hint: bool,
     /// 双拼**同键韵母**推出的等价音节：音节 → 同一键对下其余的合法读音
     /// （自定义布局 `q = ["iu", "ui"]` 时 `diu` → `[dui]`、`dui` → `[diu]`）。
     ///

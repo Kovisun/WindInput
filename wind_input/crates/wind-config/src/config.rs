@@ -3035,6 +3035,27 @@ pub struct PinyinFuzzy {
     pub un_ong: bool,
     #[serde(default)]
     pub eng_ong: bool,
+    /// 模糊命中的候选正文内嵌正确全拼（「苹(ping)果」）。仅 `enabled` 时生效。
+    #[serde(default)]
+    pub hint: bool,
+    /// 提示范围：first = 只标第一个模糊命中的字，all = 全部。
+    #[serde(default, deserialize_with = "crate::tolerant_de::tolerant")]
+    pub hint_scope: FuzzyHintScope,
+}
+
+/// 模糊音提示范围（`[schema.pinyin.fuzzy] hint_scope`）。
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum FuzzyHintScope {
+    /// 只标第一个模糊命中的字。
+    #[default]
+    First,
+    /// 标出全部模糊命中的字。
+    All,
+}
+
+impl FuzzyHintScope {
+    pub const VALUES: &'static [&'static str] = &["first", "all"];
 }
 
 /// 快捷输入的**全局**行为配置。
@@ -13734,6 +13755,23 @@ scripts = { latin = 42 }
         let c = merged_with("[schema.pinyin.fuzzy]\nun_ong = true\n");
         assert!(c.schema.pinyin.fuzzy.un_ong);
         assert!(!c.schema.pinyin.fuzzy.eng_ong);
+    }
+
+    #[test]
+    fn pinyin_fuzzy_hint_defaults() {
+        let c = Config::default();
+        assert!(!c.schema.pinyin.fuzzy.hint);
+        assert_eq!(c.schema.pinyin.fuzzy.hint_scope, FuzzyHintScope::First);
+        let c = merged_with("[schema.pinyin.fuzzy]\nzh_z = true\n");
+        assert!(!c.schema.pinyin.fuzzy.hint);
+        assert_eq!(c.schema.pinyin.fuzzy.hint_scope, FuzzyHintScope::First);
+    }
+
+    #[test]
+    fn pinyin_fuzzy_hint_scope_parses_all() {
+        let c = merged_with("[schema.pinyin.fuzzy]\nhint = true\nhint_scope = \"all\"\n");
+        assert!(c.schema.pinyin.fuzzy.hint);
+        assert_eq!(c.schema.pinyin.fuzzy.hint_scope, FuzzyHintScope::All);
     }
 
     /// `auto_learn.max_word_length` 的默认值必须**两条路一致**：代码默认

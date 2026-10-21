@@ -6823,23 +6823,7 @@ impl EngineManager {
             // 从全局拼音配置构建引擎配置和模糊音（Task 1.4：修 fuzzy 从未生效 bug）。
             // enabled 作总开关：未启用时所有模糊标志归零（与 Go 行为一致）。
             let pg = pinyin_cfg;
-            let fuzzy = crate::pinyin::fuzzy::FuzzyConfig {
-                zh_z: pg.fuzzy.enabled && pg.fuzzy.zh_z,
-                ch_c: pg.fuzzy.enabled && pg.fuzzy.ch_c,
-                sh_s: pg.fuzzy.enabled && pg.fuzzy.sh_s,
-                n_l: pg.fuzzy.enabled && pg.fuzzy.n_l,
-                f_h: pg.fuzzy.enabled && pg.fuzzy.f_h,
-                r_l: pg.fuzzy.enabled && pg.fuzzy.r_l,
-                an_ang: pg.fuzzy.enabled && pg.fuzzy.an_ang,
-                en_eng: pg.fuzzy.enabled && pg.fuzzy.en_eng,
-                in_ing: pg.fuzzy.enabled && pg.fuzzy.in_ing,
-                ian_iang: pg.fuzzy.enabled && pg.fuzzy.ian_iang,
-                uan_uang: pg.fuzzy.enabled && pg.fuzzy.uan_uang,
-                un_ong: pg.fuzzy.enabled && pg.fuzzy.un_ong,
-                eng_ong: pg.fuzzy.enabled && pg.fuzzy.eng_ong,
-                // 双拼同键音节不来自用户配置，由 `with_shuangpin` 从布局推出。
-                ..Default::default()
-            };
+            let fuzzy = fuzzy_config_from_global(&pg.fuzzy);
             let pcfg = PinyinConfig {
                 use_smart_compose: pg.use_smart_compose,
                 // 纯拼音方案看 `[schema.pinyin.abbrev] enabled`；混输看 `mix.enable_pinyin_abbrev`，
@@ -8623,6 +8607,29 @@ fn misplaced_dict_font_keys(schema: &toml::Value) -> Vec<String> {
 
 mod dict_stats;
 
+/// 全局模糊音配置 → 引擎 `FuzzyConfig`：`enabled` 作总开关，未启用时所有标志（含 `hint`）归零。
+/// 双拼同键音节不来自用户配置，由 `with_shuangpin` 从布局推出。
+fn fuzzy_config_from_global(f: &wind_config::PinyinFuzzy) -> crate::pinyin::fuzzy::FuzzyConfig {
+    let on = f.enabled;
+    crate::pinyin::fuzzy::FuzzyConfig {
+        zh_z: on && f.zh_z,
+        ch_c: on && f.ch_c,
+        sh_s: on && f.sh_s,
+        n_l: on && f.n_l,
+        f_h: on && f.f_h,
+        r_l: on && f.r_l,
+        an_ang: on && f.an_ang,
+        en_eng: on && f.en_eng,
+        in_ing: on && f.in_ing,
+        ian_iang: on && f.ian_iang,
+        uan_uang: on && f.uan_uang,
+        un_ong: on && f.un_ong,
+        eng_ong: on && f.eng_ong,
+        hint: on && f.hint,
+        ..Default::default()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -8643,6 +8650,17 @@ mod tests {
             "本次请求的不淘汰"
         );
         assert!(!reverse_index_keeps("old", "stroke", "wubi86", &pins));
+    }
+
+    #[test]
+    fn fuzzy_hint_requires_enabled() {
+        let mut f = wind_config::PinyinFuzzy {
+            hint: true,
+            ..Default::default()
+        };
+        assert!(!fuzzy_config_from_global(&f).hint);
+        f.enabled = true;
+        assert!(fuzzy_config_from_global(&f).hint);
     }
 
     /// 混输引用环的路径要能直接贴进日志：自引用、互指、下游成环、菱形（非环）四种形状。

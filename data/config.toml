@@ -358,6 +358,10 @@ uan_uang = false
 # 韵母组（un/eng 与 ong）
 un_ong = false
 eng_ong = false
+# 显示正确拼音：模糊命中的候选正文内嵌正确全拼并着色（「苹(ping)果」）。仅模糊音 enabled 时生效。
+hint = false
+# 提示范围：first = 只标第一个模糊命中的字，all = 全部。
+hint_scope = "first"
 
 # 拼音调频（衰减参数；三个数值 0 = 用词频 store 的内置默认）。
 [schema.pinyin.frequency]
