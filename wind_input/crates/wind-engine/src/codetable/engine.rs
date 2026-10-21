@@ -190,7 +190,7 @@ pub struct CommitOptions {
     pub show_code_hint: bool,
     /// 精确匹配模式（关闭前缀匹配，对齐 Go SingleCodeInput）。
     pub single_code_input: bool,
-    /// 精确匹配空码补全：精确无候选且不超码长时，从更长编码取首选（对齐 Go SingleCodeComplete）。
+    /// 精确匹配空码补全：精确无候选且有更长编码时，从中取首选（对齐 Go SingleCodeComplete；不限码长）。
     pub single_code_complete: bool,
     /// 基础排序维度（weight 降序 / natural 出现序）。见 [`BaseSort`]。
     pub base_sort: BaseSort,
@@ -906,12 +906,10 @@ impl Engine for CodeTableEngine {
                 c.is_exact_code = c.code == input;
                 candidates.push(c);
             }
-        } else if self.opts.single_code_complete
-            && candidates.is_empty()
-            // `<=` 而非 `<`（论坛 t302）：码表可以收超码长的词条（小鹤音形实测），满码长空码时
-            // 照样有后续编码可提示。超码长那一段归顶码 / 整句，仍不碰。
-            && input.chars().count() <= self.max_code_length
-        {
+        } else if self.opts.single_code_complete && candidates.is_empty() {
+            // 不设码长闸门（论坛 t302）：码表可以收超码长的词条（小鹤音形实测），满码长乃至
+            // 超码长空码时照样有后续编码可提示，直到打全。池里只装更长编码，无后继即无货；
+            // 而有后继时顶码不触发，整句出了候选协调器也不采纳补全，故与两者都不相抢。
             // 空码补全：从更长编码备一小池候选作提示。
             // limit=8：够协调器过滤后仍有得选，又避免全量前缀扫描开销。
             //
@@ -1560,6 +1558,28 @@ mod tests {
                 "split={split_input}：满码长空码应备超码长后续"
             );
         }
+    }
+
+    /// 论坛 t302：超码长空码（第 5 码起）仍有更长后续 ⇒ 照样备补全并标剩余编码，直到打全。
+    #[test]
+    fn single_code_complete_fills_beyond_full_length() {
+        let e = engine_opts(
+            &[("abcdef", "你", 100), ("abcdgh", "他", 90)],
+            CommitOptions {
+                single_code_input: true,
+                single_code_complete: true,
+                show_code_hint: true,
+                ..Default::default()
+            },
+        );
+        let r = e.convert("abcde", 50).unwrap();
+        let hint = r.completion_hints.first().expect("超码长空码应备后续");
+        assert_eq!((hint.text.as_str(), hint.comment.as_str()), ("你", "f"));
+        assert!(
+            r.completion_hints.iter().all(|c| c.text != "他"),
+            "第 5 码已分岔，abcdgh 不是这串的后续"
+        );
+        assert!(e.convert("abcdx", 50).unwrap().completion_hints.is_empty());
     }
 
     #[test]
