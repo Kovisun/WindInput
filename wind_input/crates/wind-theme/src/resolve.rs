@@ -1444,9 +1444,12 @@ border = { color = \"#BB0000\", radius = 0, width = \"2px\" }
                         let Some(st) = st else { continue };
                         let want = match (k, i) {
                             ("tooltip", 0) => &want_tooltip,
-                            ("text", 0) if st.roles.len() == 1 => {
-                                // 模糊音提示段的角色色（候选正文里的 `(ping)`）；亮暗各自可解析。
-                                assert!(st.roles.contains_key("fuzzy_hint"), "{name} text.roles");
+                            ("text", 0) => {
+                                // text 常态只允许模糊音提示段的角色色（候选正文里的 `(ping)`）。
+                                assert!(
+                                    st.roles.keys().all(|r| r == "fuzzy_hint"),
+                                    "{name} dark={dark} text.roles 只允许 fuzzy_hint"
+                                );
                                 continue;
                             }
                             _ => {

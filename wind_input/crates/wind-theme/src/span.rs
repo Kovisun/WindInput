@@ -216,6 +216,9 @@ pub fn span_color(
     body
 }
 
+/// 模糊音提示段的角色名（与 wind-ui-types `TEXT_ROLES` 里的 `fuzzy_hint` 同名）。
+pub const FUZZY_HINT_ROLE: &str = "fuzzy_hint";
+
 /// 候选正文里模糊音提示段（`(ping)`）的颜色，角色名 [`FUZZY_HINT_ROLE`]。
 ///
 /// - `text`：`views.text`（提示段在候选正文里，角色色写在 `[text.roles]`）；`comment`：`views.comment`。
@@ -247,9 +250,6 @@ pub fn fuzzy_hint_color(
         .copied()
         .unwrap_or(comment_color)
 }
-
-/// 模糊音提示段的角色名（与 wind-ui-types `TEXT_ROLES` 里的 `fuzzy_hint` 同名）。
-pub const FUZZY_HINT_ROLE: &str = "fuzzy_hint";
 
 #[cfg(test)]
 mod tests {
