@@ -2357,28 +2357,38 @@ impl PinyinEngine {
         sp: Option<&shuangpin::SpConvertResult>,
     ) {
         for c in cands.iter_mut() {
-            let mut via_literal = false;
-            let (typed, ends_here) = if c.is_fullpinyin_fallback {
-                (c.code.clone(), c.code.len() == raw_input.len())
-            } else if let Some(sp) = sp {
+            let sp_main = sp.filter(|_| !c.is_fullpinyin_fallback);
+            if let Some(sp) = sp_main {
                 if c.code.is_empty() || !query.starts_with(c.code.as_str()) {
                     continue;
                 }
-                let (typed, changed) = literal_typed(sp, query, c.code.len());
-                via_literal = changed;
-                (typed, false)
-            } else {
-                (c.code.clone(), c.code.len() == query.len())
+                // 没有 `learn_code` 的（精确命中）只有换过本义读音才可能带提示：先零分配地判掉。
+                if c.meta.learn_code.is_none()
+                    && !sp
+                        .syllables
+                        .iter()
+                        .any(|s| s.literal.is_some() && s.fp_end <= c.code.len())
+                {
+                    continue;
+                }
+            } else if c.meta.learn_code.is_none() {
+                continue;
+            }
+            let (typed, ends_here) = match sp_main {
+                Some(sp) => (literal_typed(sp, query, c.code.len()), false),
+                None if c.is_fullpinyin_fallback => {
+                    (normalized_typed(&c.code), c.code.len() == raw_input.len())
+                }
+                None => (normalized_typed(&c.code), c.code.len() == query.len()),
             };
             let (dict_code, dict_boundary) = match &c.meta.learn_code {
                 Some((code, b)) => (code.as_str(), *b),
-                None if via_literal => (c.code.as_str(), c.boundary),
-                None => continue,
+                None => (c.code.as_str(), c.boundary),
             };
-            let typed: String = typed.chars().filter(|&ch| ch != '\'').collect();
-            let typed = spelling::normalize_u_umlaut(&typed);
             let mask = effective_boundary(dict_code, dict_boundary, &self.trie);
-            let syllables = split_by_boundary(dict_code, mask);
+            let Some(syllables) = mixed_abbrev::syllables_from_boundary(dict_code, mask) else {
+                continue;
+            };
             // 一字一音节；对不上（儿化、含英文的词条）整条不标——宁漏不错。
             if syllables.len() != c.text.chars().count() {
                 continue;
@@ -2393,46 +2403,37 @@ impl PinyinEngine {
 }
 
 /// 双拼：`query[..len]` 里各音节换成用户本义读音（[`shuangpin::SylSpan::literal`]），
-/// 回写段与残码原样保留。第二项为是否真的换过。
-fn literal_typed(sp: &shuangpin::SpConvertResult, query: &str, len: usize) -> (String, bool) {
-    if sp.syllables.iter().all(|s| s.literal.is_none()) {
-        return (query[..len].to_string(), false);
-    }
+/// 回写段与残码原样保留。`query` 是转换后的全拼（不含 `'`、无需 ü 归一化）。
+fn literal_typed(sp: &shuangpin::SpConvertResult, query: &str, len: usize) -> String {
     let mut out = String::with_capacity(len + 2);
     let mut cursor = 0usize;
-    let mut changed = false;
     for s in &sp.syllables {
         if s.fp_end > len {
             break;
         }
         out.push_str(&query[cursor..s.fp_start]);
-        match &s.literal {
-            Some(l) => {
-                out.push_str(l);
-                changed = true;
-            }
-            None => out.push_str(&query[s.fp_start..s.fp_end]),
-        }
+        out.push_str(s.literal.as_deref().unwrap_or(&query[s.fp_start..s.fp_end]));
         cursor = s.fp_end;
     }
     out.push_str(&query[cursor..len]);
-    (out, changed)
+    out
 }
 
-/// 按边界 bitmask（音节起点位）把 `code` 切成音节。
-fn split_by_boundary(code: &str, boundary: u64) -> Vec<&str> {
-    let mut out = Vec::new();
-    let mut start = 0usize;
-    for i in 1..code.len().min(64) {
-        if (boundary >> i) & 1 == 1 {
-            out.push(&code[start..i]);
-            start = i;
-        }
-    }
-    if start < code.len() {
-        out.push(&code[start..]);
-    }
-    out
+/// 全拼域的候选码规范成 [`fuzzy_hint::align_hints`] 要的形态：去 `'`、ü 归一化。
+///
+/// 防御性的：当前各路径交来的码已是这个形态（全拼主路径入口已归一、`completed` 与整句码
+/// 不含 `'`；降级支路的闸门遇 `'` 即拒，且词库用 `lve` 拼写时 `lue` 击键在支路里查不到词），
+/// 但对齐对拼写差一个字母就整条漏标，入口约定一变就静默失效，故在这里兜一次。
+fn normalized_typed(code: &str) -> String {
+    let stripped: std::borrow::Cow<str> = if code.contains('\'') {
+        code.chars()
+            .filter(|&ch| ch != '\'')
+            .collect::<String>()
+            .into()
+    } else {
+        code.into()
+    };
+    spelling::normalize_u_umlaut(&stripped).into_owned()
 }
 
 /// 候选码 `code` 是否恰好落在前 k 个音节的边界上（`syllables[..k].join("") == code`）。
@@ -8288,6 +8289,15 @@ s = ["ao"]
         let r = hint_engine(hint_cfg()).convert("lan", 20).unwrap();
         assert_eq!(hints_of(&r, "南"), &[fh(0, "nan")]);
         assert!(hints_of(&r, "蓝").is_empty());
+    }
+
+    /// fill 层的规范化：各路径当前交来的码已是规范形态、端到端构造不出（见
+    /// `normalized_typed` 文档），故直接验 helper；端到端只验入口归一化接上了提示。
+    #[test]
+    fn normalized_typed_strips_separator_and_umlaut() {
+        assert_eq!(normalized_typed("pin'guo"), "pinguo");
+        assert_eq!(normalized_typed("lue'lai"), "lvelai");
+        assert_eq!(normalized_typed("nihao"), "nihao");
     }
 
     #[test]
