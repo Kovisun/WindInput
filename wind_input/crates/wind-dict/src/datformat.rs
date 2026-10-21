@@ -1391,7 +1391,7 @@ impl WdatReader {
     pub fn open(path: impl AsRef<Path>) -> anyhow::Result<Self> {
         let path = path.as_ref();
         let file = std::fs::File::open(path)?;
-        let mmap = unsafe { Mmap::map(&file)? };
+        let mmap = crate::mapping::map_file(&file)?;
         if mmap.len() < HEADER_SIZE {
             anyhow::bail!("wdat too short");
         }

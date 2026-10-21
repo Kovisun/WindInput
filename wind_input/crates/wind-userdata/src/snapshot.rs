@@ -209,7 +209,7 @@ pub fn open(dir: &Path, name: &str) -> anyhow::Result<Option<Snapshot>> {
     if !meta_path.is_file() {
         return Ok(None);
     }
-    let meta = unsafe { memmap2::Mmap::map(&std::fs::File::open(&meta_path)?)? };
+    let meta = wind_dict::mapping::map_file(&std::fs::File::open(&meta_path)?)?;
     if meta.len() < META_HEADER
         || &meta[..4] != META_MAGIC
         || u16::from_le_bytes([meta[4], meta[5]]) != META_VERSION
