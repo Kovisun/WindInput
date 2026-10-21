@@ -383,7 +383,7 @@ fn completion_continues_past_full_length() {
     press(&coord, "ojss");
     assert_eq!(coord.debug_page_texts(), vec!["后续"], "满码长");
     press(&coord, "a");
-    assert_eq!(coord.debug_preedit(), "ojssa", "第 5 码不得顶码");
+    assert_eq!(coord.debug_input_buffer(), "ojssa", "第 5 码不得顶码");
     assert_eq!(
         coord.debug_page_texts(),
         vec!["后续"],
@@ -405,4 +405,27 @@ fn completion_continues_past_full_length() {
     ph.debug_install_phrases(vec![seed("ojsxyz", "短语后续")]);
     press(&ph, "ojsxy");
     assert_eq!(ph.debug_page_texts(), vec!["短语后续"], "超码长短语后续");
+}
+
+/// 论坛 t302 连带：开 `clear_on_empty_max` 时，超码长的短语后续补全须拦住满码空码清空。
+/// 引擎只看码表（`ojsxy` 无后继 ⇒ 给出清空资格），协调器按最终列表裁决——补出的短语后续
+/// 在列表里就不清。反例：`ojssz` 码表与短语都无后继，照常清空。
+#[test]
+fn phrase_completion_past_full_length_blocks_clear_on_empty_max() {
+    let exact_clear = |c: &mut Config| {
+        c.schema.codetable.single_code_input = true;
+        c.schema.codetable.single_code_complete = true;
+        c.schema.codetable.clear_on_empty_max = true;
+    };
+    let (ph, _d) = coord_xy_with("t302_clear_ph", "后续\tojssab\n", exact_clear);
+    ph.debug_install_phrases(vec![seed("ojsxyz", "短语后续")]);
+    press(&ph, "ojsxy");
+    assert_eq!(ph.debug_input_buffer(), "ojsxy", "有短语后续时不得清空");
+    assert_eq!(ph.debug_page_texts(), vec!["短语后续"]);
+
+    let (bare, _d1) = coord_xy_with("t302_clear_bare", "后续\tojssab\n", exact_clear);
+    bare.debug_install_phrases(vec![seed("ojsxyz", "短语后续")]);
+    press(&bare, "ojssz");
+    assert_eq!(bare.debug_input_buffer(), "", "无任何后继照常清空");
+    assert!(bare.debug_page_texts().is_empty());
 }

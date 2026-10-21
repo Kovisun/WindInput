@@ -2043,7 +2043,7 @@ impl Coordinator {
         // 候选，直通命令 `$CC(…ime.schema…)` 成了唯一一条，打完第三码当场执行。简拼开着时
         // 不触发只是碰巧多了一条简拼候选，换个无拼音解的码照样中招。
         //
-        // ⚠️ 必须问满码长而不是 `active_max_code_length`：后者对混输刻意为 0，用它会把混输
+        // ⚠️ 必须问满码长而不是活跃引擎的 `Engine::max_code_length`：后者对混输刻意为 0，用它会把混输
         // 一并拦下（v0.126.0 的回归）。
         if self.engine_mgr.active_full_code_length() == 0 {
             return None;

@@ -883,6 +883,10 @@ impl Engine for CodeTableEngine {
             candidates.push(c);
         }
 
+        // has_longer 一次求值复用：空码补全的前置判据、自动上屏判定与满码空码清空共用同一
+        // 「更长后继」索引查询（直问有序索引，不物化候选），避免每次按键各查一次。
+        let has_longer = self.has_longer_code(input);
+
         // 前缀匹配补充（精确匹配模式下跳过）
         let mut completion_hints: Vec<Candidate> = Vec::new();
         if !self.opts.single_code_input {
@@ -906,10 +910,12 @@ impl Engine for CodeTableEngine {
                 c.is_exact_code = c.code == input;
                 candidates.push(c);
             }
-        } else if self.opts.single_code_complete && candidates.is_empty() {
+        } else if self.opts.single_code_complete && candidates.is_empty() && has_longer {
             // 不设码长闸门（论坛 t302）：码表可以收超码长的词条（小鹤音形实测），满码长乃至
-            // 超码长空码时照样有后续编码可提示，直到打全。池里只装更长编码，无后继即无货；
-            // 而有后继时顶码不触发，整句出了候选协调器也不采纳补全，故与两者都不相抢。
+            // 超码长空码时照样有后续编码可提示，直到打全。判据只剩「有更长后继」，无后继时
+            // 连前缀扫描都不做。超码长那一段与顶码、整句的关系：有后继时顶码不触发；开整句时
+            // 若整句可解，屏上是整句、补全不显示（协调器按最终列表判空后才采纳），整句解不出
+            // 才轮到补全。
             // 空码补全：从更长编码备一小池候选作提示。
             // limit=8：够协调器过滤后仍有得选，又避免全量前缀扫描开销。
             //
@@ -987,9 +993,6 @@ impl Engine for CodeTableEngine {
         }
 
         let is_empty = candidates.is_empty();
-        // has_longer 一次求值复用：自动上屏判定与满码空码清空共用同一「更长后继」前缀扫描，
-        // 避免每次按键各查一次 search_prefix（此前经 should_auto_commit + should_clear 两次）。
-        let has_longer = self.has_longer_code(input);
         let (should_commit, commit_text) = match decide_auto_commit(
             self.opts.auto_commit_at_full,
             self.opts.auto_commit_min_len,
