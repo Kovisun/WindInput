@@ -190,7 +190,7 @@ pub struct CommitOptions {
     pub show_code_hint: bool,
     /// 精确匹配模式（关闭前缀匹配，对齐 Go SingleCodeInput）。
     pub single_code_input: bool,
-    /// 精确匹配空码补全：精确无候选且不超码长时，从更长编码取首选（对齐 Go SingleCodeComplete）。
+    /// 精确匹配空码补全：精确无候选且有更长编码时，从中取首选（对齐 Go SingleCodeComplete；不限码长）。
     pub single_code_complete: bool,
     /// 基础排序维度（weight 降序 / natural 出现序）。见 [`BaseSort`]。
     pub base_sort: BaseSort,
@@ -883,6 +883,10 @@ impl Engine for CodeTableEngine {
             candidates.push(c);
         }
 
+        // has_longer 一次求值复用：空码补全的前置判据、自动上屏判定与满码空码清空共用同一
+        // 「更长后继」索引查询（直问有序索引，不物化候选），避免每次按键各查一次。
+        let has_longer = self.has_longer_code(input);
+
         // 前缀匹配补充（精确匹配模式下跳过）
         let mut completion_hints: Vec<Candidate> = Vec::new();
         if !self.opts.single_code_input {
@@ -906,12 +910,12 @@ impl Engine for CodeTableEngine {
                 c.is_exact_code = c.code == input;
                 candidates.push(c);
             }
-        } else if self.opts.single_code_complete
-            && candidates.is_empty()
-            // `<=` 而非 `<`（论坛 t302）：码表可以收超码长的词条（小鹤音形实测），满码长空码时
-            // 照样有后续编码可提示。超码长那一段归顶码 / 整句，仍不碰。
-            && input.chars().count() <= self.max_code_length
-        {
+        } else if self.opts.single_code_complete && candidates.is_empty() && has_longer {
+            // 不设码长闸门（论坛 t302）：码表可以收超码长的词条（小鹤音形实测），满码长乃至
+            // 超码长空码时照样有后续编码可提示，直到打全。判据只剩「有更长后继」，无后继时
+            // 连前缀扫描都不做。超码长那一段与顶码、整句的关系：有后继时顶码不触发；开整句时
+            // 若整句可解，屏上是整句、补全不显示（协调器按最终列表判空后才采纳），整句解不出
+            // 才轮到补全。
             // 空码补全：从更长编码备一小池候选作提示。
             // limit=8：够协调器过滤后仍有得选，又避免全量前缀扫描开销。
             //
@@ -989,9 +993,6 @@ impl Engine for CodeTableEngine {
         }
 
         let is_empty = candidates.is_empty();
-        // has_longer 一次求值复用：自动上屏判定与满码空码清空共用同一「更长后继」前缀扫描，
-        // 避免每次按键各查一次 search_prefix（此前经 should_auto_commit + should_clear 两次）。
-        let has_longer = self.has_longer_code(input);
         let (should_commit, commit_text) = match decide_auto_commit(
             self.opts.auto_commit_at_full,
             self.opts.auto_commit_min_len,
@@ -1560,6 +1561,28 @@ mod tests {
                 "split={split_input}：满码长空码应备超码长后续"
             );
         }
+    }
+
+    /// 论坛 t302：超码长空码（第 5 码起）仍有更长后续 ⇒ 照样备补全并标剩余编码，直到打全。
+    #[test]
+    fn single_code_complete_fills_beyond_full_length() {
+        let e = engine_opts(
+            &[("abcdef", "你", 100), ("abcdgh", "他", 90)],
+            CommitOptions {
+                single_code_input: true,
+                single_code_complete: true,
+                show_code_hint: true,
+                ..Default::default()
+            },
+        );
+        let r = e.convert("abcde", 50).unwrap();
+        let hint = r.completion_hints.first().expect("超码长空码应备后续");
+        assert_eq!((hint.text.as_str(), hint.comment.as_str()), ("你", "f"));
+        assert!(
+            r.completion_hints.iter().all(|c| c.text != "他"),
+            "第 5 码已分岔，abcdgh 不是这串的后续"
+        );
+        assert!(e.convert("abcdx", 50).unwrap().completion_hints.is_empty());
     }
 
     #[test]

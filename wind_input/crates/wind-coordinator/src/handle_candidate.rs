@@ -1557,7 +1557,7 @@ impl Coordinator {
             // 精确匹配模式（`single_code_input`，仅纯码表方案）：默认抑制短语前缀枚举，只保留上面的
             // 精确码短语（`lookup`）——与码表引擎跳过 `search_prefix` 的行为对齐。混输不适用：其拼音半边
             // 恒前缀匹配，切精确会与拼音割裂（见 `EngineManager::is_codetable`）。
-            // 例外——镜像码表引擎 `single_code_complete`：当前无任何候选（码表 + 精确短语均空）且不超码长时，
+            // 例外——镜像码表引擎 `single_code_complete`：当前无任何候选（码表 + 精确短语均空）时，
             // 放行一次前缀枚举作**补全候选源**，避免精确模式下彻底无候选。
             let ct = self.engine_mgr.codetable_settings();
             // 引擎模式：纯码表 vs 拼音/混输。全局短语的前缀命中按**来源**（来源=短语库、全局、
@@ -1570,11 +1570,8 @@ impl Coordinator {
             // 空码补全的短语侧取数闸门：仅在精确模式抑制了前缀枚举时才可能触发。此处的
             // `candidates.is_empty()` 已是「码表候选 + 精确短语」之和——码表引擎不再抢先把
             // 补全候选塞进来（见 `ConvertResult::completion_hint`），故这个「空」判得准。
-            let complete_fallback = exact_only
-                && ct.single_code_complete
-                && candidates.is_empty()
-                // `<=`：满码长空码也补（论坛 t302），与引擎侧 `completion_hints` 的闸门同口径。
-                && state.input_buffer.chars().count() <= self.engine_mgr.active_max_code_length();
+            // 不设码长闸门（论坛 t302）：满码长乃至超码长空码也补，与引擎侧 `completion_hints` 同口径。
+            let complete_fallback = exact_only && ct.single_code_complete && candidates.is_empty();
             let prefix_hits = if !exact_only || complete_fallback {
                 phrases.lookup_prefix(&state.input_buffer, &recent, min_prefix, &phrase_scope)
             } else {
@@ -2046,7 +2043,7 @@ impl Coordinator {
         // 候选，直通命令 `$CC(…ime.schema…)` 成了唯一一条，打完第三码当场执行。简拼开着时
         // 不触发只是碰巧多了一条简拼候选，换个无拼音解的码照样中招。
         //
-        // ⚠️ 必须问满码长而不是 `active_max_code_length`：后者对混输刻意为 0，用它会把混输
+        // ⚠️ 必须问满码长而不是活跃引擎的 `Engine::max_code_length`：后者对混输刻意为 0，用它会把混输
         // 一并拦下（v0.126.0 的回归）。
         if self.engine_mgr.active_full_code_length() == 0 {
             return None;

@@ -3317,14 +3317,6 @@ impl EngineManager {
             .unwrap_or(false)
     }
 
-    /// 活跃引擎的最大编码长度（码表返回其码长；拼音/无意义引擎返回 0）。
-    /// 供协调器判定短语前缀补全是否"未满码"（镜像码表引擎 single_code_complete 的 `input < max` 条件）。
-    pub fn active_max_code_length(&self) -> usize {
-        self.active_engine()
-            .map(|e| e.max_code_length())
-            .unwrap_or(0)
-    }
-
     /// 活跃引擎的码元字符集（`[engine.codetable].input_chars` / `.leading_chars`）。
     ///
     /// 未加载引擎、或引擎无「码元」概念（拼音等，`Engine::input_chars` 返回 `None`）时，
@@ -3396,14 +3388,14 @@ impl EngineManager {
 
     /// 活跃方案的满码长：码表取其码长，混输取主码表的，拼音 / 双拼为 0（无「满码」）。
     ///
-    /// 与 [`Self::active_max_code_length`] 只差在混输：那个值对混输刻意为 0。短语自动上屏
+    /// 与活跃引擎自报的 [`Engine::max_code_length`] 只差在混输：那个值对混输刻意为 0。短语自动上屏
     /// 的「是否参与」与最短码长都按本值判，混输才和它的主码表同口径。
     pub fn active_full_code_length(&self) -> usize {
         self.active_wildcard_code_length()
     }
 
     /// 活跃方案的通配码长（[`Engine::wildcard_code_length`]；混输取主码表的）。
-    /// 协调器判「满码后通配键按字面」只从这里取，**不**用 [`Self::active_max_code_length`]
+    /// 协调器判「满码后通配键按字面」只从这里取，**不**用活跃引擎的 [`Engine::max_code_length`]
     /// ——混输那个值刻意为 0。
     pub fn active_wildcard_code_length(&self) -> usize {
         self.active_engine()
