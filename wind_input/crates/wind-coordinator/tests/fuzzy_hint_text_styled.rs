@@ -216,3 +216,33 @@ fn scope_first_skips_candidate_whose_hint_is_truncated_away() {
     assert!(items[1].text_styled.is_empty(), "提示所在的字被截掉");
     assert_eq!(items[2].text_styled.as_str(), "品(pin)…");
 }
+
+/// `first` 在整条排序列表上找第一个带提示的候选，翻页后它不在当前页，之后各页都不带提示。
+#[test]
+fn scope_first_later_pages_have_no_hint() {
+    let f = fixture("first_pages");
+    let (coord, rx) = open_with(&f, true, FuzzyHintScope::First, |c| {
+        c.ui.candidate.per_page = 2;
+    });
+    type_str(&coord, "pinguo");
+    let page1 = shown(&coord, &rx);
+    assert_eq!(
+        texts(&page1),
+        vec!["拼过", "苹果"],
+        "前提：第 1 页含首个提示"
+    );
+    assert_eq!(page1[1].text_styled.as_str(), "苹(ping)果");
+
+    const VK_NEXT: u32 = 0x22;
+    coord.handle_key_event(&key(VK_NEXT));
+    let page2 = shown(&coord, &rx);
+    assert_eq!(texts(&page2), vec!["平过"], "前提：翻到第 2 页");
+    assert!(
+        page2.iter().all(|c| c.text_styled.is_empty()),
+        "first：之后的页不带提示：{:?}",
+        page2
+            .iter()
+            .map(|c| c.text_styled.as_str())
+            .collect::<Vec<_>>()
+    );
+}

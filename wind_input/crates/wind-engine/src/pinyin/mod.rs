@@ -8408,6 +8408,58 @@ s = ["ao"]
         assert_eq!(hints_of(&r, "丁"), &[fh(0, "ding")]);
     }
 
+    /// 双拼开了「全拼也能打」：全拼降级支路召回的模糊命中同样带提示，末尾判据对整串击键
+    /// （`raw_input.len()`）——`xinqing` 的非末音节 xin 照标，`qingxin` 的末音节 xin 可能只是
+    /// xing 没打完，不标。
+    #[test]
+    fn full_pinyin_fallback_hint_uses_raw_input_for_trailing() {
+        use std::io::Write;
+        let path = std::env::temp_dir().join("wind_fp_fallback_hint.dict.yaml");
+        {
+            let mut f = std::fs::File::create(&path).unwrap();
+            writeln!(f, "---\nname: py\n...").unwrap();
+            writeln!(f, "性情\txing qing\t300").unwrap();
+            writeln!(f, "情性\tqing xing\t300").unwrap();
+        }
+        let dict = CachedDict::Memory(CodetableDict::load(&path).unwrap());
+        let _ = std::fs::remove_file(&path);
+        let schema_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../data/schemas/shuangpin");
+        let layout = Layout::from_toml(&schema_dir.join("xiaohe.toml")).unwrap();
+        let fz = FuzzyConfig {
+            in_ing: true,
+            hint: true,
+            ..Default::default()
+        };
+        let cfg = Config {
+            allow_full_pinyin: true,
+            ..Config::default()
+        };
+        let mut conv = ShuangpinConverter::new(layout);
+        conv.set_fuzzy(&fz);
+        let eng = PinyinEngine::new(cfg, dict)
+            .with_shuangpin(conv)
+            .with_fuzzy(fz);
+
+        let r = eng.convert("xinqing", 20).unwrap();
+        let c = r
+            .candidates
+            .iter()
+            .find(|c| c.text == "性情")
+            .unwrap_or_else(|| panic!("{:?}", texts(&r)));
+        assert!(c.is_fullpinyin_fallback, "前提：来自全拼降级支路");
+        assert_eq!(c.meta.fuzzy_hints, vec![fh(0, "xing")]);
+
+        let r = eng.convert("qingxin", 20).unwrap();
+        let c = r
+            .candidates
+            .iter()
+            .find(|c| c.text == "情性")
+            .unwrap_or_else(|| panic!("{:?}", texts(&r)));
+        assert!(c.is_fullpinyin_fallback, "前提：来自全拼降级支路");
+        assert!(c.meta.fuzzy_hints.is_empty(), "末音节 xin 可能没打完，不标");
+    }
+
     /// 双拼同键音节（自定义布局 `q = ["iu", "ui"]`）不算打错，不标。
     #[test]
     fn shuangpin_shared_key_not_marked() {
