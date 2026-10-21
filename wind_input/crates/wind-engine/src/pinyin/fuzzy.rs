@@ -564,6 +564,8 @@ impl FuzzyMatcher {
     ///
     /// 供「模糊音提示」判定用户敲的段是不是这个音节的模糊拼写；[`Self::fuzzy_variants`]
     /// 对合法音节会滤掉非法产物，`din` 这类真实误打因此判不出来。
+    ///
+    /// 不读 [`FuzzyConfig::shared_key`]：调用方传整份配置即可，无需先 `without_shared_key`。
     pub(crate) fn fuzzy_spelling_variants(input: &str, config: &FuzzyConfig) -> Vec<String> {
         let (initial, final_) = split_initial_final(input);
         let initials = part_options(initial, INITIAL_GROUPS, config);

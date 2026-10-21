@@ -6,6 +6,9 @@
 use super::fuzzy::{FuzzyConfig, FuzzyMatcher};
 use wind_candidate::FuzzyHint;
 
+/// 最长音节的字节数（`zhuang`、`chuang`、`shuang`）。
+const MAX_SYLLABLE_LEN: usize = 6;
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Kind {
     Equal,
@@ -51,6 +54,10 @@ fn classify(u: &str, c: &str, variants: &[String], last_open: bool) -> Option<Ki
 
 /// 对齐 `typed` 与 `dict_syllables`，返回读错的音节（`char_index` 升序）。
 ///
+/// `typed` 须是规范化全拼：已做 ü 归一化（`lue` → `lve`，见 [`super::spelling`]）、不含 `'`
+/// 分隔符，否则整条对不上、静默漏标。`cfg` 原样传入即可：拼写变体只看用户模糊组、不读
+/// 双拼同键音节（见 [`FuzzyMatcher::fuzzy_spelling_variants`]）。
+///
 /// `input_ends_here`：`typed` 的末尾就是用户当前输入的末尾。对齐失败返回空。
 pub(crate) fn align_hints(
     typed: &str,
@@ -63,10 +70,9 @@ pub(crate) fn align_hints(
     }
     let n = dict_syllables.len();
     let m = typed.len();
-    let group_cfg = cfg.without_shared_key();
     let variants: Vec<Vec<String>> = dict_syllables
         .iter()
-        .map(|c| FuzzyMatcher::fuzzy_spelling_variants(c, &group_cfg))
+        .map(|c| FuzzyMatcher::fuzzy_spelling_variants(c, cfg))
         .collect();
 
     // best[i][p]：前 i 个音节消费了 typed[..p] 的最优 (代价, Fuzzy 段数)。
@@ -78,7 +84,8 @@ pub(crate) fn align_hints(
     for i in 0..n {
         for p in 0..m {
             let Some(base) = best[i][p] else { continue };
-            for q in (p + 1)..=m {
+            // 一段至多一个音节，最长音节 6 字节（`zhuang`）。
+            for q in (p + 1)..=(p + MAX_SYLLABLE_LEN).min(m) {
                 let last_open = input_ends_here && i + 1 == n && q == m;
                 let Some(kind) = classify(&typed[p..q], dict_syllables[i], &variants[i], last_open)
                 else {
@@ -212,6 +219,33 @@ mod tests {
         let mut c = cfg();
         c.hint = false;
         assert!(align_hints("pinguo", &["ping", "guo"], &c, true).is_empty());
+    }
+
+    #[test]
+    fn fuzzy_prefix_marks_nothing() {
+        assert!(align_hints("l", &["nan"], &cfg(), true).is_empty());
+    }
+
+    #[test]
+    fn zero_initial_final_fuzzy_marked() {
+        let c = FuzzyConfig {
+            en_eng: true,
+            hint: true,
+            ..Default::default()
+        };
+        assert_eq!(align_hints("eng", &["en"], &c, false), vec![h(0, "en")]);
+    }
+
+    #[test]
+    fn nve_lve_mark_each_other() {
+        assert_eq!(
+            align_hints("nve", &["lve"], &cfg(), true),
+            vec![h(0, "lve")]
+        );
+        assert_eq!(
+            align_hints("lve", &["nve"], &cfg(), true),
+            vec![h(0, "nve")]
+        );
     }
 
     #[test]
