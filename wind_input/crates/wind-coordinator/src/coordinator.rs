@@ -5879,15 +5879,16 @@ impl Coordinator {
             .candidate_flipped
             .load(std::sync::atomic::Ordering::Relaxed);
         //
-        // 展开态（`grid_top` 有值）整组改写：高亮上下 = 换行、翻页 = 滚一屏，见 `candidate_grid`。
+        // 展开态（`grid_top` 有值）整组改写：高亮上下 = 换行、翻页 = 滚一行（PageUp/PageDown
+        // 可翻一屏），见 `candidate_grid`。
         // 网格只在横排出现，`flipped`（竖排专属）在这里恒为 false，两支不会相遇。
         // 收起态按下翻页先试展开：展开了就只展开、不翻页（设计 D3）。
         let changed = if Self::grid_active(state) {
             match nav {
                 keymap::NavAction::HighlightUp => self.grid_move_row(state, false),
                 keymap::NavAction::HighlightDown => self.grid_move_row(state, true),
-                keymap::NavAction::PagePrev => self.grid_page(state, false),
-                keymap::NavAction::PageNext => self.grid_page(state, true),
+                keymap::NavAction::PagePrev => self.grid_page_key(state, false, data.key_code),
+                keymap::NavAction::PageNext => self.grid_page_key(state, true, data.key_code),
             }
         } else {
             match nav {
@@ -8192,11 +8193,7 @@ impl Coordinator {
         }
         let changed = if Self::grid_active(&state) {
             // 鼠标往上滚到第一行就停住，不像 ↑ 那样收起：滚轮滚过头是常事。
-            if dir > 0 {
-                self.grid_scroll_down(&mut state)
-            } else {
-                state.current_page > 0 && self.grid_move_row(&mut state, false)
-            }
+            self.grid_scroll(&mut state, dir > 0)
         } else if dir < 0 {
             self.page_prev(&mut state)
         } else {

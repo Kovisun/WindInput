@@ -7,7 +7,7 @@
 //! 高亮项，扩容与末页放宽照常从翻页那条路触发。这里新增的只有两样东西：
 //! - **滚动位置** `State::grid_top`（可见区第一行对应的页）；
 //! - **二维导航**：↑↓ 换行保持列号、←→ 线性移动（越过行尾折到下一行，正是既有的
-//!   `move_up` / `move_down`）、翻页键一次滚一屏、Esc 收起。
+//!   `move_up` / `move_down`）、翻页键逐行滚（PageUp/PageDown 可翻一整屏）、Esc 收起。
 //!
 //! # 下标
 //!
@@ -218,11 +218,23 @@ impl Coordinator {
         true
     }
 
-    /// 翻页键：一次滚一屏（可见行数那么多行），高亮随之移动并保持列号。
+    /// 展开态的翻页键：PageUp/PageDown 在 `grid_pageupdown_screen` 开着时翻一整屏，
+    /// 其余翻页键逐行滚（同滚轮）。只看物理键，不管它绑在哪个组。
+    pub(crate) fn grid_page_key(&self, state: &mut State, down: bool, key_code: u32) -> bool {
+        let screen = matches!(key_code, keymap::VK_PRIOR | keymap::VK_NEXT)
+            && self.rt().config.ui.candidate.grid_pageupdown_screen;
+        if screen {
+            self.grid_page(state, down)
+        } else {
+            self.grid_scroll(state, down)
+        }
+    }
+
+    /// 一次滚一屏（可见行数那么多行），高亮随之移动并保持列号。
     ///
     /// 已在最后一行再往下翻，交给末页放宽——与收起态「末页按翻页键」是同一条出路，
     /// 放宽出来的候选追加在末尾，照常滚进来。
-    pub(crate) fn grid_page(&self, state: &mut State, down: bool) -> bool {
+    fn grid_page(&self, state: &mut State, down: bool) -> bool {
         self.clear_hover();
         let Some(top) = state.grid_top else {
             return false;
@@ -260,9 +272,13 @@ impl Coordinator {
         true
     }
 
-    /// 鼠标往下滚 / 点 ›：滚一行；已在最后一行时走末页放宽，与收起态 `page_next` 同一条出路
+    /// 滚一行（滚轮、翻页箭头、逐行的翻页键）。往上到第一行就停住，不像 ↑ 那样收起；
+    /// 往下已在最后一行时走末页放宽，与收起态 `page_next` 同一条出路
     /// （同一个 › 不能展开前会放宽、展开后不会）。
-    pub(crate) fn grid_scroll_down(&self, state: &mut State) -> bool {
+    pub(crate) fn grid_scroll(&self, state: &mut State, down: bool) -> bool {
+        if !down {
+            return state.current_page > 0 && self.grid_move_row(state, false);
+        }
         if self.grid_move_row(state, true) {
             return true;
         }
@@ -917,27 +933,71 @@ mod tests {
         assert_eq!(c.state.lock().unwrap().input_cursor_pos, 2);
     }
 
-    /// 翻页键一次滚一屏，高亮随之下移一屏并保持列号；末屏不留空行。
+    /// `-` `=` 逐行移动（同滚轮）：高亮到可见区末行再按，可见区滚一行；首行按 `-` 停住不收起。
     #[test]
-    fn page_key_scrolls_a_screen_when_expanded() {
+    fn page_key_moves_a_row_when_expanded() {
         let (c, _rx) = coord(true);
-        seed(&c, PP * 8); // 8 页
+        seed(&c, PP * 8);
         c.handle_key_event(&key(keymap::VK_EQUAL));
         c.handle_key_event(&key(keymap::VK_RIGHT));
         c.handle_key_event(&key(keymap::VK_EQUAL));
-        // 末页是第 7 页：可见区最多滚到 3..=7，高亮从 0 下移 5 行到第 5 页。
-        assert_eq!(view(&c), (5, 1, Some(3)));
+        assert_eq!(view(&c), (1, 1, Some(0)), "下移一行并保持列号");
+        for _ in 0..3 {
+            c.handle_key_event(&key(keymap::VK_EQUAL));
+        }
+        assert_eq!(view(&c), (4, 1, Some(0)), "到可见区末行");
         c.handle_key_event(&key(keymap::VK_EQUAL));
-        assert_eq!(view(&c), (7, 1, Some(3)), "到底后高亮落到末行");
-        c.handle_key_event(&key(keymap::VK_MINUS));
-        assert_eq!(view(&c), (2, 1, Some(0)));
-        c.handle_key_event(&key(keymap::VK_MINUS));
-        assert_eq!(view(&c), (0, 1, Some(0)), "首屏再往上翻回到首行，不收起");
+        assert_eq!(view(&c), (5, 1, Some(1)), "末行再按，可见区滚一行");
+        for _ in 0..5 {
+            c.handle_key_event(&key(keymap::VK_MINUS));
+        }
+        assert_eq!(view(&c), (0, 1, Some(0)));
         assert!(matches!(
             c.handle_key_event(&key(keymap::VK_MINUS)),
             KeyAction::Consumed
         ));
+        assert_eq!(view(&c), (0, 1, Some(0)), "首行按 - 停住，不收起");
+    }
+
+    /// PageUp/PageDown 一次滚一屏，高亮随之下移一屏并保持列号；末屏不留空行。
+    #[test]
+    fn page_up_down_scrolls_a_screen_when_expanded() {
+        let (c, _rx) = coord(true);
+        seed(&c, PP * 8); // 8 页
+        c.handle_key_event(&key(keymap::VK_NEXT));
+        c.handle_key_event(&key(keymap::VK_RIGHT));
+        c.handle_key_event(&key(keymap::VK_NEXT));
+        // 末页是第 7 页：可见区最多滚到 3..=7，高亮从 0 下移 5 行到第 5 页。
+        assert_eq!(view(&c), (5, 1, Some(3)));
+        c.handle_key_event(&key(keymap::VK_NEXT));
+        assert_eq!(view(&c), (7, 1, Some(3)), "到底后高亮落到末行");
+        c.handle_key_event(&key(keymap::VK_PRIOR));
+        assert_eq!(view(&c), (2, 1, Some(0)));
+        c.handle_key_event(&key(keymap::VK_PRIOR));
+        assert_eq!(view(&c), (0, 1, Some(0)), "首屏再往上翻回到首行，不收起");
+        assert!(matches!(
+            c.handle_key_event(&key(keymap::VK_PRIOR)),
+            KeyAction::Consumed
+        ));
         assert_eq!(view(&c).2, Some(0));
+    }
+
+    /// 关掉 `grid_pageupdown_screen` 后 PageUp/PageDown 也逐行。
+    #[test]
+    fn page_up_down_moves_a_row_when_screen_off() {
+        let mut cfg = wind_config::Config::default();
+        cfg.input.default.chinese_mode = true;
+        cfg.ui.candidate.grid_expand = true;
+        cfg.ui.candidate.grid_pageupdown_screen = false;
+        let (c, _rx) = Coordinator::new_headless_with_ui(cfg, None);
+        c.debug_mark_coords_ready();
+        seed(&c, PP * 8);
+        c.handle_key_event(&key(keymap::VK_NEXT));
+        c.handle_key_event(&key(keymap::VK_NEXT));
+        assert_eq!(view(&c), (1, 0, Some(0)));
+        c.handle_key_event(&key(keymap::VK_PRIOR));
+        c.handle_key_event(&key(keymap::VK_PRIOR));
+        assert_eq!(view(&c), (0, 0, Some(0)), "首行停住，不收起");
     }
 
     /// 高亮行滚出可见区时可见区跟随。
