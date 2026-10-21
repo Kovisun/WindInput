@@ -2306,6 +2306,8 @@ impl PinyinEngine {
                 fz,
                 &mut lattice::EdgeVariants::new(),
                 code.len(),
+                // 整码不受词图的 `max_word_len` 限制：超过 10 音节的词典整词照样要有模糊召回。
+                code.len(),
                 can_extend,
             )
             .into_iter()
@@ -2345,7 +2347,9 @@ impl PinyinEngine {
         let mut out = Vec::new();
         for (variant, shapes) in self.fuzzy_codes(code, syllables, fixed, fz, &|_| true) {
             for mut c in store_dm.search(&variant, limit) {
-                let Some(edits) = fuzzy_shape_edits(&shapes, c.boundary) else {
+                // 手输码的记录没有边界：按码现切一次再核对，否则任何切法都能借到它。
+                let boundary = effective_boundary(&variant, c.boundary, &self.trie);
+                let Some(edits) = fuzzy_shape_edits(&shapes, boundary) else {
                     continue;
                 };
                 c.meta.store_code = Some(c.code.as_str().into());
@@ -2362,7 +2366,8 @@ impl PinyinEngine {
 }
 
 /// 变体码的一条命中（词条边界 `boundary`，与变体边界同域）该按哪个形态算：边界对上的形态里
-/// 改动最少的那个；词条没有边界（0）时不设防、取全部形态里最少的。对不上任何形态返回 `None`
+/// 改动最少的那个；边界为 0（没有可用信息）时不设防、取全部形态里最少的。用户层的手输码
+/// 记录先经 [`effective_boundary`] 现切，到这里才是 0 的只剩切不出的码。对不上任何形态返回 `None`
 /// ——切法不同的词撞上了同一个码（`xi|an → xi|ang` 拼出的 `xiang` 不是单音节的「想」）。
 fn fuzzy_shape_edits(shapes: &[(u64, usize)], boundary: u64) -> Option<usize> {
     shapes
@@ -2876,11 +2881,11 @@ impl Engine for PinyinEngine {
 
         // 1. 精确查找（完整匹配，含模糊扩展，对齐 Go lookupWithFuzzy）。
         //    以 completed（完成音节前缀）而非 query（可能含尾部残码）为查询码与存储 code：
-        //    残码存在时（nihaom）query 非合法音节序列，search(query) 为空，而 lookup_with_fuzzy
-        //    的 fuzzy_codes「全原音节」组合会命中 completed 的精确匹配——但因 `alt_code == code`
-        //    守卫按 query 比较而失配，被误标 is_fuzzy=true 沉底、遭 truncate 截断（bug①）。
-        //    传 completed 后守卫正确跳过全原组合（精确匹配 is_fuzzy=false）；code 存 completed 使
-        //    残码输入的 consumed_length 只覆盖完成音节（nihao 消费 5 留 m 续输）。
+        //    残码存在时（nihaom）query 非合法音节序列，search(query) 为空；而变体展开只排除
+        //    与查询码相同的「全原音节」组合，按 query 查的话 completed 那份精确匹配会当成模糊
+        //    变体命中，被误标 is_fuzzy=true 沉底、遭 truncate 截断（bug①）。传 completed 后全原
+        //    组合正确排除（精确匹配 is_fuzzy=false）；code 存 completed 使残码输入的
+        //    consumed_length 只覆盖完成音节（nihao 消费 5 留 m 续输）。
         for h in self.lookup_with_fuzzy(completed, &syllables, fixed_segmentation) {
             // 词典规范码另走 `learn_code`，不覆盖候选的 `code`（理由见该字段文档）。
             // 与 `is_abbrev` 那几处同款：`push_unique` 的参数已经很长，附加信息走事后赋值，
@@ -5358,6 +5363,74 @@ mod tests {
         );
     }
 
+    /// 手输码的用户词没有边界（0）：按码现切一次（[`effective_boundary`]）再核对，不能一律放行。
+    /// 只开 an=ang 时 `xianfa` 的 `xi|an|fa → xi|ang|fa` 拼出 `xiangfa`，而手输的「想法」现切是
+    /// `xiang|fa`，切法对不上；整串与前缀子码（`xianfaxian` 的 `xianfa`）两路都不该借它。
+    /// 同一份现切也不能误杀：`zongguo` 的 `zhong|guo` 照样召回手输的「中国」。
+    #[test]
+    fn store_fuzzy_checks_derived_boundary_of_manual_words() {
+        let words = [("xiangfa", "想法", 0), ("zhongguo", "中国", 0)];
+        let word_texts = |mut eng: PinyinEngine, input: &str| -> Vec<String> {
+            eng.config.use_smart_compose = false;
+            eng.convert(input, 50)
+                .unwrap()
+                .candidates
+                .into_iter()
+                .map(|c| c.text)
+                .collect()
+        };
+        let an_ang = FuzzyConfig {
+            an_ang: true,
+            ..Default::default()
+        };
+        for input in ["xianfa", "xianfaxian"] {
+            let got = word_texts(
+                engine_with_user_words_fuzzy("fz_user_manual_x", &words, an_ang.clone()),
+                input,
+            );
+            assert!(
+                !got.iter().any(|t| t == "想法"),
+                "{input} 不该借来手输的「想法」，实际: {got:?}"
+            );
+        }
+        let zh_z = FuzzyConfig {
+            zh_z: true,
+            ..Default::default()
+        };
+        let got = word_texts(
+            engine_with_user_words_fuzzy("fz_user_manual_z", &words, zh_z),
+            "zongguo",
+        );
+        assert!(
+            got.iter().any(|t| t == "中国"),
+            "zongguo 应召回「中国」，实际: {got:?}"
+        );
+    }
+
+    /// 词候选的整码模糊展开不受词图 `max_word_len`（10 音节）限制：11 音节的词典整词，
+    /// 模糊打法照样要召回。
+    #[test]
+    fn fuzzy_word_lookup_covers_codes_beyond_lattice_word_limit() {
+        let code = "zhongguo".repeat(5) + "zhong";
+        let mut d = CodetableDict::empty();
+        d.merge_single(code.clone(), "长词".into(), 100, 0);
+        let mut eng =
+            PinyinEngine::new(Config::default(), CachedDict::Memory(d)).with_fuzzy(FuzzyConfig {
+                zh_z: true,
+                ..Default::default()
+            });
+        eng.config.use_smart_compose = false;
+        let input = "zhongguo".repeat(5) + "zong";
+        let got: Vec<String> = eng
+            .convert(&input, 50)
+            .unwrap()
+            .candidates
+            .into_iter()
+            .map(|c| c.text)
+            .collect();
+        assert!(got.iter().any(|t| t == "长词"), "实际: {got:?}");
+    }
+
     /// 双拼同键音节对用户词同样零罚：step 6 的 store 召回与整句词图的用户词模糊节点。
     #[test]
     fn shuangpin_shared_key_recalls_user_words_without_penalty() {
@@ -7401,7 +7474,7 @@ s = ["ao"]
     /// 回归守卫：**用户打出来的那一端本身不是合法音节**时，模糊音必须仍然生效。
     ///
     /// `tin` 不在标准音节表里（普通话只有 `ting`）。模糊变体是在切分**之后**逐音节展开的，
-    /// 于是修复前 `tinzhi` 的 DAG 最远只走到 `ti`、`nzhi` 全成残码，`expand_syllables`
+    /// 于是修复前 `tinzhi` 的 DAG 最远只走到 `ti`、`nzhi` 全成残码，逐音节的模糊展开
     /// 一次都轮不到执行 —— 候选里**压根没有**「停止」，不是排在后面。
     ///
     /// ⚠️ 此前的模糊音用例全部落在「打的那端也是合法音节」上（`si`→`shi`、`beijin`→`beijing`

@@ -228,7 +228,7 @@ const USER_ABBREV_SCAN_LIMIT: usize = 64;
 /// 超出时按改动处数升序保留，截掉的只是模糊处数多的组合（及其后继——后继的处数只增不减）。
 /// 每条组合在它到达的终点上各是一次候选点查（按变体码归并后），故这也是成本闸门。
 ///
-/// 取 256 = 旧口径「一条切分 [`super::fuzzy::MAX_FUZZY_COMBOS`](64) × 4 条切分」：
+/// 取 256 = 旧口径「一条切分 64 种组合 × 4 条切分」：
 /// 不再按切分截断之后，多切分的串（`fanganfangan…` 同音节数下有 8 条切分）要的是
 /// 「每条切分都至少保住少处模糊的那些组合」，按处数排序的同层预算正好表达这一点；
 /// 量级与旧上界持平，性能见 `pinyin_sentence_user_words_probe::fuzzy_store_node_cost_on_real_dict`。
@@ -658,16 +658,15 @@ impl LatticeBuilder {
 
             // 模糊拼音变体
             //
-            // **刻意不做边界校验**：词典返回的 boundary 是**变体码**空间的偏移
-            // （zhongguo 的 {0,5}），而本跨度在用户**原码**空间（zong|guo 的
-            // {0,4}）。z→zh 这类变体改变码长，两者位偏移不同域，直接比对会把正确的
-            // 模糊命中整片误杀。这与 mod.rs 对模糊变体一律置 boundary=0
-            // 的既有决策一致，是已记录的永久缺口（待跨域偏移映射），本阶段不碰。
+            // **词条边界不能拿去比所打码的偏移**：词典返回的 boundary 是**变体码**空间的偏移
+            // （zhongguo 的 {0,5}），而本跨度在用户**原码**空间（zong|guo 的 {0,4}）。z→zh
+            // 这类变体改变码长，两者位偏移不同域，直接比对会把正确的模糊命中整片误杀
+            // （mod.rs 对模糊命中对外一律置 boundary=0 也是这个理由）。
             //
-            // 变体按图上**每条**切分逐音节展开（[`Self::fuzzy_spans`]）：`pinan` 的平安只在
-            // `pin|an` 上，只取一条切分会整片漏掉。词条真值边界与**变体边界**同域，可以比：
-            // 有边界时必须等于某个形态的变体边界（`xi|an → xi|ang` 拼出的 `xiang` 撞上单音节
-            // 的「想」就该拒），并取那个形态的所打码切分；无边界时放行、取改动最少的形态。
+            // 它只和**同域的变体边界**比。变体按图上**每条**切分逐音节展开（[`Self::fuzzy_spans`]）：
+            // `pinan` 的平安只在 `pin|an` 上，只取一条切分会整片漏掉。词条有边界时必须等于某个
+            // 形态的变体边界（`xi|an → xi|ang` 拼出的 `xiang` 撞上单音节的「想」就该拒），并取那个
+            // 形态的所打码切分；无边界时放行、取改动最少的形态。
             let Some(fuzzy) = fuzzy_config.filter(|f| f.any_enabled()) else {
                 continue;
             };
@@ -678,6 +677,7 @@ impl LatticeBuilder {
                 fuzzy,
                 &mut edge_variants,
                 input_len,
+                self.max_word_len,
                 &|v| dict.has_longer_code(v),
             );
             for ((q, variant), shapes) in &spans {
@@ -943,10 +943,10 @@ impl LatticeBuilder {
         }
     }
 
-    /// 从起点 `p` 出发、终点不超过 `end_limit` 的全部模糊变体码，按（终点, 变体码）归并，
-    /// 各附到达它的全部形态（变体边界、所打码切分、改动处数）。系统词（[`Self::build`]）与
-    /// 用户词（[`Self::add_store_fuzzy_nodes`]）的模糊节点、词候选的模糊变体码（`PinyinEngine::fuzzy_codes`）
-    /// 共用这一份。
+    /// 从起点 `p` 出发、终点不超过 `end_limit`、至多 `max_syllables` 个音节的全部模糊变体码，
+    /// 按（终点, 变体码）归并，各附到达它的全部形态（变体边界、所打码切分、改动处数）。
+    /// 系统词（[`Self::build`]）与用户词（[`Self::add_store_fuzzy_nodes`]）的模糊节点、词候选的
+    /// 模糊变体码（`PinyinEngine::fuzzy_codes`）共用这一份。
     ///
     /// ## 为什么逐边展开而不取一条切分
     ///
@@ -963,13 +963,15 @@ impl LatticeBuilder {
     /// 全原音节组合（= 所打码本身）不收：那是精确命中，由各自的精确分支处理。
     ///
     /// `can_extend(变体码)` 为假的组合不再往后延伸（没有任何更长的码以它开头）。剪枝发生在
-    /// 预算截断之前，于是预算只花在还可能命中的组合上；系统词传词典的前缀存在性判据，
-    /// 用户层没有这一查询，传恒真。
+    /// 本层预算截断**之后**、延伸下一层之前：被剪掉的组合仍占过本层预算（它自己还要点查），
+    /// 省下的是它的后代。系统词传词典的前缀存在性判据，用户层没有这一查询，传恒真。
     ///
     /// ## 成本
     ///
     /// 变体码按（终点, 码）归并（`xi|an` 与 `xian` 都能展开出 `xiang`），调用方每个只点查一次；
-    /// 上界 = 层数(≤ `max_word_len`) × [`FUZZY_LAYER_BUDGET`]，扣掉全原音节的组合。
+    /// 上界 = 层数(≤ `max_syllables`) × [`FUZZY_LAYER_BUDGET`]，扣掉全原音节的组合。词图传
+    /// `max_word_len`（更长的词本就不进图）；词候选查的是整码，传码长当上界（层数实际止于
+    /// 最长切分的音节数，图上走不动了即停）。
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn fuzzy_spans(
         &self,
@@ -979,6 +981,7 @@ impl LatticeBuilder {
         fuzzy: &FuzzyConfig,
         edge_variants: &mut EdgeVariants,
         end_limit: usize,
+        max_syllables: usize,
         can_extend: &dyn Fn(&str) -> bool,
     ) -> BTreeMap<(usize, String), Vec<FuzzyShape>> {
         /// 在途组合：(当前位置, 变体码, 变体边界, 所打码切分（相对 p 的起点偏移）, 改动处数)
@@ -986,7 +989,7 @@ impl LatticeBuilder {
         // BTreeMap：点查与建节点的顺序确定，节点次序不随哈希漂移。
         let mut spans: BTreeMap<(usize, String), Vec<FuzzyShape>> = BTreeMap::new();
         let mut layer: Vec<Combo> = vec![(p, String::new(), 0, Vec::new(), 0)];
-        for _ in 0..self.max_word_len {
+        for _ in 0..max_syllables {
             let mut next: Vec<Combo> = Vec::new();
             for (pos, variant, mask, offsets, edits) in &layer {
                 if !variant.is_empty() && !can_extend(variant) {
@@ -1005,7 +1008,7 @@ impl LatticeBuilder {
                     }
                     let opts = edge_variants.entry((*pos, e)).or_insert_with(|| {
                         let syl = &input[*pos..e];
-                        // 首项恒为原音节（0 处改动），同 `expand_syllables`。
+                        // 首项恒为原音节（0 处改动）。
                         let mut v = vec![(syl.to_string(), 0)];
                         v.extend(FuzzyMatcher::fuzzy_variants_scored(syl, fuzzy));
                         v
@@ -1078,7 +1081,16 @@ impl LatticeBuilder {
         nodes: &mut [Vec<LatticeNode>],
     ) {
         let end_limit = input.len().min(nodes.len().saturating_sub(1));
-        let spans = self.fuzzy_spans(p, input, graph, fuzzy, edge_variants, end_limit, &|_| true);
+        let spans = self.fuzzy_spans(
+            p,
+            input,
+            graph,
+            fuzzy,
+            edge_variants,
+            end_limit,
+            self.max_word_len,
+            &|_| true,
+        );
 
         for ((q, variant), shapes) in &spans {
             let q = *q;

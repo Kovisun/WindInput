@@ -111,6 +111,7 @@ fn manager(dir: &Path) -> EngineManager {
         f.enabled = true;
         for g in groups.split(',').map(str::trim) {
             let all = g == "all";
+            let mut known = all;
             for (name, slot) in [
                 ("zh_z", &mut f.zh_z),
                 ("ch_c", &mut f.ch_c),
@@ -128,8 +129,10 @@ fn manager(dir: &Path) -> EngineManager {
             ] {
                 if all || g == name {
                     *slot = true;
+                    known = true;
                 }
             }
+            assert!(known, "WIND_PINYIN_EVAL_FUZZY 里有不认识的组名「{g}」");
         }
     }
     EngineManager::new(&cfg, Some(dir))
