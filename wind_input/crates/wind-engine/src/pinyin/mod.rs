@@ -2348,7 +2348,7 @@ impl PinyinEngine {
     /// - 全拼主路径：`code` 本身；末尾判据为 `code` 吃到 `query` 末尾。
     ///
     /// 词库读音取 `learn_code`；双拼对偶声母读出的候选没有它（转换后的全拼就是词典码），
-    /// 用候选自身的码，命中提示时补标 `is_fuzzy`。
+    /// 用候选自身的码。只填提示、不动 `is_fuzzy`：`hint` 开关不得改变排序（D7）。
     fn fill_fuzzy_hints(
         &self,
         cands: &mut [Candidate],
@@ -2386,9 +2386,6 @@ impl PinyinEngine {
             let hints = fuzzy_hint::align_hints(&typed, &syllables, &self.fuzzy_config, ends_here);
             if hints.is_empty() {
                 continue;
-            }
-            if via_literal {
-                c.is_fuzzy = true;
             }
             c.meta.fuzzy_hints = hints;
         }
@@ -8350,18 +8347,41 @@ s = ["ao"]
             .iter()
             .find(|c| c.text == "刷")
             .expect("sx 应出「刷」");
-        assert!(c.is_fuzzy, "对偶声母读出的候选应标模糊");
+        assert!(!c.is_fuzzy, "只填提示，不改 is_fuzzy（排序不受 hint 影响）");
         assert_eq!(c.meta.fuzzy_hints, vec![fh(0, "shua")]);
         // 对照：按 sh 键打（`ux`）是正读，不标。
         let r = eng.convert("ux", 20).unwrap();
         assert!(hints_of(&r, "刷").is_empty());
-        // hint 关：不标、也不改 is_fuzzy（排序与现状一致）。
+        // hint 关：不标。
         let off = FuzzyConfig { hint: false, ..fz };
         let r = sp_hint_engine("xiaohe.toml", &[("shua", "刷")], off)
             .convert("sx", 20)
             .unwrap();
         let c = r.candidates.iter().find(|c| c.text == "刷").unwrap();
         assert!(!c.is_fuzzy && c.meta.fuzzy_hints.is_empty());
+    }
+
+    /// hint 开关只影响显示：同一双拼对偶输入，开与关的候选顺序与模糊标记逐条一致。
+    #[test]
+    fn shuangpin_partner_hint_keeps_order() {
+        let words = [("shua", "刷"), ("sa", "撒"), ("shuai", "帅"), ("su", "苏")];
+        let run = |hint: bool| {
+            let fz = FuzzyConfig {
+                sh_s: true,
+                hint,
+                ..Default::default()
+            };
+            sp_hint_engine("xiaohe.toml", &words, fz)
+                .convert("sxsk", 20)
+                .unwrap()
+                .candidates
+                .into_iter()
+                .map(|c| (c.text, c.is_fuzzy, c.weight))
+                .collect::<Vec<_>>()
+        };
+        let on = run(true);
+        assert!(on.iter().any(|(t, ..)| t == "刷"), "{on:?}");
+        assert_eq!(on, run(false));
     }
 
     /// 自然码 `dn` 无合法读音，走错音串垫底读成 `din`，模糊命中「丁 ding」：照标
