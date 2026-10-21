@@ -410,6 +410,8 @@ impl MobileCore {
 
         // 自绘候选条，不提供光标坐标——关掉桌面用的首显闸门等待
         coord.set_caret_independent(true);
+        // 设置页每改一项就重载一次：成功不弹「设置已更新」（失败照常提示）
+        coord.set_quiet_reload_toast(true);
         // 强制改写项在每次重载配置后也要再套上（设置页每改一项就重载一次）
         coord.set_config_overlay(config_api::apply_mobile_overrides);
         // ⚠ 这里**保持开启**启动预热（`set_eager_prewarm(true)` 是默认值）。

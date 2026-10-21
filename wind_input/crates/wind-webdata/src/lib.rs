@@ -6762,6 +6762,7 @@ outside: rare
                 weight: 1000,
                 position: 0,
                 category: String::new(),
+                enabled: true,
             }])
             .unwrap();
 

@@ -1627,6 +1627,8 @@ pub struct Coordinator {
     /// 如 WPS、QQ 一类走 XIM 的应用）。置位时编码改由我们自己的候选窗画，见
     /// [`Coordinator::preedit_in_app_effective`]。见 `host.display` 的 `inline_preedit`。
     host_no_inline_preedit: std::sync::atomic::AtomicBool,
+    /// 热重载成功后**不弹**「设置已更新」（移动端）。见 [`Coordinator::set_quiet_reload_toast`]。
+    quiet_reload_toast: std::sync::atomic::AtomicBool,
     /// 启动时预热全部已装方案（桌面默认开；移动端关，见构造里的说明）
     pub(crate) eager_prewarm: std::sync::atomic::AtomicBool,
     /// 0=Idle 1=Preparing 2=Ready 3=Failed（见 [`Coordinator::readiness`]）
@@ -2514,6 +2516,15 @@ impl Coordinator {
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    /// 热重载成功后不弹「设置已更新」（失败、语法错误照常提示）。
+    ///
+    /// 电脑上改设置是在独立的设置程序里点「保存」，弹一句确认是合适的；手机设置页**每改一项**
+    /// 就重载一次，连改几项就连弹几条，而且改动本身在设置页上就看得见（真机反馈）。
+    pub fn set_quiet_reload_toast(&self, value: bool) {
+        self.quiet_reload_toast
+            .store(value, std::sync::atomic::Ordering::Relaxed);
+    }
+
     /// 声明宿主报的光标坐标可直接当权威（见字段 `host_caret_trusted`）。
     pub fn set_host_caret_trusted(&self, value: bool) {
         self.host_caret_trusted
@@ -2681,6 +2692,7 @@ impl Coordinator {
                             weight: e.weight,
                             position: e.position,
                             category: e.category.clone(),
+                            enabled: e.enabled,
                         })
                         .collect();
                     // 系统短语只在内存（P3 叠加模型），每次启动都交给 store；首次还会触发旧表迁移。
@@ -3090,6 +3102,7 @@ impl Coordinator {
             learning_suspended: std::sync::atomic::AtomicBool::new(false),
             host_caret_trusted: std::sync::atomic::AtomicBool::new(false),
             host_no_inline_preedit: std::sync::atomic::AtomicBool::new(false),
+            quiet_reload_toast: std::sync::atomic::AtomicBool::new(false),
             eager_prewarm: std::sync::atomic::AtomicBool::new(true),
             readiness_state: std::sync::atomic::AtomicU8::new(0),
             pending_first_show: Mutex::new(false),
@@ -5170,7 +5183,11 @@ impl Coordinator {
                 // 语法错误时**取代**「设置已更新」，而不是两条都弹：报成功再报失败会让
                 // 用户以为是两件事，而这里只有一件——他刚存的设置里有一部分没生效。
                 // 此时 `self.rt()` 已是上面换进去的新 bundle，读到的就是本次加载的降级记录。
-                if !self.notify_config_syntax_error() {
+                if !self.notify_config_syntax_error()
+                    && !self
+                        .quiet_reload_toast
+                        .load(std::sync::atomic::Ordering::Relaxed)
+                {
                     self.show_toast(
                         "设置已更新",
                         ToastPosition::BottomCenter,
@@ -10012,6 +10029,7 @@ impl Coordinator {
                 weight: e.weight,
                 position: e.position,
                 category: e.category.clone(),
+                enabled: e.enabled,
             })
             .collect();
         match store.ensure_system_phrases(&sys) {
@@ -10040,6 +10058,7 @@ impl Coordinator {
                 weight: e.weight,
                 position: e.position,
                 category: e.category.clone(),
+                enabled: e.enabled,
             })
             .collect();
         // 先认领：历史上 `add_phrase`/wdict 导入撞键时会把系统行降级成用户行，此后
@@ -10075,6 +10094,7 @@ fn phrase_entries_hash(entries: &[wind_phrase::SystemPhraseEntry]) -> String {
         e.text.hash(&mut h);
         e.weight.hash(&mut h);
         e.position.hash(&mut h);
+        e.enabled.hash(&mut h);
     }
     format!("{:016x}", h.finish())
 }
