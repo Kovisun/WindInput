@@ -639,3 +639,59 @@ fn delete_hotkey_removes_a_history_entry() {
         "候选应立即刷新"
     );
 }
+
+/// 数字透镜里**只有历史**命中时，字母不是选词键：`.` 起手召回了 `.txt`，接着打 `xlsx`
+/// 照样字面入缓冲。历史是字面前缀补全、不是这个透镜算出来的结果，它不该让空候选那条
+/// 「选词键归字面」的判据失效（GH 回归：开历史成员后 `;.xlsx` 停在那个点）。
+#[test]
+fn numeric_lens_history_only_does_not_eat_letters() {
+    skip_without_data!();
+    let (coord, store) = open("dot_ext", true);
+    store
+        .record_completion(CompletionKind::QuickHistory, ".txt")
+        .unwrap();
+    enter_quick(&coord);
+    type_str(&coord, ".");
+    assert_eq!(
+        coord.debug_page_texts(),
+        vec![".txt".to_string()],
+        "前提：光一个点只召回历史"
+    );
+    type_str(&coord, "x");
+    assert_eq!(coord.debug_preedit(), ";.x", "字母不该被当选词键吃掉");
+    type_str(&coord, "lsx");
+    assert_eq!(coord.debug_preedit(), ";.xlsx");
+    let act = coord.handle_key_event(&key(VK_RETURN, 0));
+    assert_eq!(committed(&act).as_deref(), Some(".xlsx"));
+}
+
+/// ★反向对照：数字透镜有**本透镜的**候选时，即便历史也命中，字母仍是选词键
+/// （`a` 选首选，越界的 `z` 仍被吃掉、不污染缓冲）。
+#[test]
+fn numeric_lens_letters_still_select_with_history_alongside() {
+    skip_without_data!();
+    let (coord, store) = open("num_hist_sel", true);
+    store
+        .record_completion(CompletionKind::QuickHistory, "1+2ab")
+        .unwrap();
+    enter_quick(&coord);
+    type_str(&coord, "1+2");
+    let texts = coord.debug_page_texts();
+    assert_eq!(
+        texts.first().map(String::as_str),
+        Some("3"),
+        "前提: {texts:?}"
+    );
+    assert!(
+        texts.iter().any(|t| t == "1+2ab") && texts.len() < 26,
+        "前提：历史也命中、z 越界: {texts:?}"
+    );
+    let act = coord.handle_key_event(&key(u32::from(b'Z'), 0));
+    assert!(
+        matches!(act, KeyAction::Consumed),
+        "越界选词键应被吃掉: {act:?}"
+    );
+    assert_eq!(coord.debug_preedit(), ";1+2", "缓冲不该被 z 污染");
+    let act = coord.handle_key_event(&key(u32::from(b'A'), 0));
+    assert_eq!(committed(&act).as_deref(), Some("3"), "a 应选走首选");
+}

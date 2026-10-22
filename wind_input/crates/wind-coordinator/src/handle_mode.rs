@@ -3346,8 +3346,15 @@ impl Coordinator {
                     // 或 `takes_select_keys = false`（用户明写的「这两个键归选词」，空候选下让
                     // 它们改作字面等于推翻该配置）。后一种下 `;`/`'` 在零候选时确实还是死键，
                     // 由 `select_keys_stay_dead_when_not_taken` 钉住。
+                    //
+                    // ⚠️ 历史候选不算数：它是跨透镜的字面前缀补全，不是本透镜的产出。
+                    // 算进去的话 `.txt` 一旦进了历史，`;.` 就有了候选、`;.xlsx` 又打不出。
                     if let Some(off) = sel
-                        && !(free_on && state.candidates.is_empty())
+                        && !(free_on
+                            && state
+                                .candidates
+                                .iter()
+                                .all(|c| c.id == crate::quick_history::QUICK_HISTORY_ID))
                     {
                         return self.mix_select(state, off);
                     }
