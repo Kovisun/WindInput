@@ -1842,13 +1842,12 @@ impl WdatReader {
                     // 音节数 + 边界对齐过滤（严格档）：`slot` 已自增、`entries_read` 已计数，
                     // 二者描述的是「读到了第几条」，与是否入选无关，故在此之后才丢弃。
                     if let Some((m, completed_len)) = filter
-                        && (code.len() > len_cap
-                            || !crate::cached::prefix_entry_keep(
-                                boundary,
-                                code.len(),
-                                m,
-                                completed_len,
-                            ))
+                        && !crate::cached::prefix_capped_keep(
+                            boundary,
+                            code.len(),
+                            m,
+                            completed_len,
+                        )
                     {
                         return;
                     }

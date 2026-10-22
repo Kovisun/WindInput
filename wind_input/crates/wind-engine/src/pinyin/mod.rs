@@ -3749,7 +3749,15 @@ impl Engine for PinyinEngine {
                     store_cands.extend(store_dm.search(&code, limit));
                 }
             }
-            store_cands.extend(store_dm.search_prefix(query, limit));
+            // 音节数 / 边界对齐 / 码长过滤同 step 4 下推到词库层：超限的补全过不了 6.3，也不该
+            // 借同文合并给已有候选提权；不下推则名额被它们吃掉，权重全打平的大用户词库还会
+            // 整棵子树遍历（19 万条导入词库下 `sh` 约 7ms）。
+            store_cands.extend(store_dm.search_prefix_capped(
+                query,
+                limit,
+                syllable_cap,
+                completed_len,
+            ));
             // 模糊音（t215）：整串与各前缀子码的变体码，变体生成与系统词 `lookup_with_fuzzy`
             // 同源（`fuzzy_codes`）；前缀补全那路系统词也不做模糊，这里同样不做。
             // 排在全部精确结果**之后**：下面按 text 合并、先到者占位，同文时须以精确那条为准。
