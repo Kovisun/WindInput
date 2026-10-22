@@ -6268,7 +6268,7 @@ mod finalize_candidates_tests {
                 "fn refill_temp_pinyin_candidates",
                 "临时拼音",
             ),
-            ("handle_mode.rs", "fn update_mix_candidates", "快捷输入/mix"),
+            ("handle_mode.rs", "fn refill_mix_candidates", "快捷输入/mix"),
         ];
         // 临英刻意不在表内：英文候选查 emoji 表恒不命中（表键是中文词），接了等于每键白跑
         // 一趟查询。这与 `mark_common`/`apply_filter` 对临英无作用是同一条理由。

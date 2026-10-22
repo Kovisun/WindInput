@@ -2220,7 +2220,8 @@ impl Coordinator {
     }
 
     pub(crate) fn mix_select(&self, state: &mut State, page_offset: usize) -> KeyAction {
-        let (start, end) = self.page_range(state);
+        // 展开态下序号顺延到下一行，数字键跟着走（同临拼）。
+        let (start, end) = self.select_range(state);
         let gi = start + page_offset;
         if gi >= end {
             return KeyAction::Consumed;
@@ -2447,6 +2448,11 @@ impl Coordinator {
     /// 数字透镜只取内置来源（表达式无拼音/英文意义），文本透镜只取真实方案，避免互相污染。
     /// **成员顺序即候选优先级**——把 `quick_input.calc` 排在最前即得「计算结果作首选」。
     pub(crate) fn update_mix_candidates(&self, state: &mut State) {
+        self.refill_mix_candidates(state);
+        self.grid_resume(state);
+    }
+
+    fn refill_mix_candidates(&self, state: &mut State) {
         state.candidates.clear();
         self.reset_candidate_view(state);
         state.mix_repeat = false;
@@ -3032,6 +3038,10 @@ impl Coordinator {
             !state.mix_buffer.is_empty() || !state.committed_text.is_empty(),
             |s, st| s.exit_mix_mode(st),
         ) {
+            return act;
+        }
+        // 展开态专属键（←→ / Esc / Tab）先于编码区光标与 Esc 臂，同临拼。
+        if let Some(act) = self.grid_key_action(state, data) {
             return act;
         }
         // 编码区光标移动（左右 / Home / End）。注：数字透镜下 -/= 等是输入字符，但方向键

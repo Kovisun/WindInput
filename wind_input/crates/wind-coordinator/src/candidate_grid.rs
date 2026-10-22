@@ -16,6 +16,7 @@
 //! 只在这边做（[`Coordinator::grid_cell`]）。
 
 use crate::coordinator::{Coordinator, State};
+use crate::handle_mode::MixLens;
 use crate::pipeline::ModeKind;
 use wind_bridge::handler::KeyEventData;
 use wind_candidate::Candidate;
@@ -81,12 +82,16 @@ impl Coordinator {
         if state.candidates.is_empty() || state.assoc_active() {
             return false;
         }
-        // 范围见设计 §9：快捷输入的数字透镜与格式表依赖单页、辅助码本身就在缩小候选、
-        // 特殊模式各有自己的码表语义，都不展开。
-        if !matches!(
-            state.active,
-            None | Some(ModeKind::TempPinyin) | Some(ModeKind::TempEnglish)
-        ) {
+        // 范围见设计 §9：快捷输入只开文本 / 词组透镜（数字透镜与格式表依赖单页，自由透镜
+        // 只有原文与历史）；辅助码本身就在缩小候选、特殊模式各有自己的码表语义，都不展开。
+        let mode_ok = match state.active {
+            None | Some(ModeKind::TempPinyin) | Some(ModeKind::TempEnglish) => true,
+            Some(ModeKind::Mix(_)) => {
+                matches!(self.mix_lens(state), MixLens::Text | MixLens::Phrase)
+            }
+            _ => false,
+        };
+        if !mode_ok {
             return false;
         }
         // 没有第二页（已加载的或还能加载的）就没什么可展开的。
@@ -1749,8 +1754,7 @@ mod tests {
     }
 
     /// 五笔主方案下的临时拼音同样能展开（真实词库）：出厂引导键 `` ` ``，以及用户把 `;`
-    /// 改绑成临拼。⚠️ 出厂的 `;` 是快捷输入（mix），不在 `grid_eligible` 的模式白名单里、
-    /// 且 quick_mix 出厂竖排，两条都拦——那是另一回事，不归这里。
+    /// 改绑成临拼。出厂的 `;` 是快捷输入（mix），见下方 `mix_*` 那组。
     #[test]
     fn temp_pinyin_under_wubi_expands() {
         let d = data_dir();
@@ -1789,5 +1793,278 @@ mod tests {
                 "{lead:#x}：PageDown 应展开且不翻页"
             );
         }
+    }
+
+    // ———————— 快捷输入（mix）：文本 / 词组透镜展开，数字 / 自由透镜与竖排不展开 ————————
+
+    /// 五笔主方案、`;` 进快捷输入，快捷输入布局为 `layout`。词库缺失返回 `None`。
+    fn mix_coord(
+        layout: wind_config::LayoutIntent,
+        global_vertical: bool,
+    ) -> Option<(Arc<Coordinator>, Receiver<UiCommand>)> {
+        let d = data_dir();
+        if !["wubi86", "pinyin", "english"]
+            .iter()
+            .all(|s| d.join(format!("schemas/{s}.schema.toml")).exists())
+        {
+            return None;
+        }
+        let mut cfg = wind_config::Config::default();
+        cfg.schema.available = vec!["wubi86".into(), "pinyin".into(), "english".into()];
+        cfg.schema.active = "wubi86".into();
+        cfg.input.default.chinese_mode = true;
+        cfg.ui.candidate.grid_expand = true;
+        if global_vertical {
+            cfg.ui.candidate.layout = "vertical".into();
+        }
+        cfg.schema.mix_modes[0].candidate_layout = layout;
+        // 序号逐格顺延：每页 7 个时 8、9、0 落到第二行，测得到数字键跟着序号走。
+        cfg.ui.candidate.grid_index_fill = "cells".into();
+        let (c, rx) = Coordinator::new_headless_with_ui(cfg, Some(&d));
+        c.debug_mark_coords_ready();
+        Some((c, rx))
+    }
+
+    /// `;` + 字母串（大写键码）。
+    fn mix_type(c: &Coordinator, code: &str) {
+        c.handle_key_event(&key(0xBA));
+        for ch in code.chars() {
+            c.handle_key_event(&key(ch as u32));
+        }
+        assert_eq!(
+            c.state.lock().unwrap().active,
+            Some(ModeKind::Mix(0)),
+            "前提：`;` 进快捷输入"
+        );
+    }
+
+    fn preedit_of(c: &Coordinator) -> String {
+        c.state.lock().unwrap().preedit.clone()
+    }
+
+    /// 横排（显式 horizontal，或 follow 且全局横排）：PageDown 只展开不翻页；
+    /// 竖排（出厂 vertical，或 follow 且全局竖排）照旧翻页、不展开。
+    #[test]
+    fn mix_expands_only_when_its_effective_layout_is_horizontal() {
+        use wind_config::LayoutIntent as L;
+        for (layout, global_vertical, expands) in [
+            (L::Horizontal, false, true),
+            (L::Follow, false, true),
+            (L::Vertical, false, false),
+            (L::Follow, true, false),
+        ] {
+            let Some((c, _rx)) = mix_coord(layout, global_vertical) else {
+                return;
+            };
+            mix_type(&c, "SHI");
+            assert!(
+                c.total_pages(&c.state.lock().unwrap()) >= 2,
+                "前提：多于一页"
+            );
+            c.handle_key_event(&key(keymap::VK_NEXT));
+            let want = if expands {
+                (0, 0, Some(0))
+            } else {
+                (1, 0, None)
+            };
+            assert_eq!(view(&c), want, "{layout:?} / 全局竖排={global_vertical}");
+            assert_eq!(preedit_of(&c), ";shi");
+        }
+    }
+
+    /// 展开态的移动与选词：↓ 换行保列、→ 线性、数字键选高亮行（序号顺延同临拼）、空格上屏高亮。
+    #[test]
+    fn mix_grid_navigation_and_selection() {
+        let Some((c, _rx)) = mix_coord(wind_config::LayoutIntent::Horizontal, false) else {
+            return;
+        };
+        mix_type(&c, "SHI");
+        c.handle_key_event(&key(keymap::VK_NEXT));
+        let pp = c.per_page(Some(ModeKind::Mix(0)));
+        c.handle_key_event(&key(keymap::VK_RIGHT));
+        c.handle_key_event(&key(keymap::VK_DOWN));
+        assert_eq!(view(&c), (1, 1, Some(0)), "↓ 换行保列、→ 行内移动");
+        let all = texts(&c);
+        match c.handle_key_event(&key(u32::from(b'2'))) {
+            KeyAction::InsertText { text, .. } => assert_eq!(text, all[pp + 1]),
+            other => panic!("按 2 应上屏第 2 行第 2 个，实得 {other:?}"),
+        }
+        assert_eq!(
+            c.state.lock().unwrap().active,
+            None,
+            "整段上屏后退出快捷输入"
+        );
+
+        mix_type(&c, "SHI");
+        c.handle_key_event(&key(keymap::VK_NEXT));
+        let all = texts(&c);
+        match c.handle_key_event(&key(u32::from(b'9'))) {
+            KeyAction::InsertText { text, .. } => assert_eq!(text, all[8]),
+            other => panic!("首行按 9 应上屏顺延到第二行的第 9 格，实得 {other:?}"),
+        }
+
+        mix_type(&c, "SHI");
+        c.handle_key_event(&key(keymap::VK_NEXT));
+        c.handle_key_event(&key(keymap::VK_DOWN));
+        c.handle_key_event(&key(keymap::VK_DOWN));
+        let want = texts(&c)[2 * pp].clone();
+        match c.handle_key_event(&key(keymap::VK_SPACE)) {
+            KeyAction::InsertText { text, .. } => assert_eq!(text, want),
+            other => panic!("空格应上屏高亮项，实得 {other:?}"),
+        }
+    }
+
+    /// 编码栏跟随高亮：展开态里 → 移到「西安」得 `;xi'an`，移回单字「先」得 `;xian`。
+    #[test]
+    fn mix_grid_preedit_follows_highlight() {
+        let Some((c, _rx)) = mix_coord(wind_config::LayoutIntent::Horizontal, false) else {
+            return;
+        };
+        mix_type(&c, "XIAN");
+        c.handle_key_event(&key(keymap::VK_NEXT));
+        assert!(view(&c).2.is_some(), "前提：展开");
+        let all = texts(&c);
+        let xian = all
+            .iter()
+            .position(|t| t == "西安")
+            .expect("xian 应有「西安」");
+        let single = all.iter().position(|t| t == "先").expect("xian 应有「先」");
+        let pp = c.per_page(Some(ModeKind::Mix(0)));
+        assert!(xian < 5 * pp && single < 5 * pp, "前提：都在可见区内");
+        let walk = |to: usize| {
+            let (page, sel, _) = view(&c);
+            let from = page * pp + sel;
+            let k = if to > from {
+                keymap::VK_RIGHT
+            } else {
+                keymap::VK_LEFT
+            };
+            for _ in 0..from.abs_diff(to) {
+                c.handle_key_event(&key(k));
+            }
+        };
+        walk(xian);
+        assert_eq!(preedit_of(&c), ";xi'an");
+        walk(single);
+        assert_eq!(preedit_of(&c), ";xian");
+    }
+
+    /// 分类标签：mix 的拼音、英文成员混排，Tab 进「单字」只剩单个汉字；点标签切「词组」，
+    /// 编码栏仍是快捷输入的形态（前缀 + 按高亮切分），不被按主路重算成空串。
+    #[test]
+    fn mix_grid_tabs_filter_and_keep_the_preedit() {
+        let Some((c, _rx)) = mix_coord(wind_config::LayoutIntent::Horizontal, false) else {
+            return;
+        };
+        mix_type(&c, "SHIJIAN");
+        c.handle_key_event(&key(keymap::VK_NEXT));
+        assert!(view(&c).2.is_some(), "前提：展开");
+        c.handle_key_event(&key(keymap::VK_TAB));
+        assert_eq!(tab_of(&c), GridTab::Single);
+        assert!(
+            texts(&c)
+                .iter()
+                .all(|t| t.chars().count() == 1 && t.chars().all(wind_candidate::is_han)),
+            "单字分类只留单个汉字: {:?}",
+            texts(&c)
+        );
+        c.grid_click_tab(GridTab::Phrase);
+        assert_eq!(tab_of(&c), GridTab::Phrase);
+        let first = texts(&c)[0].clone();
+        assert!(first.chars().count() >= 2, "词组分类首项: {first}");
+        let st = c.state.lock().unwrap();
+        let (page, sel) = (st.current_page, st.selected_index);
+        let hl = st.candidates[page * c.per_page(st.active) + sel]
+            .text
+            .clone();
+        drop(st);
+        assert_eq!(hl, first, "锚点不在词组里时落到第一个");
+        assert_eq!(
+            preedit_of(&c),
+            ";shi'jian",
+            "点标签后编码栏仍按快捷输入形态"
+        );
+    }
+
+    /// Esc 两段式：先收起、保留组合；再按一次退出快捷输入。
+    #[test]
+    fn mix_grid_escape_collapses_then_cancels() {
+        let Some((c, _rx)) = mix_coord(wind_config::LayoutIntent::Horizontal, false) else {
+            return;
+        };
+        mix_type(&c, "SHI");
+        c.handle_key_event(&key(keymap::VK_NEXT));
+        assert!(matches!(
+            c.handle_key_event(&key(keymap::VK_ESCAPE)),
+            KeyAction::Consumed
+        ));
+        {
+            let st = c.state.lock().unwrap();
+            assert_eq!((st.grid_top, st.active), (None, Some(ModeKind::Mix(0))));
+            assert_eq!(st.preedit, ";shi");
+        }
+        c.handle_key_event(&key(keymap::VK_ESCAPE));
+        assert_eq!(c.state.lock().unwrap().active, None, "第二次 Esc 退出");
+    }
+
+    /// 续打与分步上屏后保持展开（同临拼）；打进越界字符落自由透镜即收起，退格回文本透镜
+    /// 又展开回来——展开意图（`grid_keep`）属于这一次组合，不随透镜丢。
+    #[test]
+    fn mix_grid_resumes_like_temp_pinyin() {
+        let Some((c, _rx)) = mix_coord(wind_config::LayoutIntent::Horizontal, false) else {
+            return;
+        };
+        mix_type(&c, "SHI");
+        c.handle_key_event(&key(keymap::VK_NEXT));
+        c.handle_key_event(&key(u32::from(b'J')));
+        assert_eq!(view(&c).2, Some(0), "继续打字保持展开");
+
+        let shift_minus = KeyEventData {
+            modifiers: MOD_SHIFT,
+            ..key(keymap::VK_MINUS)
+        };
+        c.handle_key_event(&shift_minus); // `_` 越界 → 自由透镜
+        assert_eq!(c.state.lock().unwrap().mix_buffer, "shij_");
+        assert_eq!(view(&c).2, None, "自由透镜不展开");
+        c.handle_key_event(&key(keymap::VK_BACK));
+        assert_eq!(view(&c).2, Some(0), "退回文本透镜又展开");
+
+        let idx = texts(&c)
+            .iter()
+            .position(|t| t == "是")
+            .expect("shij 应有「是」");
+        let pp = c.per_page(Some(ModeKind::Mix(0)));
+        assert!(idx < 5 * pp, "前提：「是」在可见区内");
+        for _ in 0..idx / pp {
+            c.handle_key_event(&key(keymap::VK_DOWN));
+        }
+        for _ in 0..idx % pp {
+            c.handle_key_event(&key(keymap::VK_RIGHT));
+        }
+        c.handle_key_event(&key(keymap::VK_SPACE));
+        {
+            let st = c.state.lock().unwrap();
+            assert_eq!(st.committed_text, "是", "分步上屏");
+            assert_eq!(st.mix_buffer, "j");
+        }
+        assert_eq!(view(&c).2, Some(0), "余下那段从首行展开");
+    }
+
+    /// 数字透镜不展开：候选凑够多页也不行（它的格式表依赖单页）。mix 没有分批加载，
+    /// `has_more` 恒为假，展开态只铺已取到的候选。
+    #[test]
+    fn mix_numeric_lens_does_not_expand() {
+        let Some((c, _rx)) = mix_coord(wind_config::LayoutIntent::Horizontal, false) else {
+            return;
+        };
+        c.handle_key_event(&key(0xBA));
+        c.handle_key_event(&key(u32::from(b'1')));
+        c.handle_key_event(&key(u32::from(b'2')));
+        let mut st = c.state.lock().unwrap();
+        assert_eq!(st.mix_buffer, "12", "前提：数字透镜");
+        assert!(!st.has_more);
+        st.candidates = (0..PP * 3).map(|i| cand(&format!("{i}"))).collect();
+        c.reset_candidate_view(&mut st);
+        assert!(!c.try_expand_grid(&mut st), "数字透镜不展开");
     }
 }

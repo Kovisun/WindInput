@@ -5755,6 +5755,19 @@ impl Coordinator {
     /// 候选」时也必须生效。判据挂在 `SessionAction` 上而不是写在这里的 `if`——本函数有
     /// 三个调用点（主输入 / mix / 候选导航），条件写死在函数体内还好，写到调用点上就是
     /// 三份要保持一致的守卫，那正是本仓栽过四次的形状。
+    /// 展开态专属键（见 `grid_key`）的完整处置：键归网格时返回结局，否则 `None`。
+    pub(crate) fn grid_key_action(
+        &self,
+        state: &mut State,
+        data: &KeyEventData,
+    ) -> Option<KeyAction> {
+        let changed = self.grid_key(state, data)?;
+        if changed && let Some(act) = self.after_nav_changed(state) {
+            return Some(act);
+        }
+        Some(KeyAction::Consumed)
+    }
+
     pub(crate) fn apply_session_action(
         &self,
         state: &mut State,
@@ -5762,12 +5775,10 @@ impl Coordinator {
         include_printable: bool,
     ) -> Option<KeyAction> {
         // 展开态专属键（←→ / Esc）先于绑定表：它们在网格里另有含义，且必须赶在各模式的
-        // 光标移动臂与 Esc 臂之前截下——本函数恰好是所有模式都先经过的那一处。
-        if let Some(changed) = self.grid_key(state, data) {
-            if changed && let Some(act) = self.after_nav_changed(state) {
-                return Some(act);
-            }
-            return Some(KeyAction::Consumed);
+        // 光标移动臂与 Esc 臂之前截下——本函数恰好是所有模式都先经过的那一处
+        // （快捷输入例外，它的光标与 Esc 臂在本函数之前，自己先调 `grid_key_action`）。
+        if let Some(act) = self.grid_key_action(state, data) {
+            return Some(act);
         }
         let shift = data.modifiers & MOD_SHIFT != 0;
         let action = self.session_action_for(data.key_code, shift, include_printable)?;
