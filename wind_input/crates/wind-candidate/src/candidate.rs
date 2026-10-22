@@ -100,9 +100,16 @@ pub struct CandidateMeta {
     /// 命中，或命中词条没有边界真值。
     ///
     /// 模糊命中的 `boundary` 恒 0（见 `learn_code`），而 `pinan` 的「平安」走的是 `pin|an`、
-    /// 不是 `maximum_match` 的 `pi|nan`。只服务编码栏跟随首选，排序/造词/边界核对一律不读。
+    /// 不是 `maximum_match` 的 `pi|nan`。只服务编码栏切分（见 `preedit_split`），排序/造词/边界核对一律不读。
     #[serde(skip)]
     pub fuzzy_typed_boundary: u64,
+    /// 高亮到这条候选时编码栏的拼音正文（`pi'nan`）：在本次 `convert` 的输入串里按这条候选
+    /// 自己走的切分插 `'`，候选只覆盖前缀时尾部按最大匹配接着切。`None` = 拿不到可信切分
+    /// （手动分隔符、双拼、无边界真值、补全等），编码栏退回首选那份。
+    ///
+    /// 只服务显示，排序/造词/边界核对一律不读。`Arc<str>`：同一切分的候选共用一份。
+    #[serde(skip)]
+    pub preedit_split: Option<std::sync::Arc<str>>,
     /// 拼音「英文前缀补全」（`schema.pinyin.english_merge.prefix_complete`）补出来的英文候选。
     ///
     /// 只由 `wind_engine::english_merge::lookup_prefix_complete` 置位；协调器

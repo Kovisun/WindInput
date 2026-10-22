@@ -1256,6 +1256,58 @@ impl PinyinEngine {
         None
     }
 
+    /// 一条候选的编码栏切分（`CandidateMeta::preedit_split`）。只在全拼、无手动分隔符时调用，
+    /// 此时 `completed + partial == raw_input`。
+    ///
+    /// | 候选 | 切分 |
+    /// |---|---|
+    /// | 覆盖全部完整音节（整句 / 精确词 / 模糊命中） | 自己的边界，残码另起一段 |
+    /// | 混合整句（code 即整串击键） | 自己的击键域边界 |
+    /// | 简拼 / 混合简拼 | 击键分段，见 [`Self::abbrev_keystroke_preedit`] |
+    /// | 只覆盖前缀（子短语、单字、残码单字） | 自己的边界 + 尾部最大匹配 |
+    /// | 其余（补全、无边界真值） | `None`，协调器退回首选那份 |
+    ///
+    /// 边界取 `boundary`；模糊命中的 `boundary` 恒 0（与所打码不同域），取 `fuzzy_typed_boundary`。
+    /// 尾部切法与 `abbrev_keystroke_preedit` 的部分匹配同口径：选走这条后剩下的码再切一遍。
+    fn candidate_preedit_split(
+        &self,
+        c: &Candidate,
+        raw_input: &str,
+        completed: &str,
+        partial: &str,
+        cache: &mut PreeditSplitCache,
+    ) -> Option<Arc<str>> {
+        let boundary = if c.boundary != 0 {
+            c.boundary
+        } else {
+            c.meta.fuzzy_typed_boundary
+        };
+        if boundary != 0 && c.code == completed && !completed.is_empty() {
+            return Some(cache.get((0, boundary, completed.len()), || {
+                render_preedit(completed, boundary, partial)
+            }));
+        }
+        if c.is_sentence && c.boundary != 0 && c.code == raw_input {
+            // 混合整句（step 2b）：code 是整串**击键**、boundary 也在击键空间（简拼段每字母
+            // 一位），得 `b'z'd'hao'bu'hao`。走不到上一支是因为 `completed` 对这类输入恒为
+            // 空串——`bzdhaobuhao` 从位置 0 就切不出完整音节。
+            return Some(cache.get((1, c.boundary, raw_input.len()), || {
+                render_preedit(raw_input, c.boundary, "")
+            }));
+        }
+        if c.is_abbrev {
+            return self.abbrev_keystroke_preedit(c, raw_input).map(Arc::from);
+        }
+        let len = c.code.len();
+        if boundary != 0 && len > 0 && len < raw_input.len() && raw_input.starts_with(&c.code) {
+            return Some(cache.get((2, boundary, len), || {
+                let (tail, _, _) = self.compose_segment(&raw_input[len..]);
+                format!("{}'{tail}", render_preedit(&c.code, boundary, ""))
+            }));
+        }
+        None
+    }
+
     /// 尊重手动分隔符 `'` 的音节分段：按 `'` 切段、各段独立 DAG 最大匹配，
     /// 拼接为纯音节序列（不含 `'`）。`'` 为硬边界，任何音节不得跨越。
     /// 段内未成音节的残码（partial）不计入（仅用于 completed 音节序列）。
@@ -2558,6 +2610,22 @@ fn render_preedit(code: &str, boundary: u64, partial: &str) -> String {
         out.push_str(partial);
     }
     out
+}
+
+/// 一次 `convert` 里各候选编码栏切分的共享表：同一切分只渲染一次，候选间共用一份 `Arc`
+/// （`pinan` 下几百个 `pi` 单字都是 `pi'nan`）。键 = (情形, 边界, 候选覆盖长度)。
+#[derive(Default)]
+struct PreeditSplitCache(Vec<((u8, u64, usize), Arc<str>)>);
+
+impl PreeditSplitCache {
+    fn get(&mut self, key: (u8, u64, usize), render: impl FnOnce() -> String) -> Arc<str> {
+        if let Some((_, s)) = self.0.iter().find(|(k, _)| *k == key) {
+            return s.clone();
+        }
+        let s: Arc<str> = render().into();
+        self.0.push((key, s.clone()));
+        s
+    }
 }
 
 /// 由音节列表算边界 bitmask（全拼空间），只取覆盖前 `limit_len` 字节的部分。
@@ -4694,27 +4762,26 @@ impl Engine for PinyinEngine {
         //
         // 简拼/混合简拼另走一支：它们的 code 与击键**不同域**，故 `top.code == completed`
         // 恒不成立（`nhao` 一个完整音节都切不出，`completed` 是空串），此前因此完全没有
-        // 分隔显示——`nhao` 原样显示为 `nhao`，`nh` 显示为 `nh`。见下方分支。
-        if sp_result.is_none()
-            && !has_sep
-            && let Some(top) = candidates.first()
-        {
-            // 模糊命中的 `boundary` 恒 0（与所打码不同域），它走的切分另放在 `fuzzy_typed_boundary`。
-            let top_boundary = if top.boundary != 0 {
-                top.boundary
-            } else {
-                top.meta.fuzzy_typed_boundary
-            };
-            if top_boundary != 0 && top.code == completed && !completed.is_empty() {
-                preedit_display = render_preedit(completed, top_boundary, &partial_syllable);
-            } else if top.is_sentence && top.boundary != 0 && top.code == raw_input {
-                // 混合整句（step 2b）：它的 code 是整串**击键**、boundary 也在击键空间
-                // （简拼段每字母一位），故直接渲染击键串即可，得 `b'z'd'hao'bu'hao`。
-                // 走不到上一支是因为 `completed` 对这类输入恒为空串——`bzdhaobuhao`
-                // 从位置 0 就切不出完整音节。
-                preedit_display = render_preedit(raw_input, top.boundary, "");
-            } else if let Some(s) = self.abbrev_keystroke_preedit(top, raw_input) {
-                preedit_display = s;
+        // 分隔显示——`nhao` 原样显示为 `nhao`，`nh` 显示为 `nh`。见 `candidate_preedit_split`。
+        //
+        // 切分按**每条候选**各算一份（`CandidateMeta::preedit_split`），协调器在高亮移动时
+        // 换用高亮那条的；首选那份即这里的 preedit_display。
+        if sp_result.is_none() && !has_sep {
+            let mut cache = PreeditSplitCache::default();
+            for c in candidates.iter_mut().chain(sentence_pool.iter_mut()) {
+                c.meta.preedit_split = self.candidate_preedit_split(
+                    c,
+                    raw_input,
+                    completed,
+                    &partial_syllable,
+                    &mut cache,
+                );
+            }
+            if let Some(s) = candidates
+                .first()
+                .and_then(|c| c.meta.preedit_split.as_deref())
+            {
+                preedit_display = s.to_string();
             }
         }
 
