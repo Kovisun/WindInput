@@ -38,6 +38,9 @@ pub struct AssocContext<'a> {
     /// 末尾紧接着 `text`。只有「下一词」源用它：逐字上屏时把被拆开的词凑回来。
     /// 宿主不报（桌面）就是空串，一切照旧。
     pub preceding: &'a str,
+    /// 用户逐字上屏（形码方案）：单字上屏后「下一词」源也给词内接续（「我」→「们」），
+    /// 见 [`bigram::AssocBigram::lookup_after`]。
+    pub char_wise: bool,
     /// 连续性是否已断（失焦 / 切宿主 / 鼠标点击 / 方向键 / 超时）。
     ///
     /// ★ 断链时**不做联想**。`recent_commits` 是一个跨应用、跨焦点的全局队列，
@@ -486,6 +489,7 @@ mod tests {
         AssocContext {
             text: "你好",
             preceding: "",
+            char_wise: false,
             boundary_broken: false,
         }
     }
@@ -508,6 +512,7 @@ mod tests {
         let c = AssocContext {
             text: "你好",
             preceding: "",
+            char_wise: false,
             boundary_broken: true,
         };
         assert!(associate(&c, &cfg, &[(AssocSource::Punct, &p)]).is_empty());
@@ -520,6 +525,7 @@ mod tests {
         let c = AssocContext {
             text: "",
             preceding: "",
+            char_wise: false,
             boundary_broken: false,
         };
         assert!(associate(&c, &cfg, &[(AssocSource::Punct, &p)]).is_empty());
@@ -869,6 +875,7 @@ mod tests {
                 &AssocContext {
                     text: "中",
                     preceding: "",
+                    char_wise: false,
                     boundary_broken: false,
                 },
                 &cfg,
@@ -919,6 +926,7 @@ mod tests {
                 &AssocContext {
                     text,
                     preceding: "",
+                    char_wise: false,
                     boundary_broken: false,
                 },
                 &cfg,
@@ -976,6 +984,7 @@ mod tests {
                 &AssocContext {
                     text: "中",
                     preceding: "",
+                    char_wise: false,
                     boundary_broken: false,
                 },
                 &cfg,
@@ -1039,6 +1048,7 @@ mod tests {
             &AssocContext {
                 text: "你好",
                 preceding: "",
+                char_wise: false,
                 boundary_broken: false,
             },
             &cfg,
@@ -1053,6 +1063,7 @@ mod tests {
             &AssocContext {
                 text: "你好",
                 preceding: "",
+                char_wise: false,
                 boundary_broken: false,
             },
             &mcfg,

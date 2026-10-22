@@ -19,8 +19,11 @@
 
 - 按上文的 UTF-8 字节序升序（读端二分查找）；后继按概率降序。
 - 后继有两类，放在同一把尺子上排（见 `_mix`）：模型里的「下一词」，与词库里以上文开头的
-  更长的词补出的那截（「我」→「们」）。逐字上屏时后者才是用户要的；两类都只显示、上屏
-  补出的那截，读端不必区分。
+  更长的词补出的那截（「我」→「们」）。两类都只显示、上屏补出的那截，读端不必区分。
+- 单字上文有两行：普通行（`我`）只有下一词——整词打的人（拼音）单独上屏「我」，就是要这个
+  字；`~我` 行混入词内接续——逐字打的人（五笔）上屏「我」，常是「我们」的头一个字。读端按
+  方案挑。两种权重是拿 `assoc_eval_prep.py` 的评测集比出来的：单字行混接续，整词上屏的
+  Top1 从 10.3% 掉到 8.3%；不混，逐字上屏的 Top1 从 19.5% 掉到 10.4%。
 - `$` 是模型里的句末记号，原样保留在它的名次上：读端据此决定标点要不要提前。
 """
 import argparse
@@ -42,6 +45,9 @@ WEB_BOILERPLATE = frozenset(
     "播放 播放列表 发布 弹出 弹出窗口 查看 评论 下载 登录 注册 点击 浏览 收藏 分享 转发 "
     "回复 提示 酒店 游戏 网 首页 页面 链接 帖子 楼主 版权 隐私 上传 订阅".split()
 )
+
+# 逐字上屏用的单字行的键前缀（见文件头「产物格式」）
+CHAR_WISE_MARK = "~"
 
 # .gram 分值 = ln(频次) × 10000
 SCORE_SCALE = 10000.0
@@ -135,6 +141,8 @@ def _straddles(ctx, s):
     """多字后继的开头几个字能与上文连成词（「中」+「国人」：中国|人）⇒ 键是跨词边界切错的。
 
     单字后继不算：「中」+「国」正是「中国」的后半截，智能联想里只显示「国」，正是要的。
+    整个「上文+后继」是词也不算：词库里组合式的词条很多（「我的」「我是」），按它过滤会把
+    真正的下一词一并拿掉（评测：整词上屏 Top1 10.4% → 7.0%）。
     """
     return any(ctx + s[:k] in _vocab for k in range(1, len(s)))
 
@@ -174,7 +182,7 @@ def _logaddexp(a, b):
     return hi + math.log1p(math.exp(lo - hi))
 
 
-def _mix(ctx, found, total, han, words_sorted, max_succ_chars):
+def _mix(ctx, found, total, han, words_sorted, max_succ_chars, cont_weight):
     """把「下一词」与「词内接续」放到同一把尺子上，返回按概率降序的 [(显示, 概率)]。
 
     打完 ctx 后用户接着要的东西有两类：
@@ -202,7 +210,7 @@ def _mix(ctx, found, total, han, words_sorted, max_succ_chars):
     for w in longer:
         rest = w[len(ctx):]
         if len(rest) <= min(2, max_succ_chars) and han[w] > 0:
-            probs[rest] = probs.get(rest, 0.0) + han[w] / d
+            probs[rest] = probs.get(rest, 0.0) + cont_weight * han[w] / d
     if total is not None and w_ctx > 0:
         for s, v in found:
             if s in WEB_BOILERPLATE:
@@ -246,6 +254,15 @@ def main():
     ap.add_argument("--top", type=int, default=12, help="每个上文留几个后继")
     ap.add_argument("--max-context-chars", type=int, default=4)
     ap.add_argument("--max-succ-chars", type=int, default=4)
+    ap.add_argument(
+        "--cont-weight-n", type=float, default=0.2, help="多字上文的词内接续权重（评测定的）"
+    )
+    ap.add_argument(
+        "--cont-weight-charwise",
+        type=float,
+        default=1.0,
+        help=f"单字上文「{CHAR_WISE_MARK}」行（逐字上屏用）的词内接续权重；普通单字行不混接续",
+    )
     ap.add_argument("--source", default="", help="写进产物头注释的模型来源说明")
     ap.add_argument("--jobs", type=int, default=os.cpu_count())
     a = ap.parse_args()
@@ -270,9 +287,16 @@ def main():
         for i, (ctx, succ, total) in enumerate(
             pool.imap_unordered(_successors, contexts, chunksize=1)
         ):
-            mixed = _mix(ctx, succ, total, han, words_sorted, a.max_succ_chars)
+            cont = 0.0 if len(ctx) == 1 else a.cont_weight_n
+            mixed = _mix(ctx, succ, total, han, words_sorted, a.max_succ_chars, cont)
             if mixed:
                 rows.append((ctx, [s for s, _ in mixed[: a.top]]))
+            if len(ctx) == 1:
+                cw = _mix(
+                    ctx, succ, total, han, words_sorted, a.max_succ_chars, a.cont_weight_charwise
+                )
+                if cw:
+                    rows.append((CHAR_WISE_MARK + ctx, [s for s, _ in cw[: a.top]]))
             if i % 5000 == 0:
                 print(f"  {i}/{len(contexts)}", file=sys.stderr)
     rows.sort(key=lambda r: r[0].encode("utf-8"))

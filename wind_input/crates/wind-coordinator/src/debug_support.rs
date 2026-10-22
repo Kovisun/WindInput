@@ -65,9 +65,26 @@ impl Coordinator {
 
     /// 按上文 `text` 算出的联想候选文本（不进联想态、不改状态；评测 / 诊断用）。
     pub fn debug_assoc_suggest(&self, text: &str) -> Vec<String> {
-        self.assoc_hits(&self.assoc_config(), "", text)
+        self.assoc_hits(&self.assoc_config(), "", text, self.assoc_char_wise())
             .into_iter()
             .map(|h| h.text)
+            .collect()
+    }
+
+    /// 按前文 `preceding` 与上屏 `text` 算出的联想，取**候选条上显示的**文本（智能联想下
+    /// 前缀词只显示补出的那截）。不进联想态、不改状态；离线评测用（`tests/assoc_eval.rs`）。
+    /// `char_wise` 模拟逐字上屏的用户（运行时按方案定，见 `assoc_char_wise`）。
+    pub fn debug_assoc_display(&self, preceding: &str, text: &str, char_wise: bool) -> Vec<String> {
+        let cfg = self.assoc_config();
+        self.assoc_hits(&cfg, preceding, text, char_wise)
+            .into_iter()
+            .map(|h| {
+                if cfg.kind.shows_continuation() {
+                    h.commit_text().to_string()
+                } else {
+                    h.text
+                }
+            })
             .collect()
     }
 

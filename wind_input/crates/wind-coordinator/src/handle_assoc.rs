@@ -323,7 +323,10 @@ const SENTENCE_END_MIN_RANK: usize = 1;
 
 impl AssocProvider for BigramWords<'_> {
     fn suggest(&self, ctx: &AssocContext<'_>, limit: usize) -> Vec<AssocHit> {
-        let Some(succ) = self.table.lookup_after(ctx.preceding, ctx.text) else {
+        let Some(succ) = self
+            .table
+            .lookup_after(ctx.preceding, ctx.text, ctx.char_wise)
+        else {
             return Vec::new();
         };
         let mut words: Vec<&str> = succ.into_iter().take(limit).collect();
@@ -609,6 +612,7 @@ impl Coordinator {
         cfg: &AssocConfig,
         preceding: &str,
         text: &str,
+        char_wise: bool,
     ) -> Vec<AssocHit> {
         if cfg.kind == AssocKind::Off {
             return Vec::new();
@@ -616,6 +620,7 @@ impl Coordinator {
         let ctx = AssocContext {
             text,
             preceding,
+            char_wise,
             // 上屏这一瞬间上文必然连续——正是刚刚打进去的那段字。
             // 断链只发生在失焦/切窗/点击等**别的**入口，那些路径直接调 `exit_assoc`。
             boundary_broken: false,
@@ -656,6 +661,12 @@ impl Coordinator {
         wind_assoc::associate(&ctx, cfg, &providers)
     }
 
+    /// 用户是不是逐字上屏的：拼音以外的方案（五笔等形码、混输）算是。单字上屏后「下一词」
+    /// 据此决定要不要给词内接续，见 [`wind_assoc::bigram::AssocBigram::lookup_after`]。
+    pub(crate) fn assoc_char_wise(&self) -> bool {
+        !self.engine_mgr.is_pinyin()
+    }
+
     /// 按刚上屏的文本生成联想候选并进入联想态。返回是否真的进入了。
     ///
     /// # 调用契约
@@ -670,7 +681,7 @@ impl Coordinator {
         // 前文末尾就是它，去掉才接得上整词。
         let preceding = self.preceding_text();
         let preceding = preceding.strip_suffix(on_screen).unwrap_or(&preceding);
-        let hits = self.assoc_hits(&cfg, preceding, text);
+        let hits = self.assoc_hits(&cfg, preceding, text, self.assoc_char_wise());
         if hits.is_empty() {
             return false;
         }

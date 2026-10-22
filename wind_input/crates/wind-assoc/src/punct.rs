@@ -164,6 +164,7 @@ mod tests {
         AssocContext {
             text,
             preceding: "",
+            char_wise: false,
             boundary_broken: false,
         }
     }

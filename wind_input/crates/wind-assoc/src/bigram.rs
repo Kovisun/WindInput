@@ -10,6 +10,10 @@
 /// 模型里的句末记号：排名越靠前，说明上文后面越常直接断句。
 pub const SENTENCE_END: &str = "$";
 
+/// 逐字上屏用的单字行的键前缀：`~我` 行混入了词内接续（「们」），普通的 `我` 行只有下一词。
+/// 见 [`AssocBigram::lookup_after`]。
+pub const CHAR_WISE_MARK: &str = "~";
+
 /// 上文最多看几个字。与蒸馏参数 `--max-context-chars` 一致：更长的上文表里没有。
 pub const MAX_CONTEXT_CHARS: usize = 4;
 
@@ -106,12 +110,24 @@ impl AssocBigram {
     /// 借字有个反例：前文「今天」、上屏「下」（要打「下午」），借一个字就是表里的「天下」。
     /// 判据：被借走的那几个字，在前文里已经和更前面的字连成了一个词（「今天」在表里）——
     /// 那它们属于那个词，不该再借给这次上屏。
-    pub fn lookup_after<'a>(&'a self, preceding: &str, commit: &'a str) -> Option<Vec<&'a str>> {
+    ///
+    /// `char_wise`：用户是逐字上屏的（形码方案）。借不成字、这次只上屏了一个字时，先查
+    /// [`CHAR_WISE_MARK`] 行：五笔上屏「我」常是「我们」的头一个字，拼音单独上屏「我」
+    /// 则多半就是要这个字，后面接新词。
+    pub fn lookup_after<'a>(
+        &'a self,
+        preceding: &str,
+        commit: &'a str,
+        char_wise: bool,
+    ) -> Option<Vec<&'a str>> {
         let n = commit.chars().count();
         let pre: Vec<char> = preceding.chars().collect();
         let max_borrow = MAX_CONTEXT_CHARS.saturating_sub(n).min(pre.len());
         for k in (1..=max_borrow).rev() {
             let borrowed: String = pre[pre.len() - k..].iter().collect();
+            if borrowed.contains(CHAR_WISE_MARK) {
+                continue;
+            }
             let Some(i) = self.find(&format!("{borrowed}{commit}")) else {
                 continue;
             };
@@ -122,6 +138,12 @@ impl AssocBigram {
             if !taken {
                 return Some(self.successors(i));
             }
+        }
+        if char_wise
+            && n == 1
+            && let Some(i) = self.find(&format!("{CHAR_WISE_MARK}{commit}"))
+        {
+            return Some(self.successors(i));
         }
         self.lookup(commit).map(|(_, succ)| succ)
     }
@@ -176,14 +198,32 @@ mod tests {
         let text: String = rows.iter().map(|(c, s)| format!("{c}\t{s}\n")).collect();
         let t = AssocBigram::parse(text).unwrap();
         // 逐字上屏「今」「天」：借「今」凑成「今天」
-        assert_eq!(t.lookup_after("我们今", "天").unwrap(), vec!["是", "晚上"]);
+        assert_eq!(
+            t.lookup_after("我们今", "天", false).unwrap(),
+            vec!["是", "晚上"]
+        );
         // 「今天」已成词，「天」不借给「下」
-        assert_eq!(t.lookup_after("今天", "下").unwrap(), vec!["午", "面"]);
+        assert_eq!(
+            t.lookup_after("今天", "下", false).unwrap(),
+            vec!["午", "面"]
+        );
         // 借得多的先试：「中国人」而不是「国人」
-        assert_eq!(t.lookup_after("中国", "人").unwrap(), vec!["民"]);
+        assert_eq!(t.lookup_after("中国", "人", false).unwrap(), vec!["民"]);
         // 没有前文 = 只看上屏的
-        assert_eq!(t.lookup_after("", "天").unwrap(), vec!["气"]);
-        assert!(t.lookup_after("今天", "鬻").is_none());
+        assert_eq!(t.lookup_after("", "天", false).unwrap(), vec!["气"]);
+        assert!(t.lookup_after("今天", "鬻", false).is_none());
+    }
+
+    #[test]
+    fn char_wise_rows_for_single_chars() {
+        // 「~」(0x7E) 排在汉字前面
+        let t = AssocBigram::parse("~我\t们 的\n我\t的 是\n我们\t的\n".into()).unwrap();
+        assert_eq!(t.lookup_after("", "我", true).unwrap(), vec!["们", "的"]);
+        assert_eq!(t.lookup_after("", "我", false).unwrap(), vec!["的", "是"]);
+        // 多字上屏不走逐字行
+        assert_eq!(t.lookup_after("", "我们", true).unwrap(), vec!["的"]);
+        // 前文里真有个「~」也不会借成逐字行的键
+        assert_eq!(t.lookup_after("a~", "我", false).unwrap(), vec!["的", "是"]);
     }
 
     #[test]
