@@ -3321,6 +3321,9 @@ impl Coordinator {
                     // 上线后才暴露，因为在此之前这些符号本就走不进缓冲。
                     let sel = if lens == MixLens::Numeric {
                         is_letter.then(|| (data.key_code - keymap::VK_A) as usize)
+                    } else if !shift && data.key_code == keymap::VK_0 && Self::grid_active(state) {
+                        // 展开态下 0 选第 10 格（序号顺延时标「0」的那格）；收起态的 0 照旧。
+                        Some(9)
                     } else {
                         (!shift && (keymap::VK_1..=keymap::VK_9).contains(&data.key_code))
                             .then(|| (data.key_code - keymap::VK_1) as usize)

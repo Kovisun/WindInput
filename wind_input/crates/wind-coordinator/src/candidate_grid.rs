@@ -2099,4 +2099,39 @@ mod tests {
             assert!(!st.has_more, "{mode:?}：不分批加载");
         }
     }
+
+    /// 展开态下序号逐格顺延时第 10 格标「0」，按 0 要选得到它（快捷输入与临拼）；
+    /// 收起态的 0 维持原语义：快捷输入作字面（落自由透镜），临拼顶屏高亮候选再接 `0`。
+    #[test]
+    fn zero_key_selects_the_tenth_cell_when_expanded() {
+        for (lead, collapsed) in [(0xBAu32, None), (0xC0, Some("是0"))] {
+            let Some((c, _rx)) = mix_coord(wind_config::LayoutIntent::Horizontal, false) else {
+                return;
+            };
+            let enter = |c: &Coordinator| {
+                c.handle_key_event(&key(lead));
+                for ch in "SHI".chars() {
+                    c.handle_key_event(&key(ch as u32));
+                }
+            };
+            enter(&c);
+            c.handle_key_event(&key(keymap::VK_NEXT));
+            assert!(view(&c).2.is_some(), "{lead:#x}：前提：展开");
+            let all = texts(&c);
+            match c.handle_key_event(&key(keymap::VK_0)) {
+                KeyAction::InsertText { text, .. } => assert_eq!(text, all[9], "{lead:#x}"),
+                other => panic!("{lead:#x}：展开态按 0 应上屏第 10 格，实得 {other:?}"),
+            }
+
+            enter(&c);
+            let act = c.handle_key_event(&key(keymap::VK_0));
+            match collapsed {
+                None => assert_eq!(preedit_of(&c), ";shi0", "收起态的 0 照旧是字面"),
+                Some(want) => match act {
+                    KeyAction::InsertText { text, .. } => assert_eq!(text, want),
+                    other => panic!("临拼收起态按 0 应顶屏，实得 {other:?}"),
+                },
+            }
+        }
+    }
 }

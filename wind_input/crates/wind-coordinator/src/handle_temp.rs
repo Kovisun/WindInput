@@ -890,13 +890,22 @@ impl Coordinator {
                     Self::commit_action(out, true)
                 }
             }
-            keymap::VK_1..=keymap::VK_9 if data.modifiers & MOD_SHIFT == 0 => {
+            // 展开态下 0 选第 10 格（序号顺延时标「0」的那格）；收起态的 0 不在此臂。
+            keymap::VK_0..=keymap::VK_9
+                if data.modifiers & MOD_SHIFT == 0
+                    && (data.key_code != keymap::VK_0 || Self::grid_active(state)) =>
+            {
                 // 数字键选当前页第 N 个
+                let off = if data.key_code == keymap::VK_0 {
+                    9
+                } else {
+                    (data.key_code - 0x31) as usize
+                };
                 let (start, end) = self.select_range(state);
-                let idx = start + (data.key_code - 0x31) as usize;
+                let idx = start + off;
                 if idx < end {
                     let cand = state.candidates[idx].clone();
-                    self.commit_temp_pinyin_selected(state, &cand, (data.key_code - 0x31) as i32)
+                    self.commit_temp_pinyin_selected(state, &cand, off as i32)
                 } else {
                     KeyAction::Consumed
                 }
