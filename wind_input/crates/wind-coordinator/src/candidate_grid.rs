@@ -1747,4 +1747,47 @@ mod tests {
             other => panic!("按 6 应上屏第二行行首，实得 {other:?}"),
         }
     }
+
+    /// 五笔主方案下的临时拼音同样能展开（真实词库）：出厂引导键 `` ` ``，以及用户把 `;`
+    /// 改绑成临拼。⚠️ 出厂的 `;` 是快捷输入（mix），不在 `grid_eligible` 的模式白名单里、
+    /// 且 quick_mix 出厂竖排，两条都拦——那是另一回事，不归这里。
+    #[test]
+    fn temp_pinyin_under_wubi_expands() {
+        let d = data_dir();
+        if !d.join("schemas/wubi86.schema.toml").exists()
+            || !d.join("schemas/pinyin.schema.toml").exists()
+        {
+            return;
+        }
+        for (lead, rebind) in [(0xC0u32, false), (0xBA, true)] {
+            let mut cfg = wind_config::Config::default();
+            cfg.schema.available = vec!["wubi86".into(), "pinyin".into()];
+            cfg.schema.active = "wubi86".into();
+            cfg.input.default.chinese_mode = true;
+            cfg.ui.candidate.grid_expand = true;
+            if rebind {
+                cfg.keys
+                    .key_actions
+                    .insert("semicolon".into(), "temp_pinyin".into());
+            }
+            let (c, _rx) = Coordinator::new_headless_with_ui(cfg, Some(&d));
+            c.debug_mark_coords_ready();
+            c.handle_key_event(&key(lead));
+            for ch in "SHI".chars() {
+                c.handle_key_event(&key(ch as u32));
+            }
+            assert_eq!(
+                c.state.lock().unwrap().active,
+                Some(crate::pipeline::ModeKind::TempPinyin),
+                "前提：{lead:#x} 进临拼"
+            );
+            c.handle_key_event(&key(keymap::VK_NEXT));
+            let st = c.state.lock().unwrap();
+            assert_eq!(
+                (st.grid_top, st.current_page, st.preedit.as_str()),
+                (Some(0), 0, if rebind { ";shi" } else { "`shi" }),
+                "{lead:#x}：PageDown 应展开且不翻页"
+            );
+        }
+    }
 }
