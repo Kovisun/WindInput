@@ -116,8 +116,8 @@ leading_chars = ""
 # 的比较链**不含 weight**，只看「有没有被选过」。五笔一简 25 个码每个都是二选一
 # （a → 工 9999 / 戈 9998），次选字被误选一次就永久翻转。故简码位保住首选、全码位放开。
 # 英文候选混入（码表方案）：候选列表里捎带英文词库候选，打 hello 直接选到 hello，
-# 不必切英文方案或走临时英文。只有**整串恰好是一个英文词**时才混入——打 githu 不出
-# GitHub，想打某个词要敲完整。
+# 不必切英文方案或走临时英文。有中文候选时默认只在**整串恰好是一个英文词**时混入——
+# 打 githu 不出 GitHub；想边打边补全，见下方 complete_min_length。
 #
 # 与 [schema.pinyin.english_merge] 是**两件独立的事**：码表用户常打命令行、变量名，
 # 开着有用；全拼的英文词与拼音串大面积重叠，是否要开是另一个判断。取值互不共享。
@@ -131,6 +131,13 @@ min_length = 3
 # 定长码表**必须开着**：4 码即满码上屏，关掉的话打 github 到第 4 键就被顶出中文。
 # ⚠️ 本项按**前缀**命中判（打到 gith 时精确命中还不存在），与「只收精确命中」不同域。
 block_commit = true
+# 中文侧有候选时，输入达到几码起也给英文前缀补全（如设 4：五笔打 gith 也出 github）。
+# 0 = 不补，只在中文侧没有候选时补全。
+complete_min_length = 0
+# 英文候选最靠前排第几位（1 起）。仍先让过开头连续的常用完整中文解，只会更靠后；1 = 不额外限制。
+position = 2
+# 中文侧有候选时英文最多几条（完整单词优先，再补前缀补全）；中文侧没有候选时给一页补全。
+max_count = 2
 
 [schema.codetable.frequency]
 enabled = false
@@ -556,6 +563,13 @@ auto_commit_block_on_english = false
 min_pinyin_length = 2
 # 英文最小触发长度（2 字符以内不查英文；0=回退 3）。
 min_english_length = 3
+# 以下三项口径同 [schema.codetable.english_merge] 的 complete_min_length / position / max_count。
+# 中文侧有候选时，输入达到几码起也给英文前缀补全（0 = 不补，只在中文侧没有候选时补全）。
+english_complete_min_length = 0
+# 英文候选最靠前排第几位（1 起；仍先让过开头连续的常用完整中文解）。
+english_position = 2
+# 中文侧有候选时英文最多几条；截断时为这几条保底留座。
+english_max_count = 2
 # 拼音歧义拦截（词强度）：整串是强拼音词时否决五笔自动/顶码上屏，让拼音赢
 # （wangba→网吧 拦；aipu→落实 无强词放行）。独立于 auto_commit_block_on_pinyin。
 block_commit_on_pinyin_word = true

@@ -238,6 +238,9 @@ static REGISTRY: &[ConfigField] = &[
     f("schema.codetable.english_merge.enable", Bool),
     f("schema.codetable.english_merge.min_length", Int),
     f("schema.codetable.english_merge.block_commit", Bool),
+    f("schema.codetable.english_merge.complete_min_length", Int),
+    f("schema.codetable.english_merge.position", Int),
+    f("schema.codetable.english_merge.max_count", Int),
     // 带参数的值域（`mix:<id>` / `special:<id>`）故用 Str 而非 Enum；解析与校验见 `BoundAction`。
     f("schema.codetable.z_key_action", Str),
     // 通配输入（万能键）。键是单个字面字符，值域无法枚举故用 Str；合法性见 `parse_wildcard_key`。
@@ -379,6 +382,9 @@ static REGISTRY: &[ConfigField] = &[
     f("schema.mix.auto_commit_block_on_english", Bool),
     f("schema.mix.min_pinyin_length", Int),
     f("schema.mix.min_english_length", Int),
+    f("schema.mix.english_complete_min_length", Int),
+    f("schema.mix.english_position", Int),
+    f("schema.mix.english_max_count", Int),
     f("schema.mix.block_commit_on_pinyin_word", Bool),
     f("schema.mix.pinyin_word_min_weight", Int),
     f("schema.mix.enable_pinyin_abbrev", Bool),
@@ -1022,6 +1028,18 @@ pub fn schema_overridden_keys(schema: &crate::schema::Schema) -> Vec<&'static st
         (
             "schema.codetable.english_merge.block_commit",
             em.block_commit.is_some(),
+        ),
+        (
+            "schema.codetable.english_merge.complete_min_length",
+            em.complete_min_length.is_some(),
+        ),
+        (
+            "schema.codetable.english_merge.position",
+            em.position.is_some(),
+        ),
+        (
+            "schema.codetable.english_merge.max_count",
+            em.max_count.is_some(),
         ),
         // ── [engine.aux_code] ⇄ schema.pinyin.aux_code.* ──
         ("schema.pinyin.aux_code.enabled", aux.enabled.is_some()),
