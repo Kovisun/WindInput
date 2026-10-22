@@ -4657,18 +4657,25 @@ impl EngineManager {
                 }
                 v
             };
+            // 通路①（满码自动上屏 / 满码空码清空）的英文守护。
+            //
+            // ★ 判据是「列表里有英文」**或**「按前缀英文可能出现」（`has_any`，与通路②③同口径）。
+            // 只看列表的话，默认配置下 `gith` 的精确命中还不存在、列表里没有英文，满码就在第 4 键
+            // 把中文顶上屏，`github` 永远敲不完。`AGENTS.md` 要求的「对方确有候选」由 `has_any`
+            // 的前缀命中兑现：拦下后用户继续敲，完整单词必然露面。
+            //
+            // `should_clear` 一并否决：满码无码表匹配时清空缓冲会把用户正在打的英文词
+            // 一起抹掉，与顶掉它是同一种伤害。只在确有可否决的动作时才多查一次英文。
+            if cfg.block_commit
+                && (r.should_commit || r.should_clear)
+                && (!english.is_empty()
+                    || crate::english_merge::has_any(eng.as_ref(), input, cfg.min_length))
+            {
+                r.should_commit = false;
+                r.commit_text.clear();
+                r.should_clear = false;
+            }
             if !english.is_empty() {
-                // 通路①（满码自动上屏 / 满码空码清空）的英文守护。
-                // `AGENTS.md`：否决必须叠「对方确有候选」——本分支已在 `!english.is_empty()`
-                // 之内，判据与下面并入列表的是**同一批候选、同一个 input**，天然同源。
-                //
-                // `should_clear` 一并否决：满码无码表匹配时清空缓冲会把用户正在打的英文词
-                // 一起抹掉，与顶掉它是同一种伤害。
-                if cfg.block_commit {
-                    r.should_commit = false;
-                    r.commit_text.clear();
-                    r.should_clear = false;
-                }
                 crate::english_merge::merge(&mut r.candidates, english, max_candidates);
                 // 「有输入但无候选」的判据须随之更新：英文进来了就不再是空码，
                 // 漏掉这行会让协调器按空码处置（吃键 / 清空），候选却是有的。
