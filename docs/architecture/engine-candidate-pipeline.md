@@ -545,7 +545,8 @@ code 是 query 前缀 → 只消费前缀长度，剩余拼音继续转换；否
 （全拼下打 `hello` 直接选到 hello），出厂关。
 
 **配置按引擎分两份，取值互不共享**：`schema.codetable.english_merge`（`enable` /
-`min_length` / `block_commit` / `complete_min_length` / `position` / `max_count`，可经方案级
+`min_length` / `block_commit` / `block_commit_on_word` / `complete_min_length` / `exact_position` /
+`complete_position` / `max_count`，可经方案级
 `[engine.codetable.english_merge]` 逐项覆盖；混输 `schema.mix` 有同口径的 `english_*` 三项）与
 `schema.pinyin.english_merge`（`enable` / `min_length`）。拆开的理由是「码表方案要不要捎带
 英文」与「拼音方案要不要」本就是两件事——五笔常打命令行、变量名，开着有用；全拼的英文词与
@@ -594,6 +595,12 @@ hen / hence / henceforth / Henderson / Hendrix，混输 `github` 曾混进 8 条
 用户打到 `gith` 时精确命中尚不存在，否决若也要求精确，五笔满码就会在第 4 键把中文顶上屏。
 一处收窄、一处保留，是这条改动里最容易被后人「顺手统一」掉的地方。
 
+否决分两级，结构同混输拼音那对（`auto_commit_block_on_pinyin` / `block_commit_on_pinyin_word`），
+判据收在 `english_merge::vetoes_commit`，码表（`block_commit` / `block_commit_on_word`）与混输
+（`auto_commit_block_on_english` / `block_commit_on_english_word`）、满码 / 复评 / 顶码 / 满码空码
+清空各路径共用：**前缀级**有英文词以当前串开头即否决；**成词级**整串恰是英文单词才否决，前缀级开着
+时被它涵盖。两级都不算英文临时词（列表里的与查词库的同口径）。
+
 #### 6.1.2 英文候选的位次由协调器决定
 
 英文候选**排第几**不在引擎层决定。`is_exact_code` 在两处取数时即被清除——那是**码表域**
@@ -607,10 +614,13 @@ hen / hence / henceforth / Henderson / Hendrix，混输 `github` 曾混进 8 条
 候选之前。采用后置定位而非新增比较键，理由见该函数文档（比较键会扰动非英文候选之间的
 既有次序，而只对英文表态的比较器不是全序）。
 
-码表 / 混输另有**位次下限** `position` / `english_position`（出厂 2，1 起）：实际位置 =
-max(下限, 让过常用精确解后的位置)，只会更靠后，候选不够时落在末尾。协调器经
-`EngineManager::active_english_position` 按活跃方案类型取值（拼音、英文方案恒 1 = 不限；
-混输分段续转走拼音方案，也按 1）。
+码表 / 混输另有两项**位次下限**（1 起，0 回退出厂值）：完整单词 `exact_position` /
+`english_exact_position`（出厂 1）与前缀补全 `complete_position` / `english_complete_position`
+（出厂 2）。完整单词落在 max(下限, 让过开头完整匹配中文后的位置)；补全再取 max(自己的下限,
+让过拼音真词后的位置, 完整单词之后)——同一列表里完整单词恒在补全之前，位次按最终列表计。
+只会更靠后，候选不够时落在末尾。五笔打 `git` / `vim`（无中文全码）出厂下英文排第 1。
+协调器经 `EngineManager::active_english_positions` 按活跃方案类型取值（拼音、英文方案恒
+`(1, 1)` = 不限；混输分段续转走 `convert_with`，那里不混英文）。
 
 前缀补全来的英文（`meta.from_prefix_complete`，只有 `lookup_prefix_complete` 打这个标记）
 再往后让一段：让过紧随其后、吃满整串且非引擎合成的**拼音**候选（`xiaom` 的「小米」是简拼残码
@@ -1182,7 +1192,8 @@ merged_codes。**当前四个归并点**：`composite::merge_search`（跨词库
 | `schema.mix.pinyin_only_overflow` | true | 超码长仅拼音+英文 |
 | `schema.mix.min_pinyin_length` | 2 | 拼音最小触发长 |
 | `schema.mix.enable_english` / `min_english_length` / `auto_commit_block_on_english` | false / 3 / false | 英文混入及守护 |
-| `schema.mix.english_complete_min_length` / `english_position` / `english_max_count` | 0 / 2 / 2 | 英文补全门槛、位次下限、条数上限（口径同 `schema.codetable.english_merge`） |
+| `schema.mix.block_commit_on_english_word` | true | 成词级英文否决（整串恰是英文单词时否决满码 / 顶码 / 清空） |
+| `schema.mix.english_complete_min_length` / `english_exact_position` / `english_complete_position` / `english_max_count` | 0 / 1 / 2 / 2 | 英文补全门槛、两项位次下限、条数上限（口径同 `schema.codetable.english_merge`） |
 | `schema.mix.show_source_hint` | false | 拼音候选「拼」标记 |
 | `schema.codetable.*`（auto_commit_at_full / auto_commit_min_len / clear_on_empty_max / top_code_commit / show_code_hint / single_code_input / single_code_complete 等） | 见 config.toml | 可被 `schema_overrides/{id}.toml [codetable]` 按方案覆盖 |
 | `schema.pinyin.use_smart_compose` | — | Viterbi 整句开关 |
