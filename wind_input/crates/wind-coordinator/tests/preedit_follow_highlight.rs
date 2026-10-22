@@ -22,6 +22,8 @@ const VK_SEMICOLON: u32 = 0xBA;
 const VK_LEFT: u32 = 0x25;
 const VK_UP: u32 = 0x26;
 const VK_DOWN: u32 = 0x28;
+const VK_TAB: u32 = 0x09;
+const MOD_SHIFT: u32 = 0x0001;
 
 fn data_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../build_dev/data")
@@ -35,10 +37,14 @@ fn has_data() -> bool {
 }
 
 fn key(k: u32) -> KeyEventData {
+    key_mod(k, 0)
+}
+
+fn key_mod(k: u32, modifiers: u32) -> KeyEventData {
     KeyEventData {
         key_code: k,
         scan_code: 0,
-        modifiers: 0,
+        modifiers,
         event_type: EVENT_KEY_DOWN,
         toggles: 0,
         event_seq: 0,
@@ -77,14 +83,19 @@ fn shuangpin_target(mut c: Config) -> Config {
     c
 }
 
-/// 先按 `enter`（进 overlay 的引导键），再逐键打 `input`。
+/// 先按 `enter`（进 overlay 的引导键），再逐键打 `input`；大写字母带 Shift 打。
 fn typed(c: Config, enter: Option<u32>, input: &str) -> Arc<Coordinator> {
     let coord = Coordinator::new_headless(c, Some(&data_dir()));
     if let Some(k) = enter {
         press(&coord, k);
     }
     for ch in input.chars() {
-        press(&coord, (ch.to_ascii_uppercase() as u32) & 0xFF);
+        let mods = if ch.is_ascii_uppercase() {
+            MOD_SHIFT
+        } else {
+            0
+        };
+        coord.handle_key_event_policed(&key_mod((ch.to_ascii_uppercase() as u32) & 0xFF, mods));
     }
     coord
 }
@@ -209,8 +220,7 @@ fn main_xian_single_syllable_vs_word() {
         let coord = typed(cfg(schema), None, "xian");
         assert_top(&coord, "先", "xian");
         assert_at(&coord, "西安", "xi'an");
-        press(&coord, VK_DOWN);
-        assert_eq!(coord.debug_preedit(), "xian", "{schema}：移离「西安」恢复");
+        assert_at(&coord, "县", "xian");
     }
 }
 
@@ -318,4 +328,66 @@ fn caret_tracks_form_switch() {
             "{prefix:?}：自绘编码栏的插入符同样在 pi'n| 之后"
         );
     }
+}
+
+/// 分段上屏后（已转换前缀非空）照样跟随：`nipinan` 选「你」，剩下的 `pinan` 高亮「平安」是
+/// `你pin'an`、高亮「皮」是 `你pi'nan`。
+#[test]
+fn committed_prefix_follows_highlight() {
+    if !has_data() {
+        return;
+    }
+    let coord = typed(in_ing(cfg("pinyin")), None, "nipinan");
+    let pos = coord
+        .debug_page_texts()
+        .iter()
+        .position(|t| t == "你")
+        .expect("首页应有「你」");
+    press(&coord, 0x31 + pos as u32);
+    assert_top(&coord, "平安", "你pin'an");
+    assert_at(&coord, "皮", "你pi'nan");
+}
+
+/// Shift 打出的大写只在影子串里，按高亮那条的切分投影回去：`piNan` 高亮「平安」是
+/// `piN'an`、高亮「皮」是 `pi'Nan`。（`Pinan` 首键带 Shift 会进临英，故大写放在中间。）
+#[test]
+fn uppercase_projects_onto_highlighted_split() {
+    if !has_data() {
+        return;
+    }
+    let coord = typed(in_ing(cfg("pinyin")), None, "piNan");
+    assert_eq!(coord.debug_active_mode(), None, "前提：仍在主路");
+    assert_top(&coord, "平安", "piN'an");
+    assert_at(&coord, "皮", "pi'Nan");
+}
+
+/// 整句切换键换解读时编码栏形态会变（「西安交通大学」`xi'an'…` → 「先交通大学」`xian'…`），
+/// 回传宿主的光标按新形态换算：光标停在 `xian|`，新形态里它在 `xian` 之后，不是串尾。
+#[test]
+fn sentence_cycle_caret_tracks_form_switch() {
+    if !has_data() {
+        return;
+    }
+    let mut c = cfg("pinyin");
+    c.schema.pinyin.sentence_count = 1;
+    c.schema.pinyin.sentence_max_count = 5;
+    c.schema.pinyin.sentence_cycle_key = "tab".into();
+    let coord = typed(c, None, "xianjiaotongdaxue");
+    for _ in 0.."jiaotongdaxue".len() {
+        press(&coord, VK_LEFT);
+    }
+    assert_top(&coord, "西安交通大学", "xi'an'jiao'tong'da'xue");
+    match press(&coord, VK_TAB) {
+        KeyAction::UpdateComposition { text, caret_pos } => {
+            assert_eq!(text, "xian'jiao'tong'da'xue");
+            assert_eq!(caret_pos, 4, "回传的光标在 xian| 之后");
+        }
+        other => panic!("切换整句后形态变了，应回传组合串，实得 {other:?}"),
+    }
+    assert_eq!(highlighted(&coord), "先交通大学");
+    assert_eq!(
+        coord.debug_ui_caret_bytes(),
+        4,
+        "自绘编码栏的插入符同样在 xian| 之后"
+    );
 }
