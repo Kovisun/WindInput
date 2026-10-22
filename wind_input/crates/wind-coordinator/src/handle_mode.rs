@@ -2220,7 +2220,8 @@ impl Coordinator {
     }
 
     pub(crate) fn mix_select(&self, state: &mut State, page_offset: usize) -> KeyAction {
-        let (start, end) = self.page_range(state);
+        // 展开态下序号顺延到下一行，数字键跟着走（同临拼）。
+        let (start, end) = self.select_range(state);
         let gi = start + page_offset;
         if gi >= end {
             return KeyAction::Consumed;
@@ -2447,7 +2448,14 @@ impl Coordinator {
     /// 数字透镜只取内置来源（表达式无拼音/英文意义），文本透镜只取真实方案，避免互相污染。
     /// **成员顺序即候选优先级**——把 `quick_input.calc` 排在最前即得「计算结果作首选」。
     pub(crate) fn update_mix_candidates(&self, state: &mut State) {
+        self.refill_mix_candidates(state);
+        self.grid_resume(state);
+    }
+
+    fn refill_mix_candidates(&self, state: &mut State) {
         state.candidates.clear();
+        // 不分批加载：主路残留的 `has_more` 不属于本模式，留着会让翻页 / 展开去走主路扩容。
+        state.has_more = false;
         self.reset_candidate_view(state);
         state.mix_repeat = false;
         // 组合区 = 显示态前缀 + 已转换前缀（文本透镜逐步转换累积）+ 剩余缓冲。
@@ -3034,6 +3042,10 @@ impl Coordinator {
         ) {
             return act;
         }
+        // 展开态专属键（←→ / Esc / Tab）先于编码区光标与 Esc 臂，同临拼。
+        if let Some(act) = self.grid_key_action(state, data) {
+            return act;
+        }
         // 编码区光标移动（左右 / Home / End）。注：数字透镜下 -/= 等是输入字符，但方向键
         // 在两个透镜里都不是输入，故可在分派前统一拦截。
         if let Some(act) = self.overlay_cursor_key(state, data) {
@@ -3309,6 +3321,9 @@ impl Coordinator {
                     // 上线后才暴露，因为在此之前这些符号本就走不进缓冲。
                     let sel = if lens == MixLens::Numeric {
                         is_letter.then(|| (data.key_code - keymap::VK_A) as usize)
+                    } else if !shift && data.key_code == keymap::VK_0 && Self::grid_active(state) {
+                        // 展开态下 0 选第 10 格（序号顺延时标「0」的那格）；收起态的 0 照旧。
+                        Some(9)
                     } else {
                         (!shift && (keymap::VK_1..=keymap::VK_9).contains(&data.key_code))
                             .then(|| (data.key_code - keymap::VK_1) as usize)
@@ -3341,15 +3356,33 @@ impl Coordinator {
                     // 任何成员都接不下数字，按⑤的判据它本就该是字面，退格一下即回（透镜是缓冲
                     // 的纯函数）。见 `text_only_mix_first_digit_is_literal`。
                     //
-                    // ⚠️ ④（配置的二三候选键）**刻意不加同样的判定**。它恰好在本守卫不生效时
-                    // 才可达 —— 两种情形：`free_input = off`（那时⑤本就走不到，加了也没用），
-                    // 或 `takes_select_keys = false`（用户明写的「这两个键归选词」，空候选下让
-                    // 它们改作字面等于推翻该配置）。后一种下 `;`/`'` 在零候选时确实还是死键，
-                    // 由 `select_keys_stay_dead_when_not_taken` 钉住。
-                    if let Some(off) = sel
-                        && !(free_on && state.candidates.is_empty())
-                    {
-                        return self.mix_select(state, off);
+                    // ⚠️ ④（配置的二三候选键）**刻意不加同样的判定**：它们只在 `free_input = off`
+                    // 或 `takes_select_keys = false` 时作选词键，后者是用户明写的「这两个键归
+                    // 选词」，空候选下让它们改作字面等于推翻该配置。`;`/`'` 在零候选时确实还是
+                    // 死键，由 `select_keys_stay_dead_when_not_taken` 钉住。
+                    //
+                    // ⚠️ 历史候选不算数：它是跨透镜的字面前缀补全，不是本透镜的产出。
+                    // 算进去的话 `.txt` 一旦进了历史，`;.` 就有了候选、`;.xlsx` 又打不出。
+                    //
+                    // ★ 本判据**不分 `free_input` 档**：`off` 下同样归字面（`;.xlsx` 打得出）。
+                    // 字面就地收进缓冲而不是落到⑤——⑤只对开着自由输入的实例生效；`off` 没有
+                    // Free 透镜，缓冲照旧按首字符定透镜，字母续打仍因零候选而归字面。
+                    if let Some(off) = sel {
+                        if !state
+                            .candidates
+                            .iter()
+                            .all(|c| c.id == crate::quick_history::QUICK_HISTORY_ID)
+                        {
+                            return self.mix_select(state, off);
+                        }
+                        if let Some(ch) = printable_char(data.key_code, shift) {
+                            preedit_cursor::BufEdit::new(
+                                &mut state.mix_buffer,
+                                &mut state.mix_cursor,
+                            )
+                            .insert(ch);
+                            return refresh(self, state);
+                        }
                     }
 
                     // ④ 配置二三候选键（默认 `;` `'`）。

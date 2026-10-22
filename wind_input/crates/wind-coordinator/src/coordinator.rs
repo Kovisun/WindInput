@@ -5758,6 +5758,19 @@ impl Coordinator {
             .chinese_mode
     }
 
+    /// 展开态专属键（见 `grid_key`）的完整处置：键归网格时返回结局，否则 `None`。
+    pub(crate) fn grid_key_action(
+        &self,
+        state: &mut State,
+        data: &KeyEventData,
+    ) -> Option<KeyAction> {
+        let changed = self.grid_key(state, data)?;
+        if changed && let Some(act) = self.after_nav_changed(state) {
+            return Some(act);
+        }
+        Some(KeyAction::Consumed)
+    }
+
     /// 会话态按键绑定的统一执行（配置驱动，见 `keys.session_actions`）：翻页 / 移高亮 /
     /// 取消。普通模式与所有 overlay 模式共用；`include_printable` 区分码表型（`-`/`=` 作
     /// 翻页）与文本/表达式型（临英/快捷输入，`-`/`=` 作输入字符，不夺为动作）。
@@ -5777,12 +5790,10 @@ impl Coordinator {
         include_printable: bool,
     ) -> Option<KeyAction> {
         // 展开态专属键（←→ / Esc）先于绑定表：它们在网格里另有含义，且必须赶在各模式的
-        // 光标移动臂与 Esc 臂之前截下——本函数恰好是所有模式都先经过的那一处。
-        if let Some(changed) = self.grid_key(state, data) {
-            if changed && let Some(act) = self.after_nav_changed(state) {
-                return Some(act);
-            }
-            return Some(KeyAction::Consumed);
+        // 光标移动臂与 Esc 臂之前截下——本函数恰好是所有模式都先经过的那一处
+        // （快捷输入例外，它的光标与 Esc 臂在本函数之前，自己先调 `grid_key_action`）。
+        if let Some(act) = self.grid_key_action(state, data) {
+            return Some(act);
         }
         let shift = data.modifiers & MOD_SHIFT != 0;
         let action = self.session_action_for(data.key_code, shift, include_printable)?;
