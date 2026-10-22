@@ -381,6 +381,7 @@ impl Coordinator {
     fn refill_temp_pinyin_candidates(&self, state: &mut State) {
         state.candidates.clear();
         self.reset_candidate_view(state);
+        state.overlay_forms = Default::default();
         let prefix = format!("{}{}", state.temp_pinyin_prefix, state.committed_text);
         if state.temp_pinyin_buffer.is_empty() {
             state.preedit = prefix;
@@ -407,6 +408,8 @@ impl Coordinator {
         } else {
             result.shadow_code.clone()
         };
+        // 编码栏跟随高亮用的各形态；候选排好后按高亮（初始即首选）重算，见本函数末尾。
+        state.overlay_forms = crate::coordinator::OverlayPreeditForms::of(&result);
         let display = if result.preedit_display.is_empty() {
             state.temp_pinyin_buffer.clone()
         } else {
@@ -497,6 +500,9 @@ impl Coordinator {
         state.candidates = candidates;
         // 简繁 1对多变体展开（约束见 expand_s2t_variants 文档）。
         self.expand_s2t_variants(state);
+        // 编码栏按排序后的首选（之后随高亮）选形态，同主路 `sync_preedit_to_highlight`。
+        // 引擎的 `preedit_display` 跟的是**引擎序**首选，上面按界面序重排后未必还是它。
+        self.sync_preedit_to_highlight(state);
     }
 
     /// 临时拼音选词 —— 组合区逐步转换（C）。部分匹配并入 committed 前缀留模式内（不上屏）；

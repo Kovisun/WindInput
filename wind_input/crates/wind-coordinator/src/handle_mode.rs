@@ -2447,6 +2447,7 @@ impl Coordinator {
         );
         // 默认主体 = 原始缓冲；文本透镜若给出音节分隔显示，下方会覆盖为该显示串。
         state.overlay_body = state.mix_buffer.clone();
+        state.overlay_forms = Default::default();
         if state.mix_buffer.is_empty() {
             self.inject_mix_repeat_candidate(state);
             return;
@@ -2493,6 +2494,8 @@ impl Coordinator {
         // 形态：用户把快符 `kf` 排在 `$primary_pinyin` 之前，拼音的拆分串就永远轮不上，
         // 表现为「快捷输入里完全没有拆分显示」。成员顺序管的是候选优先级，管不到这里。
         let mut text_display: Option<String> = None;
+        // 给出 `text_display` 的那个成员的各形态，供编码栏跟随高亮（同临拼）。
+        let mut text_forms: Option<crate::coordinator::OverlayPreeditForms> = None;
         for member in &members {
             if let Some(src) = wind_quick_input::QuickSource::from_member(member) {
                 if !numeric {
@@ -2643,6 +2646,7 @@ impl Coordinator {
                     && result.preedit_display != state.mix_buffer
                 {
                     text_display = Some(result.preedit_display.clone());
+                    text_forms = Some(crate::coordinator::OverlayPreeditForms::of(&result));
                 }
                 // ── 用户数据（词频 / 候选调整）：按**成员方案**归属，就地作用在本成员段内 ──
                 //
@@ -2776,6 +2780,7 @@ impl Coordinator {
             state.preedit = format!("{}{}{}", state.mix_prefix, state.committed_text, disp);
             state.overlay_body = disp; // 供光标换算（含引擎插入的音节分隔符）
         }
+        state.overlay_forms = text_forms.unwrap_or_default();
         // 词组透镜下一条都没命中：给出所打原文兜底，与 [`MixLens::Free`] 同一个理由——
         // 候选窗空着时用户不知道自己打的这串还能不能上屏。
         //
@@ -2800,6 +2805,9 @@ impl Coordinator {
         self.apply_emoji_suggestions(&mut state.candidates);
         // 简繁 1对多变体展开（约束见 expand_s2t_variants 文档）。
         self.expand_s2t_variants(state);
+        // 编码栏按合并后的首选（之后随高亮）选形态：上面 `text_display` 取的是给出显示串的
+        // 那个成员的首选，合并后的首选未必是它。
+        self.sync_preedit_to_highlight(state);
     }
 
     /// Free 透镜下的**英文段**：缓冲是纯 ASCII 字母（Free 只因含大写才越界）、本实例含英文

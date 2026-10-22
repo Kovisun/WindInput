@@ -3306,9 +3306,54 @@ impl Coordinator {
         )
     }
 
+    /// 临拼 / mix 文本透镜的编码栏正文，按高亮候选选形态，优先级同主路
+    /// [`Self::effective_preedit_body`]（候选自带切分 → 简拼 → 全拼降级 → 默认切分）。
+    /// 没有任何形态（码表目标、数字透镜、引擎没给显示串）时是缓冲本身。
+    fn overlay_effective_body<'a>(&self, state: &'a State, buffer: &'a str) -> &'a str {
+        let cand = state.candidates.get(self.highlighted_global_index(state));
+        let forms = &state.overlay_forms;
+        if let Some(split) = own_preedit_split(cand) {
+            return split;
+        }
+        if !forms.abbrev.is_empty() && cand.is_some_and(|c| c.is_abbrev) {
+            return &forms.abbrev;
+        }
+        if !forms.fullpinyin.is_empty() && cand.is_some_and(|c| c.is_fullpinyin_fallback) {
+            return &forms.fullpinyin;
+        }
+        if forms.split.is_empty() {
+            buffer
+        } else {
+            &forms.split
+        }
+    }
+
+    /// 临拼 / mix 按高亮重算 `state.preedit` 与供光标换算的 `overlay_body`（两者必须同步，
+    /// 否则形态一变 caret 就错位）。组合区 = 只读前缀 + 已转换前缀 + 正文，同各自的候选刷新。
+    fn sync_overlay_preedit_to_highlight(&self, state: &mut State) {
+        let (prefix, buffer) = match state.active {
+            Some(ModeKind::TempPinyin) => (&state.temp_pinyin_prefix, &state.temp_pinyin_buffer),
+            Some(ModeKind::Mix(_)) => (&state.mix_prefix, &state.mix_buffer),
+            _ => return,
+        };
+        // 空缓冲时组合区只剩前缀，由各自的刷新函数写好，不在这里动。
+        if buffer.is_empty() {
+            return;
+        }
+        let body = self.overlay_effective_body(state, buffer).to_string();
+        state.preedit = format!("{prefix}{}{body}", state.committed_text);
+        state.overlay_body = body;
+    }
+
     /// 按当前高亮候选类型重算 `state.preedit`（混输高亮跟随）。含已转换前缀（逐步转换）拼接。
-    /// 仅普通模式（active==None）有意义；覆盖层模式各自维护 preedit，不应调用此方法。
+    /// 普通模式走 [`Self::effective_preedit_body`]；临拼 / mix 走各自的 overlay 形态
+    /// （[`Self::sync_overlay_preedit_to_highlight`]）。其余 overlay 各自维护 preedit，同普通模式
+    /// 原样处理（调用方不应在那些模式下调用）。
     pub(crate) fn sync_preedit_to_highlight(&self, state: &mut State) {
+        if matches!(state.active, Some(ModeKind::TempPinyin | ModeKind::Mix(_))) {
+            self.sync_overlay_preedit_to_highlight(state);
+            return;
+        }
         let body = self.effective_preedit_body(state).to_string();
         // 用户按 Shift+字母打出的大写只在影子串里，此处投影回显示串（拼音拆分形态含引擎插入
         // 的分隔符，故按贪心同步扫描投影而非整串替换）。大小写不改字符数，caret 换算不受影响。

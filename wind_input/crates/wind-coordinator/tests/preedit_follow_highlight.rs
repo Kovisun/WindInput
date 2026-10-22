@@ -3,7 +3,7 @@
 //! `pinan` 有 `pi|nan` 与 `pin|an` 两条切法：高亮「平安」显示 `pin'an`，移到「皮」应变
 //! `pi'nan`，移回首选恢复。每条候选自带切分（`CandidateMeta::preedit_split`，引擎按它自己走的
 //! 边界算，只覆盖前缀的候选尾部按最大匹配接着切），协调器在高亮变化时换用高亮那条的。
-//! 双拼仍按击键两两分段，不随全拼切分变。
+//! 主路、临拼、快捷输入（mix 文本透镜）同一套；双拼仍按击键两两分段，不随全拼切分变。
 //!
 //! 每例同时断言首选与它的编码栏、高亮移到指定候选后的编码栏；高亮移动的回执（编码嵌在宿主里
 //! 时回传的组合串）一并核对。位次在 Coordinator 层取（引擎位次 ≠ 界面位次）。
@@ -17,6 +17,8 @@ use wind_config::Config;
 use wind_coordinator::Coordinator;
 use wind_ipc::protocol::EVENT_KEY_DOWN;
 
+const VK_BACKTICK: u32 = 0xC0;
+const VK_SEMICOLON: u32 = 0xBA;
 const VK_LEFT: u32 = 0x25;
 const VK_UP: u32 = 0x26;
 const VK_DOWN: u32 = 0x28;
@@ -65,6 +67,13 @@ fn cfg(active: &str) -> Config {
 fn in_ing(mut c: Config) -> Config {
     c.schema.pinyin.fuzzy.enabled = true;
     c.schema.pinyin.fuzzy.in_ing = true;
+    c
+}
+
+/// 双拼作临拼目标（`schema.primary_pinyin`），开全拼降级支路。
+fn shuangpin_target(mut c: Config) -> Config {
+    c.schema.primary_pinyin = "shuangpin".into();
+    c.schema.pinyin.shuangpin.allow_full_pinyin = true;
     c
 }
 
@@ -218,6 +227,58 @@ fn main_shuangpin_keeps_keystroke_pairs() {
     }
 }
 
+/// 临拼与主路同一套：只读前缀 + 高亮那条的切分。
+#[test]
+fn temp_pinyin_pinan_follows_highlight() {
+    if !has_data() {
+        return;
+    }
+    let coord = typed(in_ing(cfg("wubi86")), Some(VK_BACKTICK), "pinan");
+    assert_eq!(coord.debug_active_mode(), Some("temp_pinyin"));
+    assert_top(&coord, "平安", "`pin'an");
+    assert_at(&coord, "皮", "`pi'nan");
+    let act = press(&coord, VK_UP);
+    assert_eq!(coord.debug_preedit(), "`pin'an", "移回首选恢复");
+    assert_eq!(composed(&act), Some("`pin'an"));
+}
+
+/// 临拼目标是双拼：全拼降级与简拼的形态随高亮切换，对齐主路
+/// （`input_flow.rs` 的 `shuangpin_preedit_follows_highlight_between_domains`）。
+/// 修前临拼只读引擎的 `preedit_display`：「再见」配着双拼切法 `za'ij'ia'n`，移到「问」
+/// 也停在简拼切法。
+#[test]
+fn temp_pinyin_shuangpin_target_switches_forms() {
+    if !has_data() {
+        return;
+    }
+    let coord = typed(
+        shuangpin_target(cfg("wubi86")),
+        Some(VK_BACKTICK),
+        "zaijian",
+    );
+    assert_top(&coord, "再见", "`zai'jian");
+    assert_at(&coord, "在家", "`za'ij'ia'n");
+
+    let coord = typed(shuangpin_target(cfg("wubi86")), Some(VK_BACKTICK), "wfwt");
+    assert_top(&coord, "无法无天", "`w'f'w't");
+    assert_at(&coord, "问", "`wf'wt");
+}
+
+/// 快捷输入的文本透镜：按合并后的高亮候选显示。
+#[test]
+fn mix_text_lens_pinan_follows_highlight() {
+    if !has_data() {
+        return;
+    }
+    let coord = typed(in_ing(cfg("wubi86")), Some(VK_SEMICOLON), "pinan");
+    assert_eq!(coord.debug_active_mode(), Some("mix"));
+    assert_top(&coord, "平安", ";pin'an");
+    assert_at(&coord, "皮", ";pi'nan");
+    let act = press(&coord, VK_UP);
+    assert_eq!(coord.debug_preedit(), ";pin'an", "移回首选恢复");
+    assert_eq!(composed(&act), Some(";pin'an"));
+}
+
 /// 光标在缓冲中间（`pin|an`，左移两次）：形态切换后插入符按新形态换算，回传宿主的位置与
 /// 自绘编码栏的位置一致。`pin'an` 里在 `pin` 之后，`pi'nan` 里在 `pi'n` 之后。
 #[test]
@@ -225,23 +286,36 @@ fn caret_tracks_form_switch() {
     if !has_data() {
         return;
     }
-    let coord = typed(in_ing(cfg("pinyin")), None, "pinan");
-    press(&coord, VK_LEFT);
-    press(&coord, VK_LEFT);
-    assert_eq!(coord.debug_preedit(), "pin'an");
-    assert_eq!(coord.debug_ui_caret_bytes(), 3, "pin| 'an");
+    let cases: [(Option<u32>, &str); 3] = [
+        (None, ""),
+        (Some(VK_BACKTICK), "`"),
+        (Some(VK_SEMICOLON), ";"),
+    ];
+    for (enter, prefix) in cases {
+        let active = if enter.is_some() { "wubi86" } else { "pinyin" };
+        let coord = typed(in_ing(cfg(active)), enter, "pinan");
+        press(&coord, VK_LEFT);
+        press(&coord, VK_LEFT);
+        let p = prefix.len();
+        assert_eq!(coord.debug_preedit(), format!("{prefix}pin'an"));
+        assert_eq!(coord.debug_ui_caret_bytes(), p + 3, "{prefix:?}：pin| 'an");
 
-    match press(&coord, VK_DOWN) {
-        KeyAction::UpdateComposition { text, caret_pos } => {
-            assert_eq!(text, "pi'nan");
-            assert_eq!(caret_pos, 4, "回传的光标在 pi'n| 之后");
+        match press(&coord, VK_DOWN) {
+            KeyAction::UpdateComposition { text, caret_pos } => {
+                assert_eq!(text, format!("{prefix}pi'nan"));
+                assert_eq!(
+                    caret_pos as usize,
+                    p + 4,
+                    "{prefix:?}：回传的光标在 pi'n| 之后"
+                );
+            }
+            other => panic!("{prefix:?}：形态变了应回传组合串，实得 {other:?}"),
         }
-        other => panic!("形态变了应回传组合串，实得 {other:?}"),
+        assert_eq!(highlighted(&coord), "皮");
+        assert_eq!(
+            coord.debug_ui_caret_bytes(),
+            p + 4,
+            "{prefix:?}：自绘编码栏的插入符同样在 pi'n| 之后"
+        );
     }
-    assert_eq!(highlighted(&coord), "皮");
-    assert_eq!(
-        coord.debug_ui_caret_bytes(),
-        4,
-        "自绘编码栏的插入符同样在 pi'n| 之后"
-    );
 }

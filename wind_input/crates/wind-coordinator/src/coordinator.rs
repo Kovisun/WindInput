@@ -420,6 +420,32 @@ pub(crate) struct CommittedSeg {
     pub(crate) learn: Option<(String, u64)>,
 }
 
+/// 临拼 / mix 文本透镜从引擎结果取的编码栏形态（见 `State::overlay_forms`），各字段同主路
+/// `preedit_split_body` / `preedit_fp_body` / `preedit_abbrev_body`。空串 = 无此形态。
+#[derive(Debug, Clone, Default)]
+pub(crate) struct OverlayPreeditForms {
+    pub(crate) split: String,
+    pub(crate) fullpinyin: String,
+    pub(crate) abbrev: String,
+}
+
+impl OverlayPreeditForms {
+    /// 默认形态取 `preedit_pinyin`（双拼下是击键切法，首选是简拼时也不变），缺了才用
+    /// `preedit_display`——同主路，高亮从简拼候选移回时要取得回双拼切法。
+    pub(crate) fn of(result: &wind_engine::ConvertResult) -> Self {
+        let split = if result.preedit_pinyin.is_empty() {
+            &result.preedit_display
+        } else {
+            &result.preedit_pinyin
+        };
+        Self {
+            split: split.clone(),
+            fullpinyin: result.preedit_fullpinyin.clone(),
+            abbrev: result.preedit_abbrev.clone(),
+        }
+    }
+}
+
 /// ⚠️ `Default` **只在测试构建下存在**（`cfg_attr(test, ...)`）。
 ///
 /// 生产侧一律走 `Coordinator::new` 里的显式构造：那里每个字段的初值都有来历
@@ -723,6 +749,9 @@ pub(crate) struct State {
     /// 与缓冲不同形；临英 / 特殊 / URL 的主体恒等于自身缓冲，直接用缓冲即可（见
     /// `overlay_caret_parts`）。缓冲空时可能为 stale，但此时光标必为 0、换算不读它，无害。
     pub(crate) overlay_body: String,
+    /// 临拼 / mix 文本透镜的编码栏各形态，供高亮跟随（主路那几个 `preedit_*_body` 的 overlay
+    /// 对位，生命周期跟各自的候选刷新走）。`overlay_body` 是按高亮从中选出的那一份。
+    pub(crate) overlay_forms: OverlayPreeditForms,
     /// 临时拼音输入缓冲（拼音串）
     pub(crate) temp_pinyin_buffer: String,
     /// 临时拼音编码区光标（`temp_pinyin_buffer` 内字节偏移）。下同，各 overlay 缓冲各带一个。
@@ -2991,6 +3020,7 @@ impl Coordinator {
                 committed_segs: Vec::new(),
                 active: None,
                 overlay_body: String::new(),
+                overlay_forms: OverlayPreeditForms::default(),
                 temp_pinyin_buffer: String::new(),
                 temp_pinyin_cursor: 0,
                 temp_pinyin_schema: String::new(),
@@ -5928,9 +5958,9 @@ impl Coordinator {
         // （原始码 ↔ 音节拆分）。重算 preedit；若形态变化且嵌入编码（app_inline），须回传
         // 组合串使宿主内联编码同步；候选窗模式仅 notify_ui_update 刷新即可。
         // 拼音候选各带自己的切分（`pinan` 高亮「平安」`pin'an`、高亮「皮」`pi'nan`），纯拼音
-        // 下形态同样会变。
+        // 下形态同样会变。临拼 / mix 文本透镜与主路同一套跟随（overlay 对齐主路）。
         // 门控：普通模式存在拆分形态或有候选自带切分（混输下首选与原始码同形时前者为空）
-        // ——纯五笔不触发，零回归；overlay 各自维护 preedit，不碰。
+        // ——纯五笔不触发，零回归；其余 overlay 各自维护 preedit，不碰。
         let mut composed: Option<KeyAction> = None;
         let follows = match state.active {
             None => {
@@ -5940,6 +5970,7 @@ impl Coordinator {
                         .iter()
                         .any(|c| c.meta.preedit_split.is_some())
             }
+            Some(ModeKind::TempPinyin | ModeKind::Mix(_)) => true,
             Some(_) => false,
         };
         if follows {
@@ -5952,7 +5983,11 @@ impl Coordinator {
                     let text = state.preedit.clone();
                     // 光标按新形态换算，与按键路径同源：缓冲中间编辑时它不在串尾，分隔符增减
                     // 会挪动它的显示位置。纯拼音下高亮移动也会变形态，按串尾给会把宿主光标甩到末尾。
-                    let caret_pos = self.composition_caret(state);
+                    let caret_pos = if state.active.is_some() {
+                        self.overlay_caret(state)
+                    } else {
+                        self.composition_caret(state)
+                    };
                     composed = Some(KeyAction::UpdateComposition { text, caret_pos });
                 }
             }
