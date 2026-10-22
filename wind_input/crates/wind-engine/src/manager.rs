@@ -4646,19 +4646,17 @@ impl EngineManager {
             // 双拼已在 `english_merge_cfg_for` 折掉。
             let english =
                 crate::english_merge::select(eng.as_ref(), input, r.candidates.is_empty(), &cfg);
-            // 通路①（满码自动上屏 / 满码空码清空）的英文守护。
+            // 通路①（满码自动上屏 / 满码空码清空）的英文守护，两级判据见
+            // `english_merge::vetoes_commit`（与通路②③、混输同口径）。
             //
-            // ★ 判据是「列表里有英文」**或**「按前缀英文可能出现」（`has_any`，与通路②③同口径）。
-            // 只看列表的话，默认配置下 `gith` 的精确命中还不存在、列表里没有英文，满码就在第 4 键
-            // 把中文顶上屏，`github` 永远敲不完。`AGENTS.md` 要求的「对方确有候选」由 `has_any`
-            // 的前缀命中兑现：拦下后用户继续敲，完整单词必然露面。
+            // ★ 前缀级不能只看列表：默认配置下 `gith` 的精确命中还不存在、列表里没有英文，满码
+            // 就在第 4 键把中文顶上屏，`github` 永远敲不完。`AGENTS.md` 要求的「对方确有候选」
+            // 由前缀命中兑现：拦下后用户继续敲，完整单词必然露面。
             //
             // `should_clear` 一并否决：满码无码表匹配时清空缓冲会把用户正在打的英文词
             // 一起抹掉，与顶掉它是同一种伤害。只在确有可否决的动作时才多查一次英文。
-            if cfg.block_commit
-                && (r.should_commit || r.should_clear)
-                && (!english.is_empty()
-                    || crate::english_merge::has_any(eng.as_ref(), input, cfg.veto_min_length()))
+            if (r.should_commit || r.should_clear)
+                && crate::english_merge::vetoes_commit(eng.as_ref(), input, &english, &cfg)
             {
                 r.should_commit = false;
                 r.commit_text.clear();
@@ -4730,6 +4728,7 @@ impl EngineManager {
                     enable: c.enable,
                     min_length: c.min_length,
                     block_commit: c.block_commit,
+                    block_commit_on_word: c.block_commit_on_word,
                     prefix_complete: false,
                     complete_min_length: c.complete_min_length,
                     max_count: crate::english_merge::max_count_or_default(c.max_count),
@@ -4747,6 +4746,7 @@ impl EngineManager {
                     min_length: p.min_length,
                     // 见 `Effective::block_commit`：拼音没有满码上屏 / 顶码可否决。
                     block_commit: false,
+                    block_commit_on_word: false,
                     // 判据按全拼音节定义，双拼下不生效（双拼码两键一音节，几乎任何串都解得开）。
                     // 开关关着时短路，不问方案；开着时是一次按方案 id 的缓存命中。
                     prefix_complete: p.prefix_complete && !self.pinyin_is_shuangpin_of(schema_id),
@@ -4835,8 +4835,7 @@ impl EngineManager {
         let Some(eng) = self.shared_english_engine() else {
             return false;
         };
-        cfg.block_commit
-            && crate::english_merge::has_any(eng.as_ref(), input, cfg.veto_min_length())
+        crate::english_merge::vetoes_commit(eng.as_ref(), input, &[], &cfg)
     }
 
     /// 活跃方案里英文候选的位次下限 `(完整单词, 前缀补全)`（1 起），供协调器
@@ -6804,6 +6803,7 @@ impl EngineManager {
                 show_source_hint: mix_cfg.show_source_hint,
                 min_english_length: min_en,
                 auto_commit_block_on_english: mix_cfg.auto_commit_block_on_english,
+                block_commit_on_english_word: mix_cfg.block_commit_on_english_word,
                 english_complete_min_length: mix_cfg.english_complete_min_length,
                 english_max_count: mix_cfg.english_max_count,
                 block_commit_on_pinyin_word: mix_cfg.block_commit_on_pinyin_word,

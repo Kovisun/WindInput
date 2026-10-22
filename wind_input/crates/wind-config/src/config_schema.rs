@@ -239,6 +239,7 @@ static REGISTRY: &[ConfigField] = &[
     f("schema.codetable.english_merge.min_length", Int),
     f("schema.codetable.english_merge.block_commit", Bool),
     f("schema.codetable.english_merge.complete_min_length", Int),
+    f("schema.codetable.english_merge.block_commit_on_word", Bool),
     f("schema.codetable.english_merge.exact_position", Int),
     f("schema.codetable.english_merge.complete_position", Int),
     f("schema.codetable.english_merge.max_count", Int),
@@ -381,6 +382,7 @@ static REGISTRY: &[ConfigField] = &[
     f("schema.mix.top_code_override_pinyin", Bool),
     f("schema.mix.auto_commit_block_on_pinyin", Bool),
     f("schema.mix.auto_commit_block_on_english", Bool),
+    f("schema.mix.block_commit_on_english_word", Bool),
     f("schema.mix.min_pinyin_length", Int),
     f("schema.mix.min_english_length", Int),
     f("schema.mix.english_complete_min_length", Int),
@@ -1034,6 +1036,10 @@ pub fn schema_overridden_keys(schema: &crate::schema::Schema) -> Vec<&'static st
         (
             "schema.codetable.english_merge.complete_min_length",
             em.complete_min_length.is_some(),
+        ),
+        (
+            "schema.codetable.english_merge.block_commit_on_word",
+            em.block_commit_on_word.is_some(),
         ),
         (
             "schema.codetable.english_merge.exact_position",

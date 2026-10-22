@@ -129,11 +129,39 @@ fn codetable_block_commit_vetoes_prefix_at_full_code() {
         !guarded.should_commit,
         "abse 是 absent 的前缀，满码上屏须被否决，否则 absent 敲不完"
     );
-    // 否决须叠「英文确有词条」：英文里没有以它为前缀的满码照常上屏。
-    let plain = build(true).convert("aaaa", 50);
-    assert_eq!(
-        plain.should_commit,
-        build(false).convert("aaaa", 50).should_commit
+    // 否决须叠「英文确有词条」：英文里没有以它为前缀的满码（`aqqa`）照常上屏。
+    assert!(
+        build(false).convert("aqqa", 50).should_commit,
+        "前提：aqqa 满码上屏，否则这条反向断言测不到东西"
+    );
+    assert!(build(true).convert("aqqa", 50).should_commit);
+}
+
+/// 成词级（`block_commit_on_word`）：前缀级关掉时，英文词的前缀不拦满码，整串是英文单词
+/// 才拦。`abse` 是 absent 的前缀；`addr` 本身是英文单词、也是五笔唯一全码「莽原」。
+#[test]
+fn codetable_word_level_veto() {
+    if !ready("wubi86") {
+        return;
+    }
+    let build = |word: bool| {
+        wubi(|c| {
+            c.schema.codetable.auto_commit_at_full = true;
+            c.schema.codetable.english_merge.block_commit = false;
+            c.schema.codetable.english_merge.block_commit_on_word = word;
+        })
+    };
+    assert!(
+        build(false).convert("addr", 50).should_commit,
+        "前提：两级都关时 addr 满码上屏"
+    );
+    assert!(
+        !build(true).convert("addr", 50).should_commit,
+        "addr 是英文单词，成词级应否决"
+    );
+    assert!(
+        build(true).convert("abse", 50).should_commit,
+        "abse 只是英文词前缀，成词级不该否决"
     );
 }
 

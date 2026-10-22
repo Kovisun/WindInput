@@ -211,6 +211,8 @@ fn english_merge_vetoes_top_code_on_codetable() {
         cfg.schema.codetable.top_code_commit = true;
         cfg.schema.codetable.english_merge.enable = true;
         cfg.schema.codetable.english_merge.block_commit = block;
+        // `github` 本身是英文单词：成词级也得跟着关，否则「关掉守护」的前提不成立。
+        cfg.schema.codetable.english_merge.block_commit_on_word = block;
         EngineManager::new(&cfg, Some(&dir))
     };
 
@@ -263,7 +265,7 @@ fn recheck_auto_commit_for_applies_schema_scoped_english_veto() {
         std::fs::write(
             override_dir.join("wubi86.toml"),
             format!(
-                "[engine.codetable]\nauto_commit_at_full = true\nenglish_merge = {{ enable = true, block_commit = {block} }}\n"
+                "[engine.codetable]\nauto_commit_at_full = true\nenglish_merge = {{ enable = true, block_commit = {block}, block_commit_on_word = {block} }}\n"
             ),
         )
         .unwrap();

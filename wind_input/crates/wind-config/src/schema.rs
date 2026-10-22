@@ -528,6 +528,8 @@ pub struct CodeTableEnglishMergeSpec {
     #[serde(default)]
     pub complete_min_length: Option<usize>,
     #[serde(default)]
+    pub block_commit_on_word: Option<bool>,
+    #[serde(default)]
     pub exact_position: Option<usize>,
     #[serde(default)]
     pub complete_position: Option<usize>,

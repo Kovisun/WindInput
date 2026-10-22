@@ -48,7 +48,7 @@
 //!
 //! 本模块只管「查哪些、谁活下来」。英文候选**排第几**由协调器
 //! `place_english_after_common_exact` 在所有排序（含自动调频）跑完之后统一定位：
-//! 排在「中文常用精确解」之后、其余候选之前；码表 / 混输另有位次下限 `position`。放在这里做不到——引擎看不见协调器随后并入的
+//! 排在「中文常用精确解」之后、其余候选之前；码表 / 混输另有两项位次下限（完整单词 / 前缀补全）。放在这里做不到——引擎看不见协调器随后并入的
 //! 短语候选，也看不见调频的位置提升。
 
 use crate::engine::Engine;
@@ -107,7 +107,10 @@ const DEFAULT_MIN_LENGTH: usize = 3;
 pub struct Effective {
     pub enable: bool,
     pub min_length: usize,
+    /// **前缀级**否决：有英文词以当前串开头即否决上屏（[`has_any`]）。
     pub block_commit: bool,
+    /// **成词级**否决：整串恰是一个英文完整单词时否决上屏（[`has_word`]）。前缀级开着时被它涵盖。
+    pub block_commit_on_word: bool,
     /// 中文侧有候选时也补英文前缀（[`prefix_complete_applies`] 判据下）。只有拼音侧有这项，
     /// 码表 / 混输侧恒 `false`（它们走 `complete_min_length`）。
     pub prefix_complete: bool,
@@ -166,10 +169,18 @@ pub fn select(
     if base_empty {
         return lookup_prefix_fallback(english, input, cfg.min_length);
     }
-    let mut v = lookup(english, input, cfg.min_length);
+    let by_length = cfg.complete_min_length > 0 && input.chars().count() >= cfg.complete_min_length;
+    // 按长度补全时，完整单词的门槛一并放到补全门槛：否则 `complete_min_length` 比 `min_length`
+    // 小时，打 `go` 补出 good / google 却不出 go 本身。
+    let exact_gate = if by_length {
+        cfg.veto_min_length()
+    } else {
+        cfg.min_length
+    };
+    let mut v = lookup(english, input, exact_gate);
     let room = if cfg.prefix_complete && prefix_complete_applies(input, cfg.min_length) {
         PREFIX_COMPLETE_MAX
-    } else if cfg.complete_min_length > 0 && input.chars().count() >= cfg.complete_min_length {
+    } else if by_length {
         cfg.max_count.saturating_sub(v.len())
     } else {
         0
@@ -368,12 +379,60 @@ pub fn has_any(english: &dyn Engine, input: &str, min_length: usize) -> bool {
     }
     let lower = input.to_lowercase();
     match english.convert(&lower, PROBE) {
+        Ok(r) => r.candidates.iter().any(counts_for_veto),
+        Err(_) => false,
+    }
+}
+
+/// 英文候选算不算数（否决用）：英文临时词不算，用户词（含已晋升的）照算。理由见 [`has_any`]。
+fn counts_for_veto(c: &Candidate) -> bool {
+    !c.meta.is_temp_dict || c.meta.is_user_dict
+}
+
+/// 整串是否恰是一个英文完整单词（成词级否决用）。门槛与临时词口径同 [`has_any`]。
+pub fn has_word(english: &dyn Engine, input: &str, min_length: usize) -> bool {
+    /// 精确整串恒居首，同码多形态留余量；同 [`EXACT_SCAN`]。
+    const PROBE: usize = EXACT_SCAN;
+    if input.chars().count() < min_length_or_default(min_length) {
+        return false;
+    }
+    let lower = input.to_lowercase();
+    match english.convert(&lower, PROBE) {
         Ok(r) => r
             .candidates
             .iter()
-            .any(|c| !c.meta.is_temp_dict || c.meta.is_user_dict),
+            .any(|c| c.code == lower && counts_for_veto(c)),
         Err(_) => false,
     }
+}
+
+/// 英文要不要否决这次上屏——满码上屏、显示态复评、顶码、满码空码清空**共用这一个判据**，
+/// 码表方案（`manager`）与混输（`MixedEngine`）同口径。两级，结构同混输拼音那对
+/// （`auto_commit_block_on_pinyin` / `block_commit_on_pinyin_word`）：
+///
+/// - **前缀级** `block_commit`：列表里有英文，或有英文词以当前串开头（[`has_any`]）；
+/// - **成词级** `block_commit_on_word`：列表里有与整串同码的英文，或整串恰是英文单词（[`has_word`]）。
+///
+/// `shown` 是这次已进候选列表的候选（没有就传空）：列表那一半与查询那一半口径一致，英文
+/// 临时词都不算。长度门槛取 [`Effective::veto_min_length`]（英文最早从几码露面）。
+pub fn vetoes_commit(
+    english: &dyn Engine,
+    input: &str,
+    shown: &[Candidate],
+    cfg: &Effective,
+) -> bool {
+    use wind_candidate::CandidateSource;
+    let real = |c: &&Candidate| c.source == CandidateSource::English && counts_for_veto(c);
+    let gate = cfg.veto_min_length();
+    if cfg.block_commit && (shown.iter().any(|c| real(&c)) || has_any(english, input, gate)) {
+        return true;
+    }
+    if cfg.block_commit_on_word {
+        let lower = input.to_lowercase();
+        return shown.iter().filter(real).any(|c| c.code == lower)
+            || has_word(english, input, gate);
+    }
+    false
 }
 
 /// 把英文候选混入 `base`，保证它们活过截断。
@@ -663,6 +722,7 @@ mod tests {
             enable: true,
             min_length: 0,
             block_commit: true,
+            block_commit_on_word: true,
             prefix_complete: false,
             complete_min_length: 0,
             max_count: max_count_or_default(0),
@@ -731,6 +791,76 @@ mod tests {
         assert_eq!(
             texts_of(&select(&eng, "git", false, &three)),
             vec!["git", "GitHub", "GitHub Pages"]
+        );
+    }
+
+    /// `complete_min_length` 比 `min_length` 小时，完整单词也从补全门槛起出：
+    /// 打 `go` 不能只补出 good / google 而漏掉 go。
+    #[test]
+    fn select_exact_gate_follows_completion_gate() {
+        let eng = FakeEnglish(vec![("go", "go"), ("good", "good"), ("google", "Google")]);
+        let cfg = Effective {
+            complete_min_length: 2,
+            ..codetable_cfg()
+        };
+        assert_eq!(
+            texts_of(&select(&eng, "go", false, &cfg)),
+            vec!["go", "good"]
+        );
+        // 不开补全时仍按 min_length（默认 3）：2 码一条都不出。
+        assert!(select(&eng, "go", false, &codetable_cfg()).is_empty());
+    }
+
+    /// 两级否决：前缀级涵盖成词级；只开成词级时，英文词的前缀不拦、整词才拦。
+    #[test]
+    fn veto_two_levels() {
+        let eng = git_words();
+        let prefix = codetable_cfg();
+        assert!(
+            vetoes_commit(&eng, "gith", &[], &prefix),
+            "前缀级：gith 是 github 的前缀"
+        );
+        let word_only = Effective {
+            block_commit: false,
+            ..prefix
+        };
+        assert!(
+            !vetoes_commit(&eng, "gith", &[], &word_only),
+            "成词级不管前缀"
+        );
+        assert!(
+            vetoes_commit(&eng, "github", &[], &word_only),
+            "整串是英文单词"
+        );
+        let off = Effective {
+            block_commit_on_word: false,
+            ..word_only
+        };
+        assert!(!vetoes_commit(&eng, "github", &[], &off));
+    }
+
+    /// 列表那一半同样不算英文临时词（只有临时词进了列表时放行上屏）。
+    #[test]
+    fn veto_shown_list_ignores_temp_words() {
+        let none = FakeEnglish(vec![]);
+        let mut temp = Candidate {
+            text: "ggll".into(),
+            code: "ggll".into(),
+            source: CandidateSource::English,
+            ..Default::default()
+        };
+        temp.meta.is_temp_dict = true;
+        let cfg = codetable_cfg();
+        assert!(!vetoes_commit(
+            &none,
+            "ggll",
+            std::slice::from_ref(&temp),
+            &cfg
+        ));
+        temp.meta.is_user_dict = true;
+        assert!(
+            vetoes_commit(&none, "ggll", &[temp], &cfg),
+            "已入用户词库的照算"
         );
     }
 

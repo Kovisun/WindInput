@@ -95,6 +95,9 @@ pub struct MixConfig {
     pub show_source_hint: bool,
     pub min_english_length: usize,
     pub auto_commit_block_on_english: bool,
+    /// 成词级英文否决：整串恰是英文完整单词时否决满码 / 顶码上屏。三处同源：本处 /
+    /// `MixGlobal::default()` / `data/config.toml`。
+    pub block_commit_on_english_word: bool,
     /// 中文侧有候选时按长度补英文前缀的门槛（0 = 不补）。见 `english_merge::select`。
     pub english_complete_min_length: usize,
     /// 中文侧有候选时英文合计至多几条（0 = 默认 2），截断时为它们保底留座。
@@ -121,6 +124,7 @@ impl Default for MixConfig {
             // 与 `manager::build_engine` 的回退值、`english_merge` 的 DEFAULT_MIN_LENGTH 同为 3。
             min_english_length: 3,
             auto_commit_block_on_english: false,
+            block_commit_on_english_word: true,
             english_complete_min_length: 0,
             english_max_count: 2,
             block_commit_on_pinyin_word: true,
@@ -220,6 +224,7 @@ impl MixedEngine {
                 enable: true,
                 min_length: cfg.min_english_length,
                 block_commit: cfg.auto_commit_block_on_english,
+                block_commit_on_word: cfg.block_commit_on_english_word,
                 prefix_complete: false,
                 complete_min_length: cfg.english_complete_min_length,
                 max_count: crate::english_merge::max_count_or_default(cfg.english_max_count),
@@ -345,7 +350,7 @@ impl MixedEngine {
     /// 与 [`Self::pinyin_claims_overflow`] 对称 —— 超码长归属问的是「谁解释得了整串」。码表只
     /// 解释得了前 N 码（`gith`=不算），英文却吃得下整个 `github`，归属就不该判给码表。
     ///
-    /// ⚠️ 判据刻意用**精确整串**而非 [`Self::english_vetoes`] 的「有词条（含前缀）」：英文库 21918 条，
+    /// ⚠️ 判据刻意用**精确整串**而非 [`Self::english_blocks_commit`] 的「有词条（含前缀）」：英文库 21918 条，
     /// 前缀面极大，按前缀判会让一堆恰好撞上某英文词开头的五笔全码平白丢掉归属。也不走
     /// 取候选再比对 —— 那会被取数上限截断，精确词未必在前几条。
     ///
@@ -694,29 +699,19 @@ impl MixedEngine {
         }
     }
 
-    /// 英文守护（`auto_commit_block_on_english`）：英文按**前缀**可能出现时否决上屏。
+    /// 英文守护：满码上屏、显示态复评、顶码、满码空码清空共用，判据即
+    /// [`crate::english_merge::vetoes_commit`]（与码表方案同口径的两级）：
     ///
-    /// ## 与 [`Self::english_for_display`] 的分工——**不要合并**
+    /// - 前缀级 `auto_commit_block_on_english`：有英文词以当前串开头即否决（用户打到 `gith`
+    ///   时精确命中还不存在，否决若也收窄成精确，满码就会在第 4 键把中文顶上屏）；
+    /// - 成词级 `block_commit_on_english_word`：整串恰是英文完整单词时否决。
     ///
-    /// 那个管「显示哪些」，本函数管「有没有」，必须仍按前缀判：用户打到 `gith` 时精确命中还
-    /// 不存在，否决判据若也收窄成精确，满码就会在第 4 键把中文顶上屏，`github` 永远敲不完。
-    /// 判据与门槛同码表方案（`english_merge::has_any` + `veto_min_length`），英文临时词不算。
-    fn english_vetoes(&self, input: &str) -> bool {
-        self.english_policy.block_commit
-            && self.english.as_ref().is_some_and(|eng| {
-                crate::english_merge::has_any(
-                    eng.as_ref(),
-                    input,
-                    self.english_policy.veto_min_length(),
-                )
-            })
-    }
-
-    /// 列表里已有英文，或英文按前缀可能出现——满码上屏 / 显示态复评共用的英文否决。
+    /// 与 [`Self::english_for_display`]（「显示哪些」）**不要合并**：这里问的是「有没有」。
+    /// `shown` 为这次已在列表里的候选（顶码没有列表，传空），英文临时词两半都不算。
     fn english_blocks_commit(&self, input: &str, shown: &[Candidate]) -> bool {
-        self.english_policy.block_commit
-            && (shown.iter().any(|c| c.source == CandidateSource::English)
-                || self.english_vetoes(input))
+        self.english.as_ref().is_some_and(|eng| {
+            crate::english_merge::vetoes_commit(eng.as_ref(), input, shown, &self.english_policy)
+        })
     }
 
     /// 超长输入（input_len > max_code_len）分支：按 pinyin_only_overflow 分流。
@@ -1076,9 +1071,9 @@ impl Engine for MixedEngine {
         // 全码自动上屏重评（对齐 Go recheckAutoCommit）：取主码表意向，但若英文守护命中、或
         // 拼音否决①②命中（`pinyin_vetoes_commit`，与顶码同一套）则否决（输入可能是拼音/英文，
         // 留给用户选）；并复核上屏目标在合并结果中仍存活。
-        // 英文守护（`english_blocks_commit`）：列表里有英文、或英文按前缀可能出现（用户可能
-        // 正在输入更长的英文词，`gith` → github），否决自动上屏。仅 auto_commit_block_on_english
-        // 开时生效。两道否决经短路仅在码表确有满码上屏意向时求值（避免每键多跑一次转换）。
+        // 英文守护（`english_blocks_commit`，前缀级 / 成词级两级）：用户可能正在输入更长的
+        // 英文词（`gith` → github）或已打完一个英文词，否决自动上屏。两道否决经短路仅在码表
+        // 确有满码上屏意向时求值（避免每键多跑一次转换）。
         let (should_commit, commit_text) = if ct_should_commit
             && !ct_commit_text.is_empty()
             && !self.english_blocks_commit(input, &merged)
@@ -1114,7 +1109,10 @@ impl Engine for MixedEngine {
         // `..._keeps_prefix_completion_candidates` 单一变量对照。
         let pinyin_guards_clear =
             self.auto_commit_block_on_pinyin && (has_pinyin || self.pinyin_may_continue(input));
-        let should_clear = ct_should_clear && !pinyin_guards_clear;
+        // 英文守护同样拦清空（与码表方案的通路①同口径）：满码无码表匹配时清空会把用户正在
+        // 打的英文词一起抹掉。经 `&&` 短路，仅在码表确有清空意向时才查英文。
+        let should_clear =
+            ct_should_clear && !pinyin_guards_clear && !self.english_blocks_commit(input, &merged);
 
         let is_empty = merged.is_empty();
         Ok(ConvertResult {
@@ -1185,7 +1183,8 @@ impl Engine for MixedEngine {
     ///   读法的串都让路拼音）。**与 ⓪ 共用例外口 `codetable_owns_overflow`**：归属已判给码表时
     ///   不再让路（`cety` + 第 5 键 → 顶出「通往」，`ty` 构不成音节、拼音只解释 2/5 键）；
     /// - ② `block_commit_on_pinyin_word` 且整串是强拼音词（wangba→网吧）→ 抑制顶码；
-    /// - ③ `auto_commit_block_on_english` 且整串有英文候选 → 抑制顶码（github→GitHub，见下）；
+    /// - ③ 英文守护（前缀级 `auto_commit_block_on_english` / 成词级 `block_commit_on_english_word`）
+    ///   命中 → 抑制顶码（github→GitHub，见下）；
     /// - `top_code_override_pinyin` 开启 = 顶码优先，**无视**上述全部否决强制倒向五笔。
     ///   （该名字只提 pinyin 属历史局限，它实际是顶码总开关，⓪①②③ 一律受其压制。）
     ///
@@ -1216,7 +1215,7 @@ impl Engine for MixedEngine {
             //
             // ⚠️ 刻意放在下方 `Some(sec)` 块**之外**：英文守护与拼音子引擎无关，
             // 纯码表 + 英文的混输（secondary=None）同样该生效。
-            if self.english_vetoes(input) {
+            if self.english_blocks_commit(input, &[]) {
                 return None;
             }
             if let Some(sec) = &self.secondary {
@@ -1615,10 +1614,11 @@ mod tests {
     /// 同一手法。显示序仍由协调器决定，本档位只决定截断存活。
     #[test]
     fn english_survives_codetable_flood() {
-        // 码表 20 条前缀补全（真实词频 9000 递减）。
-        let entries: Vec<(String, String, i32)> = (0..20)
+        // 码表 1 条精确全码 + 20 条前缀补全（真实词频 9000 递减）。
+        let mut entries: Vec<(String, String, i32)> = (0..20)
             .map(|i| (format!("hel{i}"), format!("码{i}"), 9000 - i))
             .collect();
+        entries.push(("hel".into(), "好".into(), 1));
         let refs: Vec<(&str, &str, i32)> = entries
             .iter()
             .map(|(c, t, w)| (c.as_str(), t.as_str(), *w))
@@ -1651,9 +1651,10 @@ mod tests {
             ])
         };
 
-        // 洪水下：完整单词 + 补全合计 2 条全数活下来，总数不超上限。
+        // 洪水下：完整单词 + 补全合计 2 条全数活下来，总数不超上限；码表精确首选仍在首位。
         let r = build(&refs, words(), 2).convert("hel", 5).unwrap();
         assert_eq!(r.candidates.len(), 5, "腾座后总数不得超出 max_candidates");
+        assert_eq!(r.candidates[0].text, "好", "给英文腾座不得挤掉码表精确首选");
         assert_eq!(
             english_of(&r),
             vec!["hel", "hello"],
@@ -2533,21 +2534,43 @@ mod tests {
 
     #[test]
     fn mixed_allows_auto_commit_when_english_guard_off() {
-        // 英文守护关 → 即便有英文候选也放行全码上屏（零回归）。
-        let primary = ct_engine(&[("good", "工", 100)], true);
-        let english = english_engine(&[("good", "good", 50)]);
+        // 两级英文守护都关 → 即便整串是英文单词也放行全码上屏。
+        let build = |word_level: bool| {
+            MixedEngine::new(
+                ct_engine(&[("good", "工", 100)], true),
+                None,
+                Some(english_engine(&[("good", "good", 50)])),
+                MixConfig {
+                    auto_commit_block_on_pinyin: false,
+                    block_commit_on_english_word: word_level,
+                    ..Default::default()
+                },
+            )
+        };
+        let r = build(false).convert("good", 50).unwrap();
+        assert!(r.should_commit, "英文守护关时应放行全码上屏");
+        assert_eq!(r.commit_text, "工");
+        // 成词级出厂开：整串 `good` 是英文单词 ⇒ 否决（前缀级仍关着）。
+        assert!(!MixConfig::default().auto_commit_block_on_english);
+        assert!(!build(true).convert("good", 50).unwrap().should_commit);
+    }
+
+    /// 成词级只管整词：英文词的前缀（`goo`→good）在前缀级关着时不拦满码。
+    #[test]
+    fn mixed_word_level_ignores_prefix() {
         let e = MixedEngine::new(
-            primary,
+            ct_engine(&[("gooa", "工", 100)], true),
             None,
-            Some(english),
+            Some(english_engine(&[("gooab", "gooab", 50)])),
             MixConfig {
                 auto_commit_block_on_pinyin: false,
                 ..Default::default()
             },
         );
-        let r = e.convert("good", 50).unwrap();
-        assert!(r.should_commit, "英文守护关时应放行全码上屏");
-        assert_eq!(r.commit_text, "工");
+        assert!(
+            e.convert("gooa", 50).unwrap().should_commit,
+            "gooa 只是英文词前缀，成词级不该否决"
+        );
     }
 
     /// 带通配键 `z` 的内存码表（码长 4）。

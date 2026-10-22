@@ -66,12 +66,14 @@ fn pinyin() -> PinyinEngine {
     PinyinEngine::new(PinyinConfig::default(), CachedDict::Memory(d))
 }
 
-/// 「否决选项全关」＝ ①②③ 全关，⓪ 保持出厂 `true`（用户设置页里关得掉的就是 ①②③）。
+/// 「否决选项全关」＝ ①②③ 全关（③ 含英文前缀级与成词级两项），⓪ 保持出厂 `true`
+/// （用户设置页里关得掉的就是 ①②③）。
 fn all_vetoes_off() -> MixConfig {
     MixConfig {
         auto_commit_block_on_pinyin: false,
         block_commit_on_pinyin_word: false,
         auto_commit_block_on_english: false,
+        block_commit_on_english_word: false,
         pinyin_only_overflow: true,
         top_code_override_pinyin: false,
         ..Default::default()
