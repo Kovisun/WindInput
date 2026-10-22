@@ -2454,7 +2454,7 @@ impl Coordinator {
 
     fn refill_mix_candidates(&self, state: &mut State) {
         state.candidates.clear();
-        // 不分批加载：主路残留的 `has_more` 会让翻页 / 展开按主路缓冲扩容，冲掉本模式的候选。
+        // 不分批加载：主路残留的 `has_more` 不属于本模式，留着会让翻页 / 展开去走主路扩容。
         state.has_more = false;
         self.reset_candidate_view(state);
         state.mix_repeat = false;
