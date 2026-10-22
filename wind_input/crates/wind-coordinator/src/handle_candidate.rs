@@ -3049,8 +3049,9 @@ impl Coordinator {
             return &state.direct_aux_body;
         }
         // 拼音候选自带的切分：`pinan` 高亮「平安」是 `pin'an`、高亮「皮」是 `pi'nan`。引擎只在
-        // 全拼、无手动分隔符时给（见 `CandidateMeta::preedit_split`），双拼 / 简拼 / 全拼降级 /
-        // 手动分隔符的形态因此不受影响；分段上屏中它同样是拆分串，与下面「恒拆分」那条不冲突。
+        // 全拼、无手动分隔符时给，双拼下只给全拼降级候选（见 `CandidateMeta::preedit_split`），
+        // 双拼击键分段 / 简拼 / 手动分隔符的形态因此不受影响，全拼降级没给时退回下面的
+        // `preedit_fp_body`；分段上屏中它同样是拆分串，与下面「恒拆分」那条不冲突。
         // 排在「无拆分形态」守卫之前：混输下首选的切分与原始码同形时拆分串为空，别的拼音
         // 候选仍可能有自己的切法（`xian` 高亮「西安」）。
         let cand = state.candidates.get(self.highlighted_global_index(state));

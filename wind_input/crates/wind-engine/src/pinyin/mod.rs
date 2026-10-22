@@ -1256,8 +1256,8 @@ impl PinyinEngine {
         None
     }
 
-    /// 一条候选的编码栏切分（`CandidateMeta::preedit_split`）。只在全拼、无手动分隔符时调用，
-    /// 此时 `completed + partial == raw_input`。
+    /// 一条候选的编码栏切分（`CandidateMeta::preedit_split`）。只在全拼、无手动分隔符时调用
+    /// （双拼下只对全拼降级候选，传的是击键串按全拼切出的那一份），此时 `completed + partial == raw_input`。
     ///
     /// | 候选 | 切分 |
     /// |---|---|
@@ -4826,7 +4826,24 @@ impl Engine for PinyinEngine {
             // 形态选择必须交给协调器的 `effective_preedit_body`（由 `sync_preedit_to_highlight`
             // 在每次高亮变化时重算），引擎只负责把两种形态都交出去。
             if candidates.iter().any(|c| c.is_fullpinyin_fallback) {
-                let fp = self.compose_segment(raw_input).0;
+                let (fp, fp_syllables, fp_partial) = self.compose_segment(raw_input);
+                // 全拼降级候选也各带自己的切分：支路里击键即全拼码，与全拼主路同一套渲染。
+                // `preedit_fullpinyin` 是整串最大匹配，`xiandaxue` 的「西安大学」走的却是
+                // `xi|an|da|xue`。简拼标记同真的留给协调器的简拼形态（那边优先）。
+                let fp_completed = fp_syllables.concat();
+                let mut cache = PreeditSplitCache::default();
+                for c in candidates
+                    .iter_mut()
+                    .filter(|c| c.is_fullpinyin_fallback && !c.is_abbrev)
+                {
+                    c.meta.preedit_split = self.candidate_preedit_split(
+                        c,
+                        raw_input,
+                        &fp_completed,
+                        &fp_partial,
+                        &mut cache,
+                    );
+                }
                 // 与 `sp_body` 比而不是 `preedit_display`：这一步答的是「全拼切法与**双拼
                 // 切法**是否不同」，而 preedit_display 上一步可能已被换成简拼分段。拿它作
                 // 基准的话，`nihao` 这类两种切法本就相同的串会因为简拼覆盖而白给一份 fp。

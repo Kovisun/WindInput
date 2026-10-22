@@ -391,3 +391,46 @@ fn sentence_cycle_caret_tracks_form_switch() {
         "自绘编码栏的插入符同样在 xian| 之后"
     );
 }
+
+/// 双拼（出厂小鹤）开全拼降级支路：降级候选按**自己的**全拼切分显示，不是整串最大匹配
+/// （`xiandaxue` 的「西安大学」是 `xi'an'da'xue`，最大匹配给 `xian'da'xue`）；双拼候选仍按
+/// 击键两两分段（`xi'an'da'xu'e`）。对照：关掉支路时没有降级候选，编码栏全是双拼分段。
+#[test]
+fn shuangpin_fallback_candidates_carry_own_split() {
+    if !has_data() {
+        return;
+    }
+    let with = |allow: bool| {
+        let mut c = cfg("shuangpin");
+        c.schema.pinyin.shuangpin.allow_full_pinyin = allow;
+        c
+    };
+    let coord = typed(with(true), None, "xiandaxue");
+    assert_top(&coord, "西安大学", "xi'an'da'xue");
+    assert_at(&coord, "西安", "xi'an'da'xu'e");
+
+    // 同一串里两条降级候选切法不同：「方案」`fang|an`、「反感」`fan|gan`；前缀单字「放」尾部
+    // 按最大匹配接着切；双拼候选「发能按」是 `fa'ng'an`。
+    let coord = typed(with(true), None, "fangan");
+    assert_top(&coord, "方案", "fang'an");
+    assert_at(&coord, "反感", "fan'gan");
+    assert_at(&coord, "发能按", "fa'ng'an");
+    assert_at(&coord, "放", "fang'an");
+
+    let off = typed(with(false), None, "xiandaxue");
+    assert_top(&off, "西安大虚", "xi'an'da'xu'e");
+    let off = typed(with(false), None, "fangan");
+    assert_eq!(off.debug_preedit(), "fa'ng'an", "关掉支路时是双拼分段");
+    assert!(
+        !off.debug_all_candidate_texts().iter().any(|t| t == "反感"),
+        "关掉支路时不该有降级候选「反感」"
+    );
+
+    // 临拼目标是双拼时同一套。
+    let coord = typed(
+        shuangpin_target(cfg("wubi86")),
+        Some(VK_BACKTICK),
+        "xiandaxue",
+    );
+    assert_top(&coord, "西安大学", "`xi'an'da'xue");
+}
