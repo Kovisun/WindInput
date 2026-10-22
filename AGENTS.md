@@ -392,6 +392,12 @@ cargo test -p wind-rpc --test wind_setting_assets
 - `.app` 侧单测：`cd wind_macos && swift test`。
 - 与 Windows 的功能差距（宿主层）登记在 `wind_macos/AGENTS.md`「与 Windows 的功能差距」。
 
+### 靶机按键延迟探针（`scripts/perf/key-latency.sh`）
+
+在靶机上直连服务 bridge 管道逐键发 KEY_EVENT 计往返耗时（Esc 撤销，不上屏不进词频），
+可造 trim / purge 冷场景。子命令 `codes`（从日志取编码清单）/ `run`（跑各轮）/ `report`（汇总），
+用法与注意事项（会闪候选窗、别在有人打字时跑）见脚本头部注释。
+
 ### 注意
 
 - 部分集成测试依赖 `build_dev/` 下的数据（junction/词库）；**数据缺失时测试族静默跳过，

@@ -252,6 +252,23 @@ fn without_fuzzy_hint(src: &StyledText) -> StyledText {
     out
 }
 
+/// 本帧上屏要做什么：返回 `(推像素, 摆位)`。`prev` 为窗口当前在屏上的几何，None = 不在屏上。
+///
+/// 光标在组合内右移会触发协调器 reshow，同一键常连发 2–3 帧内容与位置都不变的刷新；远程桌面下
+/// 每次 `UpdateLayeredWindow` 都要把整窗位图传给客户端，故像素没变就不推。摆位会
+/// `SetWindowPos(HWND_TOPMOST)` 重新置顶，几何没变也省掉（同 `popup_menu::plan_render`）。
+#[cfg_attr(not(windows), allow(dead_code))]
+fn plan_present(
+    prev: Option<(i32, i32, u32, u32)>,
+    want: (i32, i32, u32, u32),
+    same_pixels: bool,
+) -> (bool, bool) {
+    match prev {
+        None => (true, true),
+        Some(p) => (!same_pixels || (p.2, p.3) != (want.2, want.3), p != want),
+    }
+}
+
 /// 主题翻页字符 → 实际绘制的文本：未配（空串）时用内置箭头。
 ///
 /// 仅空串算「未配」，空白字符不算——主题作者用 `prev_char = " "` 表达的是「这里留白」，
@@ -410,6 +427,9 @@ pub struct CandidateWindow {
     /// 上次内容锚点屏幕坐标 (px, py)：每帧 place_window 算出新位置后与之比较，微移(<4px*scale)则
     /// 保持原位以抑制宿主 caret 抖动（位置保护）。隐藏时清空，下次组合重新落位。
     last_content_pos: Option<(i32, i32)>,
+    /// 本地窗口当前在屏上的几何 (x, y, w, h)，None = 不在屏上。上屏去重的基线，见 [`plan_present`]。
+    #[cfg(windows)]
+    presented: Option<(i32, i32, u32, u32)>,
     text_renderer: TextRenderer,
     /// arrange 后收集的候选命中矩形：(候选页内下标, 矩形)，供鼠标层使用
     hit_rects: Vec<(i32, Rect)>,
@@ -584,6 +604,8 @@ impl CandidateWindow {
             caret_height: 0,
             caret_valid: false,
             last_content_pos: None,
+            #[cfg(windows)]
+            presented: None,
             text_renderer,
             hit_rects: Vec::new(),
             mouse,
@@ -1569,22 +1591,56 @@ impl CandidateWindow {
     /// 与 host-render 路径共用单一渲染逻辑，确保几何完全一致。
     #[cfg(windows)]
     pub fn show(&mut self) {
-        match self.render_frame() {
+        let t_start = Instant::now();
+        let frame = self.render_frame();
+        let t_render = t_start.elapsed();
+        match frame {
             None => {
                 self.hide();
             }
             Some(frame) => {
-                self.window.resize(frame.width, frame.height);
-                {
-                    let buf = self.window.buffer_mut();
-                    buf[..(frame.width * frame.height * 4) as usize].copy_from_slice(&frame.buf);
+                let len = (frame.width * frame.height * 4) as usize;
+                let want = (frame.screen_x, frame.screen_y, frame.width, frame.height);
+                let same_pixels = self.window.buffer() == &frame.buf[..len];
+                let (repaint, reposition) = plan_present(self.presented, want, same_pixels);
+                let t_blit0 = Instant::now();
+                let mut ok = true;
+                if repaint {
+                    self.window.resize(frame.width, frame.height);
+                    self.window.buffer_mut()[..len].copy_from_slice(&frame.buf[..len]);
+                    if let Err(e) = self.window.update() {
+                        tracing::warn!("CandidateWindow update failed: {}", e);
+                        ok = false;
+                    }
                 }
-                if let Err(e) = self.window.update() {
-                    tracing::warn!("CandidateWindow update failed: {}", e);
-                }
+                let t_blit = t_blit0.elapsed();
                 // render_frame() 已设 visible=true；screen_x/y 为窗口左上（含阴影偏移）。
-                self.window.show(frame.screen_x, frame.screen_y);
+                let t_pos0 = Instant::now();
+                if reposition {
+                    self.window.show(frame.screen_x, frame.screen_y);
+                }
+                let t_pos = t_pos0.elapsed();
+                self.presented = ok.then_some(want);
                 self.update_tooltip(frame.screen_x, frame.screen_y);
+                tracing::debug!(
+                    "render[{}x{} n={}] pos=({},{}) repaint={} reposition={} rdp={}: render={:?} blit={:?} setpos={:?} | total={:?}",
+                    frame.width,
+                    frame.height,
+                    self.candidates.len(),
+                    frame.screen_x,
+                    frame.screen_y,
+                    repaint,
+                    reposition,
+                    unsafe {
+                        windows::Win32::UI::WindowsAndMessaging::GetSystemMetrics(
+                            windows::Win32::UI::WindowsAndMessaging::SM_REMOTESESSION,
+                        ) != 0
+                    },
+                    t_render,
+                    t_blit,
+                    t_pos,
+                    t_start.elapsed()
+                );
             }
         }
     }
@@ -4497,6 +4553,10 @@ impl CandidateWindow {
 
     pub fn hide(&mut self) {
         self.window.hide();
+        #[cfg(windows)]
+        {
+            self.presented = None;
+        }
         if self.visible {
             self.pixel_release.hidden(Instant::now());
         }
@@ -4524,6 +4584,7 @@ impl CandidateWindow {
     #[cfg(windows)]
     pub fn hide_local_window_only(&mut self) {
         self.window.hide();
+        self.presented = None;
         // 宿主接管绘制：本地气泡无条件收（光标在上面也一样），宽限只按候选悬停走。
         if let Some(t) = self.tooltip.as_mut() {
             t.hide_force();
@@ -7634,8 +7695,42 @@ mod font_plan_build_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::{CandidateWindow, arrow_char, visible_whitespace};
+    use super::{CandidateWindow, arrow_char, plan_present, visible_whitespace};
     use std::borrow::Cow;
+
+    #[test]
+    fn present_full_when_not_on_screen() {
+        assert_eq!(plan_present(None, (10, 20, 300, 100), true), (true, true));
+    }
+
+    #[test]
+    fn present_skips_identical_frame() {
+        let g = (10, 20, 300, 100);
+        assert_eq!(plan_present(Some(g), g, true), (false, false));
+    }
+
+    #[test]
+    fn present_moves_without_repaint_when_only_position_changed() {
+        assert_eq!(
+            plan_present(Some((10, 20, 300, 100)), (40, 20, 300, 100), true),
+            (false, true)
+        );
+    }
+
+    #[test]
+    fn present_repaints_in_place_when_pixels_changed() {
+        let g = (10, 20, 300, 100);
+        assert_eq!(plan_present(Some(g), g, false), (true, false));
+    }
+
+    /// 像素字节数相同但宽高互换（缓冲长度一样）也必须重推。
+    #[test]
+    fn present_repaints_when_size_changed_with_same_byte_count() {
+        assert_eq!(
+            plan_present(Some((10, 20, 300, 100)), (10, 20, 100, 300), true),
+            (true, true)
+        );
+    }
 
     /// 主题配的翻页字符必须原样落到渲染，只有「一个字符都没配」才回退内置箭头。
     ///

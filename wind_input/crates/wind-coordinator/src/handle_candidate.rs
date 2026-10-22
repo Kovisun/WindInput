@@ -18,6 +18,9 @@ use wind_keys::keymap;
 use wind_store::freq::FreqRecord;
 use wind_ui_types::CandidateOp;
 
+/// 候选刷新各段超过它才记日志（偶发慢键排查用，平时不进日志）。
+const SLOW_STAGE: std::time::Duration = std::time::Duration::from_millis(15);
+
 /// 英文词频召回（[`Coordinator::english_freq_recall`]）每次最多补进几个词。
 ///
 /// 召回的词从池尾起步、按 `base_pos / 2^有效次数` 前移；按有效次数取前 16 个（已验证是
@@ -1377,6 +1380,8 @@ impl Coordinator {
         let wildcard_pattern = self.wildcard_pattern_of(state);
         // ★ 分段续转排在通配之前（spec §10）：续转态的剩余串是拼音后半截。
         // `wildcard_pattern_of` 在续转态本就给 `None`，这里的先后是第二道保险。
+        let t_convert = std::time::Instant::now();
+        let faults0 = crate::process_memory::page_faults();
         let result = match pinyin_schema {
             Some(ps) if self.engine_mgr.ensure_schema(&ps) => {
                 self.engine_mgr
@@ -1390,6 +1395,17 @@ impl Coordinator {
                 None => self.engine_mgr.convert(&state.input_buffer, limit),
             },
         };
+        let t_convert = t_convert.elapsed();
+        let faults = faults0
+            .zip(crate::process_memory::page_faults())
+            .map(|(a, b)| b.saturating_sub(a));
+        // 缺页多但不慢的也记：用来区分软缺页（内存里换个映射）和真去读盘的硬缺页。
+        if t_convert >= SLOW_STAGE || faults.is_some_and(|n| n >= 100) {
+            debug!(
+                "convert 慢或缺页多: {:?} faults={:?} buf='{}'",
+                t_convert, faults, state.input_buffer
+            );
+        }
         // 拼音音节拆分形态（供「混输高亮跟随」按高亮候选类型选择显示原始码 / 拆分串）。
         // 码表 / 无拼音 → 空串（恒原始码）。state.preedit 本身由 sync_preedit_to_highlight
         // 按高亮重算（见 update_candidates 末尾 / apply_session_action）。
@@ -2500,7 +2516,9 @@ impl Coordinator {
         } else {
             self.initial_candidate_limit(&state.input_buffer)
         };
+        let t0 = std::time::Instant::now();
         let (engine_count, outcome) = self.build_candidates(state, limit);
+        let t_build = t0.elapsed();
         // 引导字母的「重复上屏」：输入恰为单个引导字母时，把最近一次上屏内容注入候选顶部
         // （对齐 Go），供「引导键 + 选词」重复上一次输入。资格判定见
         // `leading_letter_repeat_text`——它同时承担「让位那一帧不能空无一物」这个职责。
@@ -2529,6 +2547,15 @@ impl Coordinator {
         self.expand_s2t_variants(state);
         // 组合区按高亮候选类型重算（混输高亮跟随；含已转换前缀拼接）。
         self.sync_preedit_to_highlight(state);
+        if t0.elapsed() >= SLOW_STAGE {
+            debug!(
+                "refill_candidates 慢: build={:?} total={:?} buf='{}' n={}",
+                t_build,
+                t0.elapsed(),
+                state.input_buffer,
+                state.candidates.len()
+            );
+        }
         outcome
     }
 
