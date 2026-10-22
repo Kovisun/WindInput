@@ -326,7 +326,7 @@ impl Coordinator {
     ///
     /// 挂在 `apply_session_action` 的最前面：主输入与各 overlay 都先经过它，再落到各自的
     /// 光标移动臂与 Esc 臂——于是展开态下 ←→ 不再移动编码区光标、Esc 只收起不取消，
-    /// 而且只需接这一处。
+    /// 而且只需接这一处。快捷输入例外：它的光标与 Esc 臂早于该函数，见 `handle_mix_key`。
     pub(crate) fn grid_key(&self, state: &mut State, data: &KeyEventData) -> Option<bool> {
         if !Self::grid_active(state) {
             return None;

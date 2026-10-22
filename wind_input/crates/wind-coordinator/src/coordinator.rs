@@ -5743,18 +5743,6 @@ impl Coordinator {
             .chinese_mode
     }
 
-    /// 会话态按键绑定的统一执行（配置驱动，见 `keys.session_actions`）：翻页 / 移高亮 /
-    /// 取消。普通模式与所有 overlay 模式共用；`include_printable` 区分码表型（`-`/`=` 作
-    /// 翻页）与文本/表达式型（临英/快捷输入，`-`/`=` 作输入字符，不夺为动作）。
-    ///
-    /// 命中并执行返回 `Some`，未命中或条件不足返回 `None`（键回落调用方的原有处理）。
-    ///
-    /// # ★ 守卫按动作分，不按调用点分
-    ///
-    /// 导航类只在有候选时有意义（`requires_candidates`），`cancel` 则在「打了码还没出
-    /// 候选」时也必须生效。判据挂在 `SessionAction` 上而不是写在这里的 `if`——本函数有
-    /// 三个调用点（主输入 / mix / 候选导航），条件写死在函数体内还好，写到调用点上就是
-    /// 三份要保持一致的守卫，那正是本仓栽过四次的形状。
     /// 展开态专属键（见 `grid_key`）的完整处置：键归网格时返回结局，否则 `None`。
     pub(crate) fn grid_key_action(
         &self,
@@ -5768,6 +5756,18 @@ impl Coordinator {
         Some(KeyAction::Consumed)
     }
 
+    /// 会话态按键绑定的统一执行（配置驱动，见 `keys.session_actions`）：翻页 / 移高亮 /
+    /// 取消。普通模式与所有 overlay 模式共用；`include_printable` 区分码表型（`-`/`=` 作
+    /// 翻页）与文本/表达式型（临英/快捷输入，`-`/`=` 作输入字符，不夺为动作）。
+    ///
+    /// 命中并执行返回 `Some`，未命中或条件不足返回 `None`（键回落调用方的原有处理）。
+    ///
+    /// # ★ 守卫按动作分，不按调用点分
+    ///
+    /// 导航类只在有候选时有意义（`requires_candidates`），`cancel` 则在「打了码还没出
+    /// 候选」时也必须生效。判据挂在 `SessionAction` 上而不是写在这里的 `if`——本函数有
+    /// 三个调用点（主输入 / mix / 候选导航），条件写死在函数体内还好，写到调用点上就是
+    /// 三份要保持一致的守卫，那正是本仓栽过四次的形状。
     pub(crate) fn apply_session_action(
         &self,
         state: &mut State,
