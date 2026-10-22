@@ -1034,6 +1034,38 @@ impl MobileCore {
         Ok(n as u64)
     }
 
+    /// 联想学习数据的条数（联想里选过的词 + 学到的「下一词」），所有方案合计。
+    pub fn assoc_history_count(&self) -> u64 {
+        use wind_coordinator::web_host::WebDataHost;
+        let Some(store) = self.coord.user_store() else {
+            return 0;
+        };
+        // 枚举存储里出现过的全部数据方案：停用了的方案下学到的也算
+        let n: usize = store
+            .list_data_schemas()
+            .unwrap_or_default()
+            .iter()
+            .map(|s| store.assoc_history_len(s))
+            .sum();
+        store.mark_scan_pending();
+        n as u64
+    }
+
+    /// 清空全部方案的联想学习数据，返回删除条数。词频、用户词不动（桌面「清空词频」
+    /// 会一并清它，手机上单独给入口：用户怀疑联想被自己的输入带偏时，只想重置这一项）。
+    pub fn assoc_history_clear(&self) -> Result<u64, String> {
+        use wind_coordinator::web_host::WebDataHost;
+        self.ensure_writable()?;
+        let store = self.coord.user_store().ok_or("无持久化存储")?;
+        let mut n = 0usize;
+        for s in store.list_data_schemas().map_err(|e| e.to_string())? {
+            n += store.clear_assoc_history(&s).map_err(|e| e.to_string())?;
+        }
+        // 上一次上屏的词还记着，清完立刻再上屏一个词会接着学成一对；断开它
+        self.coord.note_word_boundary();
+        Ok(n as u64)
+    }
+
     // ── 词库导出 / 导入（个人词库备份）────────────────────────────────
     //
     // 本体与桌面 `dict.export` / `dict.import` 同一份（`wind_coordinator::dict_transfer_api`），
@@ -1800,6 +1832,30 @@ mod schema_dicts_tests {
         assert!(fresh.contains(r#""cached":false"#), "refresh 绕过缓存");
         let err = m.dict_stats("no_such_schema", 5, false).unwrap_err();
         assert!(err.contains("no_such_schema"), "原因要点名: {err}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 联想学习数据：计数跨方案合计，清空后归零、返回删除条数。
+    #[test]
+    fn assoc_history_count_and_clear() {
+        if !data_dir().join("schemas/wubi86.schema.toml").exists() {
+            eprintln!("!!! 跳过：build_dev 词库不存在");
+            return;
+        }
+        use wind_coordinator::web_host::WebDataHost;
+        let root = std::env::temp_dir().join(format!("wind_mobile_ah_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let m = core_at(&root);
+        assert_eq!(m.assoc_history_count(), 0);
+        let store = m.coord.user_store().expect("有持久化存储");
+        // 一个启用的方案、一个没启用的（停用了的方案下学到的也要清得掉）
+        store.record_assoc_pick("wubi86", "我们", "一起").unwrap();
+        store.record_assoc_pick("wubi86", "我们", "一起").unwrap();
+        store.record_assoc_pick("pinyin", "谢谢", "大家").unwrap();
+        assert_eq!(m.assoc_history_count(), 2, "按条计、跨方案合计");
+        assert_eq!(m.assoc_history_clear().unwrap(), 2);
+        assert_eq!(m.assoc_history_count(), 0);
         let _ = std::fs::remove_dir_all(&root);
     }
 

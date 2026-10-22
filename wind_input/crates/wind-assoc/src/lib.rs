@@ -413,6 +413,14 @@ pub fn associate(
         if !cfg.source_enabled(src) {
             continue;
         }
+        // 智能联想、上文以语气词结尾（「好吗」）：后面几乎总是断句，只出个人学习与标点。
+        // 下一词表与前缀词在这里只有噪声（网络语料的「吗的」、前缀词「吗啡」）。
+        if cfg.kind == AssocKind::Smart
+            && matches!(src, AssocSource::Bigram | AssocSource::Prefix)
+            && punct::sentence_particle_punct(ctx.text).is_some()
+        {
+            continue;
+        }
         let Some((_, p)) = providers.iter().find(|(s, _)| *s == src) else {
             continue;
         };
@@ -873,6 +881,43 @@ mod tests {
         let word = run(AssocKind::Word);
         assert_eq!(word.len(), 8, "词语联想不设前缀上限，也不丢长词");
         assert!(word.iter().any(|h| h.text == "中华人民共和国"));
+    }
+
+    /// ★ 语气词结尾（「好吗」）：智能联想只出个人学习与标点，句末标点排第一；
+    /// 词语联想不受影响（它本就只有前缀词）。
+    #[test]
+    fn smart_particle_tail_yields_punct_first() {
+        let bigram = Fixed(AssocSource::Bigram, vec![("的", 9)]);
+        let prefix = Fixed(AssocSource::Prefix, vec![("吗啡", 9)]);
+        let punct = crate::punct::PunctRules;
+        let providers: [(AssocSource, &dyn AssocProvider); 3] = [
+            (AssocSource::Bigram, &bigram),
+            (AssocSource::Prefix, &prefix),
+            (AssocSource::Punct, &punct),
+        ];
+        let cfg = AssocConfig {
+            kind: AssocKind::Smart,
+            max_count: 9,
+            punct: true,
+            ..Default::default()
+        };
+        let run = |text| {
+            associate(
+                &AssocContext {
+                    text,
+                    boundary_broken: false,
+                },
+                &cfg,
+                &providers,
+            )
+            .into_iter()
+            .map(|h| h.text)
+            .collect::<Vec<_>>()
+        };
+        let got = run("好吗");
+        assert_eq!(got[0], "？", "{got:?}");
+        assert!(!got.iter().any(|t| t == "的" || t == "吗啡"), "{got:?}");
+        assert_eq!(run("你好")[0], "的", "非语气词照常出下一词");
     }
 
     /// ★ 智能联想按上屏的那一截去重：前缀延伸「中国」（补「国」）与下一词「国」只留先到的，
