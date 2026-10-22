@@ -1802,6 +1802,15 @@ mod tests {
         layout: wind_config::LayoutIntent,
         global_vertical: bool,
     ) -> Option<(Arc<Coordinator>, Receiver<UiCommand>)> {
+        mix_coord_with(layout, global_vertical, |_| {})
+    }
+
+    /// 同 [`mix_coord`]，构造前再改一笔配置。
+    fn mix_coord_with(
+        layout: wind_config::LayoutIntent,
+        global_vertical: bool,
+        edit: impl FnOnce(&mut wind_config::Config),
+    ) -> Option<(Arc<Coordinator>, Receiver<UiCommand>)> {
         let d = data_dir();
         if !["wubi86", "pinyin", "english"]
             .iter()
@@ -1820,6 +1829,7 @@ mod tests {
         cfg.schema.mix_modes[0].candidate_layout = layout;
         // 序号逐格顺延：每页 7 个时 8、9、0 落到第二行，测得到数字键跟着序号走。
         cfg.ui.candidate.grid_index_fill = "cells".into();
+        edit(&mut cfg);
         let (c, rx) = Coordinator::new_headless_with_ui(cfg, Some(&d));
         c.debug_mark_coords_ready();
         Some((c, rx))
@@ -2133,5 +2143,63 @@ mod tests {
                 },
             }
         }
+    }
+
+    /// 把当前 mix 候选换成三页合成候选再试展开，返回 (透镜, 是否展开)。页数不再是变量，
+    /// 测到的就只剩透镜判据。
+    fn mix_lens_expands(c: &Coordinator) -> (crate::handle_mode::MixLens, bool) {
+        let mut st = c.state.lock().unwrap();
+        st.candidates = (0..PP * 3).map(|i| cand(&format!("c{i}"))).collect();
+        c.reset_candidate_view(&mut st);
+        (c.mix_lens(&st), c.try_expand_grid(&mut st))
+    }
+
+    fn shifted(k: u32) -> KeyEventData {
+        KeyEventData {
+            modifiers: MOD_SHIFT,
+            ..key(k)
+        }
+    }
+
+    /// 词组透镜（分词开、缓冲带分词符）多页时展开。
+    #[test]
+    fn mix_phrase_lens_expands() {
+        use crate::handle_mode::MixLens;
+        let Some((c, _rx)) = mix_coord_with(wind_config::LayoutIntent::Horizontal, false, |cfg| {
+            cfg.input.temp_english.phrase_seg = true;
+        }) else {
+            return;
+        };
+        mix_type(&c, "NI");
+        c.handle_key_event(&key(keymap::VK_QUOTE));
+        for ch in "HAO".chars() {
+            c.handle_key_event(&key(ch as u32));
+        }
+        assert_eq!(c.state.lock().unwrap().mix_buffer, "ni'hao");
+        assert_eq!(mix_lens_expands(&c), (MixLens::Phrase, true));
+    }
+
+    /// 自由透镜与大写英文词透镜（`free_input = off` 下 Shift+字母）多页也不展开。
+    #[test]
+    fn mix_free_and_english_lenses_do_not_expand() {
+        use crate::handle_mode::MixLens;
+        let Some((c, _rx)) = mix_coord(wind_config::LayoutIntent::Horizontal, false) else {
+            return;
+        };
+        mix_type(&c, "SHI");
+        c.handle_key_event(&shifted(keymap::VK_MINUS));
+        assert_eq!(c.state.lock().unwrap().mix_buffer, "shi_");
+        assert_eq!(mix_lens_expands(&c), (MixLens::Free, false));
+
+        let Some((c, _rx)) = mix_coord_with(wind_config::LayoutIntent::Horizontal, false, |cfg| {
+            cfg.schema.mix_modes[0].free_input = wind_config::config::FreeInputMode::Off;
+        }) else {
+            return;
+        };
+        c.handle_key_event(&key(0xBA));
+        c.handle_key_event(&shifted(u32::from(b'H')));
+        c.handle_key_event(&key(u32::from(b'E')));
+        assert_eq!(c.state.lock().unwrap().mix_buffer, "He");
+        assert_eq!(mix_lens_expands(&c), (MixLens::English, false));
     }
 }
