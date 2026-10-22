@@ -547,7 +547,9 @@ code 是 query 前缀 → 只消费前缀长度，剩余拼音继续转换；否
 **配置按引擎分两份，取值互不共享**：`schema.codetable.english_merge`（`enable` /
 `min_length` / `block_commit` / `block_commit_on_word` / `complete_min_length` / `exact_position` /
 `complete_position` / `max_count`，可经方案级
-`[engine.codetable.english_merge]` 逐项覆盖；混输 `schema.mix` 有同口径的 `english_*` 三项）与
+`[engine.codetable.english_merge]` 逐项覆盖；混输 `schema.mix` 有同口径的 `english_complete_min_length` /
+`english_exact_position` / `english_complete_position` / `english_max_count` 四项，成词级否决对应
+`block_commit_on_english_word`）与
 `schema.pinyin.english_merge`（`enable` / `min_length`）。拆开的理由是「码表方案要不要捎带
 英文」与「拼音方案要不要」本就是两件事——五笔常打命令行、变量名，开着有用；全拼的英文词与
 拼音串大面积重叠（`hen`/`men`/`she` 既是音节又是英文词），可能宁可不开。一个总开关只会逼

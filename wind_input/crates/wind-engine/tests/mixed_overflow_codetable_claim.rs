@@ -603,6 +603,21 @@ fn topcode_on_english_word_is_still_governed_by_the_english_guard() {
         None,
         "③ 开 ⇒ 顶码被英文守护拦下，这才是顶码侧的正解"
     );
+
+    // 成词级（前缀级关）：整串 github 是英文单词 ⇒ 拦；githu 只是前缀 ⇒ 照常顶码。
+    let word_only = mixed_en(MixConfig {
+        block_commit_on_english_word: true,
+        ..all_vetoes_off()
+    });
+    assert_eq!(word_only.handle_top_code("github"), None, "成词级应拦顶码");
+    assert!(
+        off.handle_top_code("githu").is_some(),
+        "前提：两级都关时 githu 顶码"
+    );
+    assert!(
+        word_only.handle_top_code("githu").is_some(),
+        "成词级不管前缀：githu 应照常顶码"
+    );
 }
 
 /// 真实词库端到端验收（用户诉求的落点）：内存 fixture 测得了判据，测不出真机首选与真机词库。

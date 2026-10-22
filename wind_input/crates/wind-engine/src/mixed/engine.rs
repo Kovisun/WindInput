@@ -2555,6 +2555,39 @@ mod tests {
         assert!(!build(true).convert("good", 50).unwrap().should_commit);
     }
 
+    /// 满码空码清空同样受英文守护：整串是英文单词（码表无匹配）时不清空；两级都关才清。
+    #[test]
+    fn mixed_word_level_vetoes_clear_on_empty_max() {
+        let build = |word_level: bool| {
+            let mut d = CodetableDict::empty();
+            d.merge_single("aaaa".into(), "工".into(), 100, 0);
+            let dm = DictManager::new();
+            dm.register_layer(Box::new(SystemDictLayer::new(CachedDict::Memory(d), "sys")));
+            let opts = CommitOptions {
+                clear_on_empty_max: true,
+                ..Default::default()
+            };
+            MixedEngine::new(
+                Box::new(CodeTableEngine::new(4, opts, Arc::new(dm))),
+                None,
+                Some(english_engine(&[("word", "word", 50)])),
+                MixConfig {
+                    auto_commit_block_on_pinyin: false,
+                    block_commit_on_english_word: word_level,
+                    ..Default::default()
+                },
+            )
+        };
+        assert!(
+            build(false).convert("word", 50).unwrap().should_clear,
+            "前提：两级都关时 word（码表满码无匹配）清空"
+        );
+        assert!(
+            !build(true).convert("word", 50).unwrap().should_clear,
+            "成词级：整串是英文单词，不得清空"
+        );
+    }
+
     /// 成词级只管整词：英文词的前缀（`goo`→good）在前缀级关着时不拦满码。
     #[test]
     fn mixed_word_level_ignores_prefix() {
