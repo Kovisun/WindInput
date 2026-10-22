@@ -3011,14 +3011,10 @@ fn quick_input_free_text_lens_digit_is_literal_on_empty_candidates() {
     );
 }
 
-/// ★反向对照（锁本条修复整体挂在 `free_on` 上）：同样的空候选 + 数字键，
-/// `free_input = off` 的实例必须仍走选词臂被吃掉。
-///
-/// 这条控制项刻意用**文本透镜的数字键**而不是数字透镜的字母：去掉 `free_on` 之后，
-/// 字母落到⑥只会 `Consumed`（`punct_char` 不认字母），看不出差别；数字键则会被⑥
-/// 当标点顶屏——直接上屏一个 `1` 并退出模式。字母那条路的对照见下一条。
+/// 同一条判据在 `free_input = off` 下同样成立：空候选 + 文本透镜的数字键归字面。
+/// （此前 off 档下它被选词臂吃掉，维护者定为 off 也纳入第二条判据。）
 #[test]
-fn quick_input_off_keeps_digit_as_select_key_on_empty_candidates() {
+fn quick_input_off_digit_is_literal_on_empty_candidates() {
     if !has_schemas() {
         return;
     }
@@ -3030,12 +3026,9 @@ fn quick_input_off_keeps_digit_as_select_key_on_empty_candidates() {
     let coord = Coordinator::new_headless(cfg, Some(&data_dir()));
     coord.handle_key_event(&key_event(0xBA, EVENT_KEY_DOWN)); // ;
     press_char(&coord, 'a');
-    match press_char(&coord, '1') {
-        KeyAction::Consumed => {}
-        other => panic!("关掉自由输入后数字键仍该被选词臂吃掉，实际: {:?}", other),
-    }
+    assert_eq!(action_text(&press_char(&coord, '1')).unwrap(), ";a1");
     match coord.handle_key_event(&key_event(0x20, EVENT_KEY_DOWN)) {
-        KeyAction::InsertText { text, .. } => assert_eq!(text, "a", "缓冲不该被 1 污染"),
+        KeyAction::InsertText { text, .. } => assert_eq!(text, "a1"),
         other => panic!("空格应上屏缓冲原文，实际: {:?}", other),
     }
 }
@@ -3105,17 +3098,9 @@ fn quick_input_text_only_mix_first_digit_is_literal() {
     }
 }
 
-/// `off` 档的**基线**：与 `free_dot_prefix_types_file_extension` 配对 —— 关掉自由输入后
-/// 头号场景原样保留（字母仍被选词臂吃掉，空格上屏的只有那个 `.`）。「`.txt` 在 off 档下
-/// 就该打不出来」是设计而非缺陷，这条负责说明它。
-///
-/// ⚠️ 本条**测不到**守卫的 `free_on` 限定：`free_on = false` 时③的守卫恒真放行，字母在③
-/// 就被 `mix_select` 吃掉，后面的⑤根本够不着。那道闸门归
-/// `quick_input_free_comma_literal_vs_off_top_commits` 管（逗号是 off 档下唯一能走到⑤
-/// 门口的键型）；守卫自身的 `free_on` 归上面的
-/// `off_keeps_digit_as_select_key_on_empty_candidates`（数字键会被⑥当标点顶屏，看得出差别）。
+/// `off` 档同样打得出 `.xlsx`：光一个点没有候选，字母不是选词键、逐个字面入缓冲。
 #[test]
-fn quick_input_off_keeps_letters_as_select_keys_on_empty_candidates() {
+fn quick_input_off_dot_prefix_types_file_extension() {
     if !has_schemas() {
         return;
     }
@@ -3123,12 +3108,38 @@ fn quick_input_off_keeps_letters_as_select_keys_on_empty_candidates() {
     cfg.schema.mix_modes[0].free_input = wind_config::config::FreeInputMode::Off;
     let coord = Coordinator::new_headless(cfg, Some(&data_dir()));
     coord.handle_key_event(&key_event(0xBA, EVENT_KEY_DOWN)); // ;
-    press_str(&coord, ".txt");
+    press_char(&coord, '.');
+    assert!(coord.debug_page_texts().is_empty(), "前提：光一个点无候选");
+    for want in [";.x", ";.xl", ";.xls", ";.xlsx"] {
+        let ch = want.chars().last().unwrap();
+        assert_eq!(action_text(&press_char(&coord, ch)).unwrap(), want);
+    }
     match coord.handle_key_event(&key_event(0x20, EVENT_KEY_DOWN)) {
-        KeyAction::InsertText { text, .. } => {
-            assert_eq!(text, ".", "关掉自由输入后字母仍该被吃掉，缓冲只剩那个点")
-        }
+        KeyAction::InsertText { text, .. } => assert_eq!(text, ".xlsx"),
         other => panic!("空格应上屏缓冲原文，实际: {:?}", other),
+    }
+}
+
+/// ★反向对照：`off` 档下数字透镜有候选时，越界序号的选词键仍被吃掉、不污染缓冲。
+#[test]
+fn quick_input_off_out_of_range_select_key_is_still_eaten() {
+    if !has_schemas() {
+        return;
+    }
+    let mut cfg = config_with("wubi86");
+    cfg.schema.mix_modes[0].free_input = wind_config::config::FreeInputMode::Off;
+    let coord = Coordinator::new_headless(cfg, Some(&data_dir()));
+    coord.handle_key_event(&key_event(0xBA, EVENT_KEY_DOWN)); // ;
+    press_str(&coord, "1+2");
+    let n = coord.debug_page_texts().len();
+    assert!(n > 0 && n <= 25, "前提：有候选且 z 越界，实际 {n}");
+    match press_letter(&coord, 'z') {
+        KeyAction::Consumed => {}
+        other => panic!("越界选词键应被吃掉，实际: {:?}", other),
+    }
+    match coord.handle_key_event(&key_event(0x20, EVENT_KEY_DOWN)) {
+        KeyAction::InsertText { text, .. } => assert_eq!(text, "3", "缓冲不该被 z 污染"),
+        other => panic!("空格应上屏首选，实际: {:?}", other),
     }
 }
 

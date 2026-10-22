@@ -3356,22 +3356,33 @@ impl Coordinator {
                     // 任何成员都接不下数字，按⑤的判据它本就该是字面，退格一下即回（透镜是缓冲
                     // 的纯函数）。见 `text_only_mix_first_digit_is_literal`。
                     //
-                    // ⚠️ ④（配置的二三候选键）**刻意不加同样的判定**。它恰好在本守卫不生效时
-                    // 才可达 —— 两种情形：`free_input = off`（那时⑤本就走不到，加了也没用），
-                    // 或 `takes_select_keys = false`（用户明写的「这两个键归选词」，空候选下让
-                    // 它们改作字面等于推翻该配置）。后一种下 `;`/`'` 在零候选时确实还是死键，
-                    // 由 `select_keys_stay_dead_when_not_taken` 钉住。
+                    // ⚠️ ④（配置的二三候选键）**刻意不加同样的判定**：它们只在 `free_input = off`
+                    // 或 `takes_select_keys = false` 时作选词键，后者是用户明写的「这两个键归
+                    // 选词」，空候选下让它们改作字面等于推翻该配置。`;`/`'` 在零候选时确实还是
+                    // 死键，由 `select_keys_stay_dead_when_not_taken` 钉住。
                     //
                     // ⚠️ 历史候选不算数：它是跨透镜的字面前缀补全，不是本透镜的产出。
                     // 算进去的话 `.txt` 一旦进了历史，`;.` 就有了候选、`;.xlsx` 又打不出。
-                    if let Some(off) = sel
-                        && !(free_on
-                            && state
-                                .candidates
-                                .iter()
-                                .all(|c| c.id == crate::quick_history::QUICK_HISTORY_ID))
-                    {
-                        return self.mix_select(state, off);
+                    //
+                    // ★ 本判据**不分 `free_input` 档**：`off` 下同样归字面（`;.xlsx` 打得出）。
+                    // 字面就地收进缓冲而不是落到⑤——⑤只对开着自由输入的实例生效；`off` 没有
+                    // Free 透镜，缓冲照旧按首字符定透镜，字母续打仍因零候选而归字面。
+                    if let Some(off) = sel {
+                        if !state
+                            .candidates
+                            .iter()
+                            .all(|c| c.id == crate::quick_history::QUICK_HISTORY_ID)
+                        {
+                            return self.mix_select(state, off);
+                        }
+                        if let Some(ch) = printable_char(data.key_code, shift) {
+                            preedit_cursor::BufEdit::new(
+                                &mut state.mix_buffer,
+                                &mut state.mix_cursor,
+                            )
+                            .insert(ch);
+                            return refresh(self, state);
+                        }
                     }
 
                     // ④ 配置二三候选键（默认 `;` `'`）。
