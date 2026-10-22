@@ -65,7 +65,7 @@ impl Coordinator {
 
     /// 按上文 `text` 算出的联想候选文本（不进联想态、不改状态；评测 / 诊断用）。
     pub fn debug_assoc_suggest(&self, text: &str) -> Vec<String> {
-        self.assoc_hits(&self.assoc_config(), text)
+        self.assoc_hits(&self.assoc_config(), "", text)
             .into_iter()
             .map(|h| h.text)
             .collect()

@@ -30,14 +30,14 @@ pub mod bigram;
 pub mod punct;
 
 /// 联想的上文。
-///
-/// ★ **一期就按「完整上文」设计，尽管桌面只填得起一条上屏文本。**
-/// 二期移动端会用 `InputConnection.getTextBeforeCursor` 填入光标前的真实内容，
-/// 那时不必改签名——避免「二期动接口、一期的调用点全部返工」。
 #[derive(Debug, Clone, Copy, Default)]
 pub struct AssocContext<'a> {
-    /// 上文文本。桌面 = 最近一次上屏的文本；移动端 = 光标前若干字符。
+    /// 刚上屏的文本（简体域的整词）。前缀词、联想历史、标点都按它查。
     pub text: &'a str,
+    /// 这次上屏**之前**光标前的正文（宿主报来的，见 `Coordinator::set_preceding_text`），
+    /// 末尾紧接着 `text`。只有「下一词」源用它：逐字上屏时把被拆开的词凑回来。
+    /// 宿主不报（桌面）就是空串，一切照旧。
+    pub preceding: &'a str,
     /// 连续性是否已断（失焦 / 切宿主 / 鼠标点击 / 方向键 / 超时）。
     ///
     /// ★ 断链时**不做联想**。`recent_commits` 是一个跨应用、跨焦点的全局队列，
@@ -476,6 +476,7 @@ mod tests {
     fn ctx() -> AssocContext<'static> {
         AssocContext {
             text: "你好",
+            preceding: "",
             boundary_broken: false,
         }
     }
@@ -497,6 +498,7 @@ mod tests {
         let cfg = AssocConfig::default().with_enabled();
         let c = AssocContext {
             text: "你好",
+            preceding: "",
             boundary_broken: true,
         };
         assert!(associate(&c, &cfg, &[(AssocSource::Punct, &p)]).is_empty());
@@ -508,6 +510,7 @@ mod tests {
         let cfg = AssocConfig::default().with_enabled();
         let c = AssocContext {
             text: "",
+            preceding: "",
             boundary_broken: false,
         };
         assert!(associate(&c, &cfg, &[(AssocSource::Punct, &p)]).is_empty());
@@ -856,6 +859,7 @@ mod tests {
             associate(
                 &AssocContext {
                     text: "中",
+                    preceding: "",
                     boundary_broken: false,
                 },
                 &cfg,
@@ -905,6 +909,7 @@ mod tests {
             associate(
                 &AssocContext {
                     text,
+                    preceding: "",
                     boundary_broken: false,
                 },
                 &cfg,
@@ -957,6 +962,7 @@ mod tests {
             let hits = associate(
                 &AssocContext {
                     text: "中",
+                    preceding: "",
                     boundary_broken: false,
                 },
                 &cfg,
@@ -1019,6 +1025,7 @@ mod tests {
         let hits = associate(
             &AssocContext {
                 text: "你好",
+                preceding: "",
                 boundary_broken: false,
             },
             &cfg,
@@ -1032,6 +1039,7 @@ mod tests {
         let mhits = associate(
             &AssocContext {
                 text: "你好",
+                preceding: "",
                 boundary_broken: false,
             },
             &mcfg,

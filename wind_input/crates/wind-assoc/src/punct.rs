@@ -163,6 +163,7 @@ mod tests {
     fn ctx(text: &str) -> AssocContext<'_> {
         AssocContext {
             text,
+            preceding: "",
             boundary_broken: false,
         }
     }

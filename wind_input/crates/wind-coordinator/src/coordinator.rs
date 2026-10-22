@@ -2092,6 +2092,10 @@ pub struct Coordinator {
     /// （`record_commit`）、焦点变化、宿主自行出字 / 挪光标、取消、撤销上屏都清空，只有
     /// `commit_selected` 接得上——只记真正相邻的两个词，见 [`Self::learn_next_word`]。
     pub(crate) next_word_prev: Mutex<Option<String>>,
+    /// 光标前的正文（末尾若干字），联想「下一词」的前文。宿主报真值
+    /// （[`Self::set_preceding_text`]），核心自己上屏 / 删字时随手跟上（[`Self::note_host_edits`]），
+    /// 两次报告之间也不脱节。桌面宿主不报，恒空。
+    pub(crate) preceding_text: Mutex<String>,
     /// 撤销上屏（`ime.undo_commit`）删除量：最近一次「同步落到光标前」的字符数（UTF-16 单元，
     /// 与 TSF ShiftStart / macOS NSRange 同量纲）。**刻意与 `recent_commits` 分离**——历史队列
     /// 记「上过什么」（供 last/加词，深度 16），本值记「光标前紧邻的还是不是它、有几个字」这一
@@ -3208,6 +3212,7 @@ impl Coordinator {
             self_weak: std::sync::OnceLock::new(),
             recent_commits: Mutex::new(std::collections::VecDeque::new()),
             next_word_prev: Mutex::new(None),
+            preceding_text: Mutex::new(String::new()),
             last_commit_len: std::sync::atomic::AtomicUsize::new(1),
             preedit_display: Mutex::new(preedit_display_init),
             hide_candidate_window: Mutex::new(hide_candidate_window_init),

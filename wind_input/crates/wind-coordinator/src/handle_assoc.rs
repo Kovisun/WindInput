@@ -307,12 +307,23 @@ struct BigramWords<'a> {
     table: &'a wind_assoc::bigram::AssocBigram,
 }
 
+/// 光标前文留几个字。「下一词」表只看 4 个字，多留一些给以后整句的上文用（语法模型）。
+pub(crate) const PRECEDING_KEEP_CHARS: usize = 32;
+
+fn pop_chars(s: &mut String, count: usize) {
+    for _ in 0..count {
+        if s.pop().is_none() {
+            break;
+        }
+    }
+}
+
 /// 句末记号换成的逗号最早排在第几位（0 起）。
 const SENTENCE_END_MIN_RANK: usize = 1;
 
 impl AssocProvider for BigramWords<'_> {
     fn suggest(&self, ctx: &AssocContext<'_>, limit: usize) -> Vec<AssocHit> {
-        let Some((_, succ)) = self.table.lookup(ctx.text) else {
+        let Some(succ) = self.table.lookup_after(ctx.preceding, ctx.text) else {
             return Vec::new();
         };
         let mut words: Vec<&str> = succ.into_iter().take(limit).collect();
@@ -489,6 +500,63 @@ impl Coordinator {
         self.restore_next_word_prev(None);
     }
 
+    /// 宿主报来光标前的正文（不含组合区）。只留末尾 [`PRECEDING_KEEP_CHARS`] 个字。
+    ///
+    /// 时机由宿主定：光标被挪动、宿主自己改了正文之后（Android `onUpdateSelection`）。
+    /// 核心自己的上屏不必等它报——[`Self::note_host_edits`] 已跟上。
+    /// 不知道光标前是什么（换了输入框、读不到）就报空串。
+    pub fn set_preceding_text(&self, text: &str) {
+        let n = text.chars().count();
+        let at = text
+            .char_indices()
+            .nth(n.saturating_sub(PRECEDING_KEEP_CHARS))
+            .map_or(text.len(), |(i, _)| i);
+        let mut cur = self
+            .preceding_text
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        cur.clear();
+        cur.push_str(&text[at..]);
+    }
+
+    /// 一次按键 / 选词交给宿主的编辑，照样施加到光标前文上：宿主的报告是异步的，
+    /// 紧接着的下一次上屏多半等不到它。挪光标的情形算不出新位置的前文，清空等宿主报。
+    pub fn note_host_edits(&self, ops: &[wind_host::EditOp]) {
+        use wind_host::EditOp;
+        let mut cur = self
+            .preceding_text
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        for op in ops {
+            match op {
+                EditOp::Commit(text) => cur.push_str(text),
+                EditOp::SetComposition { .. } => {}
+                EditOp::DeleteBackward { count } => pop_chars(&mut cur, *count),
+                EditOp::ReplaceBackward { count, text } => {
+                    pop_chars(&mut cur, *count);
+                    cur.push_str(text);
+                }
+                EditOp::MoveCursor { .. } => cur.clear(),
+            }
+        }
+        let n = cur.chars().count();
+        if n > PRECEDING_KEEP_CHARS {
+            let at = cur
+                .char_indices()
+                .nth(n - PRECEDING_KEEP_CHARS)
+                .map_or(0, |(i, _)| i);
+            cur.drain(..at);
+        }
+    }
+
+    /// 当前记着的光标前文（诊断 / 测试用）。
+    pub fn preceding_text(&self) -> String {
+        self.preceding_text
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
     /// 退出联想态。已不在联想态时是空操作（返回 false）。
     ///
     /// 调用点遍布各条按键分派臂，故**必须幂等且极廉价**——绝大多数按键并不在联想态下发生。
@@ -536,12 +604,18 @@ impl Coordinator {
     }
 
     /// 按上文算联想候选（不改状态）。`maybe_enter_assoc` 与评测 / 诊断共用这一份。
-    pub(crate) fn assoc_hits(&self, cfg: &AssocConfig, text: &str) -> Vec<AssocHit> {
+    pub(crate) fn assoc_hits(
+        &self,
+        cfg: &AssocConfig,
+        preceding: &str,
+        text: &str,
+    ) -> Vec<AssocHit> {
         if cfg.kind == AssocKind::Off {
             return Vec::new();
         }
         let ctx = AssocContext {
             text,
+            preceding,
             // 上屏这一瞬间上文必然连续——正是刚刚打进去的那段字。
             // 断链只发生在失焦/切窗/点击等**别的**入口，那些路径直接调 `exit_assoc`。
             boundary_broken: false,
@@ -589,9 +663,14 @@ impl Coordinator {
     /// 调用前编码缓冲与常规候选**必须已清空**（互斥不变式，见
     /// [`State::debug_assert_assoc_invariant`]）。上屏路径上这件事由
     /// `reset_pinyin_composition` 完成，故本函数只该在它之后调用。
-    pub(crate) fn maybe_enter_assoc(&self, state: &mut State, text: &str) -> bool {
+    pub(crate) fn maybe_enter_assoc(&self, state: &mut State, text: &str, on_screen: &str) -> bool {
         let cfg = self.assoc_config();
-        let hits = self.assoc_hits(&cfg, text);
+        // 前文是这次按键之前的：本次上屏要等按键返回后才经 `note_host_edits` 记进去。
+        // `on_screen`：`text` 里本来就在屏上的那截（选前缀延伸联想「中国」时的「中」），
+        // 前文末尾就是它，去掉才接得上整词。
+        let preceding = self.preceding_text();
+        let preceding = preceding.strip_suffix(on_screen).unwrap_or(&preceding);
+        let hits = self.assoc_hits(&cfg, preceding, text);
         if hits.is_empty() {
             return false;
         }
@@ -996,7 +1075,7 @@ impl Coordinator {
         if state.active.is_none()
             && state.committed_text.is_empty()
             && state.input_buffer.is_empty()
-            && self.maybe_enter_assoc(state, assoc_ctx)
+            && self.maybe_enter_assoc(state, assoc_ctx, "")
         {
             self.notify_ui_update(state);
             // 与 `commit_selected` 同：上屏后重开占位组合，联想态才收得到后续按键。
@@ -1048,9 +1127,33 @@ mod tests {
         Coordinator::new_headless(cfg, None)
     }
 
+    #[test]
+    fn preceding_text_follows_host_edits() {
+        use wind_host::EditOp;
+        let c = coord_with(|_| {});
+        c.set_preceding_text("你好，我们");
+        c.note_host_edits(&[EditOp::Commit("今".into())]);
+        assert_eq!(c.preceding_text(), "你好，我们今");
+        c.note_host_edits(&[EditOp::DeleteBackward { count: 2 }]);
+        assert_eq!(c.preceding_text(), "你好，我");
+        c.note_host_edits(&[EditOp::ReplaceBackward {
+            count: 1,
+            text: ".".into(),
+        }]);
+        assert_eq!(c.preceding_text(), "你好，.");
+        c.note_host_edits(&[EditOp::MoveCursor { delta: -1 }]);
+        assert_eq!(c.preceding_text(), "", "挪了光标算不出前文，等宿主报");
+        // 只留末尾若干字
+        c.set_preceding_text(&"字".repeat(PRECEDING_KEEP_CHARS + 5));
+        assert_eq!(c.preceding_text().chars().count(), PRECEDING_KEEP_CHARS);
+        c.note_host_edits(&[EditOp::Commit("尾".into())]);
+        assert_eq!(c.preceding_text().chars().count(), PRECEDING_KEEP_CHARS);
+        assert!(c.preceding_text().ends_with('尾'));
+    }
+
     fn enter(c: &Coordinator, text: &str) -> bool {
         let mut st = c.state.lock().unwrap_or_else(|e| e.into_inner());
-        c.maybe_enter_assoc(&mut st, text)
+        c.maybe_enter_assoc(&mut st, text, "")
     }
 
     fn texts(c: &Coordinator) -> Vec<String> {
@@ -1435,7 +1538,7 @@ mod tests {
         c.debug_mark_coords_ready();
         {
             let mut st = c.state.lock().unwrap_or_else(|e| e.into_inner());
-            assert!(c.maybe_enter_assoc(&mut st, "你好"));
+            assert!(c.maybe_enter_assoc(&mut st, "你好", ""));
             c.notify_ui_update(&st);
         }
         let mut last: Option<Vec<String>> = None;
@@ -1464,7 +1567,7 @@ mod tests {
         c.debug_mark_coords_ready();
         {
             let mut st = c.state.lock().unwrap_or_else(|e| e.into_inner());
-            assert!(c.maybe_enter_assoc(&mut st, "你好"));
+            assert!(c.maybe_enter_assoc(&mut st, "你好", ""));
             c.notify_ui_update(&st);
         }
         let mut label = None;

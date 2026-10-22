@@ -4024,7 +4024,14 @@ impl Coordinator {
             //
             // `assoc_may_chain`：一次性档下，选中联想候选后**不再续**（否则联想会一直
             // 接龙下去，那是持续档的语义）。
-            if self.assoc_may_chain(from_assoc) && self.maybe_enter_assoc(state, &assoc_ctx) {
+            // 选前缀延伸联想时整词里已在屏上的那截（「中国」的「中」）
+            let on_screen = match (from_assoc, cand.commit_override.as_deref()) {
+                (true, Some(rest)) => cand.text.strip_suffix(rest).unwrap_or(""),
+                _ => "",
+            };
+            if self.assoc_may_chain(from_assoc)
+                && self.maybe_enter_assoc(state, &assoc_ctx, on_screen)
+            {
                 self.notify_ui_update(state);
                 // ★ 上屏后**重开一个占位组合**——这是联想态能收到后续按键的唯一可靠手段。
                 // 宿主的会话判据里，只有 `HasActiveComposition()` 是同步的；靠应答异步

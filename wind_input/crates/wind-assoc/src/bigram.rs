@@ -91,16 +91,47 @@ impl AssocBigram {
             let at = ctx.char_indices().nth(n - keep).map_or(0, |(i, _)| i);
             let tail = &ctx[at..];
             if let Some(i) = self.find(tail) {
-                let succ = self
-                    .line(i)
-                    .1
-                    .split(' ')
-                    .filter(|s| !s.is_empty())
-                    .collect();
-                return Some((tail, succ));
+                return Some((tail, self.successors(i)));
             }
         }
         None
+    }
+
+    /// 带光标前文查：上文 = `preceding`（上屏前光标前的正文）+ `commit`（这次上屏的）。
+    ///
+    /// 逐字上屏时整词被拆开了（五笔打「今」「天」两个字），只拿 `commit`「天」去查，
+    /// 接的是「天」的后继而不是「今天」的。故先试**向前文借字**凑成表里的上文，借得越多越先试；
+    /// 都不成再退回 [`Self::lookup`]。
+    ///
+    /// 借字有个反例：前文「今天」、上屏「下」（要打「下午」），借一个字就是表里的「天下」。
+    /// 判据：被借走的那几个字，在前文里已经和更前面的字连成了一个词（「今天」在表里）——
+    /// 那它们属于那个词，不该再借给这次上屏。
+    pub fn lookup_after<'a>(&'a self, preceding: &str, commit: &'a str) -> Option<Vec<&'a str>> {
+        let n = commit.chars().count();
+        let pre: Vec<char> = preceding.chars().collect();
+        let max_borrow = MAX_CONTEXT_CHARS.saturating_sub(n).min(pre.len());
+        for k in (1..=max_borrow).rev() {
+            let borrowed: String = pre[pre.len() - k..].iter().collect();
+            let Some(i) = self.find(&format!("{borrowed}{commit}")) else {
+                continue;
+            };
+            let taken = (k + 1..=MAX_CONTEXT_CHARS.min(pre.len())).any(|j| {
+                self.find(&pre[pre.len() - j..].iter().collect::<String>())
+                    .is_some()
+            });
+            if !taken {
+                return Some(self.successors(i));
+            }
+        }
+        self.lookup(commit).map(|(_, succ)| succ)
+    }
+
+    fn successors(&self, i: usize) -> Vec<&str> {
+        self.line(i)
+            .1
+            .split(' ')
+            .filter(|s| !s.is_empty())
+            .collect()
     }
 }
 
@@ -127,6 +158,32 @@ mod tests {
         assert_eq!(t.lookup("你和我").unwrap(), ("我", vec!["的", "$", "不"]));
         assert!(t.lookup("中").is_none());
         assert!(t.lookup("").is_none());
+    }
+
+    #[test]
+    fn borrows_from_preceding_text() {
+        // parse 要求按上文字节序升序，这里排好再拼
+        let mut rows = [
+            ("今天", "是 晚上"),
+            ("天下", "第一"),
+            ("下", "午 面"),
+            ("天", "气"),
+            ("中国人", "民"),
+            ("国人", "的"),
+            ("中国", "人"),
+        ];
+        rows.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
+        let text: String = rows.iter().map(|(c, s)| format!("{c}\t{s}\n")).collect();
+        let t = AssocBigram::parse(text).unwrap();
+        // 逐字上屏「今」「天」：借「今」凑成「今天」
+        assert_eq!(t.lookup_after("我们今", "天").unwrap(), vec!["是", "晚上"]);
+        // 「今天」已成词，「天」不借给「下」
+        assert_eq!(t.lookup_after("今天", "下").unwrap(), vec!["午", "面"]);
+        // 借得多的先试：「中国人」而不是「国人」
+        assert_eq!(t.lookup_after("中国", "人").unwrap(), vec!["民"]);
+        // 没有前文 = 只看上屏的
+        assert_eq!(t.lookup_after("", "天").unwrap(), vec!["气"]);
+        assert!(t.lookup_after("今天", "鬻").is_none());
     }
 
     #[test]

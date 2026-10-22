@@ -285,6 +285,34 @@ fn smart_assoc_brings_next_words() {
     );
 }
 
+/// ★ 宿主报了光标前文：逐字上屏「今」「天」，下一词按「今天」接，而不是按「天」。
+#[test]
+fn next_words_borrow_from_preceding_text() {
+    let dir = data_dir();
+    if !dict_ready(&dir) || !dir.join("assoc/assoc_bigram.txt").exists() {
+        eprintln!("!!! 跳过：build_dev 词库或下一词表不存在");
+        return;
+    }
+    let c = coord("smart", "wubi86_pinyin");
+    press(&c, "gdi");
+    assert_eq!(commit_with_space(&c), "天", "前提：gdi 上屏「天」");
+    let alone = assoc_texts(&c);
+    assert!(
+        !alone.iter().any(|t| t == "晚上"),
+        "没有前文：按「天」接 {alone:?}"
+    );
+
+    let c = coord("smart", "wubi86_pinyin");
+    c.set_preceding_text("好的，今");
+    press(&c, "gdi");
+    assert_eq!(commit_with_space(&c), "天");
+    let joined = assoc_texts(&c);
+    assert!(
+        joined.iter().any(|t| t == "晚上"),
+        "按「今天」接：{joined:?}"
+    );
+}
+
 /// 真机那次的确切复现：混输方案打 `lwty` 空格上屏，看联想出不出。
 ///
 /// 用户 2026-08-16 11:51 的日志里就是这一串（buf='lwty' → 2 候选 → 空格）。

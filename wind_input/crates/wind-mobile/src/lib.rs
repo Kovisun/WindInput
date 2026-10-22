@@ -501,15 +501,33 @@ impl MobileCore {
         let probe = KeyProbe::new(vk).with_modifiers(Modifiers(modifiers));
         if !self.coord.should_handle_key(&probe) {
             // 交还宿主的键（空缓冲退格、方向键、回车…）动的是宿主里的正文，
-            // 前后两次上屏就不再相邻：下一词学习的断点
+            // 前后两次上屏就不再相邻：下一词学习的断点。光标前文也不知道变成什么了，
+            // 清空等宿主报（`set_preceding_text`）
             self.coord.note_word_boundary();
+            self.coord.set_preceding_text("");
             return KeyOutcome::passthrough();
         }
-        wind_coordinator::edit_ops::to_outcome(dispatch_key(&self.coord, vk, modifiers))
+        let outcome =
+            wind_coordinator::edit_ops::to_outcome(dispatch_key(&self.coord, vk, modifiers));
+        self.coord.note_host_edits(&outcome.ops);
+        outcome
+    }
+
+    /// 报告光标前的正文（不含组合区；末尾几十个字就够，多给的只留末尾）。
+    ///
+    /// 联想据此把逐字上屏拆开的词凑回来（五笔打「今」「天」，接「今天」的下一词）。
+    /// 宿主在**光标被挪动或正文被别人改过之后**报（Android `onUpdateSelection` 里
+    /// `getTextBeforeCursor`）、换输入框时报一次；本核心自己的上屏不必等报告，
+    /// [`Self::key_down`] / [`Self::select_candidate`] 已按下发的编辑指令跟上。
+    /// 读不到就报空串：联想退回只看刚上屏的那段。
+    pub fn set_preceding_text(&self, text: String) {
+        self.coord.set_preceding_text(&text);
     }
 
     /// 焦点获得（对应 Android `onStartInput`）。
     pub fn focus_gained(&self) {
+        // 新输入框的光标前文由宿主随后报（`set_preceding_text`），在那之前不沿用上一个框的
+        self.coord.set_preceding_text("");
         let _ = self.coord.handle_focus_gained(&FocusData {
             x: 0,
             y: 0,
@@ -531,6 +549,7 @@ impl MobileCore {
 
     /// 焦点丢失（对应 Android `onFinishInput`）。Thread 语义 = 真正离开，清输入态。
     pub fn focus_lost(&self) {
+        self.coord.set_preceding_text("");
         self.coord.handle_focus_lost(1, FocusLostReason::Thread);
     }
 
@@ -614,7 +633,9 @@ impl MobileCore {
     /// 取代此前「合成数字键」的做法——那条路把选词限死在页内 1-9，第 10 个及以后
     /// 永远点不到。
     pub fn select_candidate(&self, index: usize) -> KeyOutcome {
-        self.coord.select_candidate(index)
+        let outcome = self.coord.select_candidate(index);
+        self.coord.note_host_edits(&outcome.ops);
+        outcome
     }
 
     /// 第 `index`（**绝对下标**，与 [`Self::candidates`] 同一口径）个候选的长按菜单；
