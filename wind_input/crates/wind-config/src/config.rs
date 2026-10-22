@@ -3698,6 +3698,12 @@ pub struct MobileAssociationConfig {
     /// 桌面相反（见 [`AssociationConfig::punct`]）——实体键盘上标点一键可达。
     #[serde(default = "default_true")]
     pub punct: bool,
+    /// 移动端**关**：联想态空格出空格、收起联想，不选首个联想（豆包、微信都是这样）。
+    /// 汉字后双击空格出「。」也靠这一下真的是空格。桌面相反（[`AssociationConfig::space_commits`]
+    /// 默认开）——候选窗里看得见高亮，空格选词顺手；手机上联想挤在候选条里，空格选走它就是
+    /// 「我想打空格却上了个词」。留作开关给习惯「空格选首个联想」的人。
+    #[serde(default)]
+    pub space_commits: bool,
 }
 
 impl Default for MobileAssociationConfig {
@@ -3706,6 +3712,7 @@ impl Default for MobileAssociationConfig {
             kind: default_mobile_assoc_kind(),
             mode: default_mobile_assoc_mode(),
             punct: true,
+            space_commits: false,
         }
     }
 }

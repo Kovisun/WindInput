@@ -769,6 +769,7 @@ static REGISTRY: &[ConfigField] = &[
     f("mobile.association.kind", Enum(&["off", "word", "smart"])),
     f("mobile.association.mode", Enum(&["one_shot", "continuous"])),
     f("mobile.association.punct", Bool),
+    f("mobile.association.space_commits", Bool),
 ];
 
 /// 返回配置字段注册表。

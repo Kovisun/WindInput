@@ -56,7 +56,11 @@ impl Coordinator {
         if !s.assoc_active() {
             return Vec::new();
         }
-        s.candidates.iter().map(|c| c.text.clone()).collect()
+        // 走显示出口：智能联想的前缀词只显示补出的那一截，测的是用户看见的
+        s.candidates
+            .iter()
+            .map(|c| self.cand_display_text(&s, c))
+            .collect()
     }
 
     /// 按上文 `text` 算出的联想候选文本（不进联想态、不改状态；评测 / 诊断用）。

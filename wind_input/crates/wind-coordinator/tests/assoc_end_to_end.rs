@@ -217,6 +217,49 @@ fn selecting_assoc_commits_only_the_suffix() {
     );
 }
 
+/// ★ 智能联想里前缀延伸候选**只显示补出的那一截**（「中」→「国」，不是「中国」），
+/// 与同栏的下一词、标点同一口径；选中上屏的正是显示的那一截。
+///
+/// 对照用同一份词库的词语联想：它显示整词，去掉已在屏上的上文、按智能联想的口径筛过
+/// （补出部分不超过 `SMART_PREFIX_TAIL_MAX` 字、最多 `SMART_PREFIX_CAP` 条）后应与智能联想
+/// 逐条相同（桌面基线标点联想关、无历史，两档出的都只有前缀词）。
+#[test]
+fn smart_assoc_shows_only_the_continuation() {
+    let dir = data_dir();
+    if !dict_ready(&dir) {
+        eprintln!("!!! 跳过：build_dev 词库不存在");
+        return;
+    }
+    let word = coord("word", "wubi86_pinyin");
+    press(&word, "q");
+    let first = commit_with_space(&word);
+    let full = assoc_texts(&word);
+    assert!(!full.is_empty(), "前提：词语联想非空");
+    let expected: Vec<String> = full
+        .iter()
+        .map(|w| {
+            w.strip_prefix(&first)
+                .expect("词语联想以上文开头")
+                .to_string()
+        })
+        .filter(|t| t.chars().count() <= wind_assoc::SMART_PREFIX_TAIL_MAX)
+        .take(wind_assoc::SMART_PREFIX_CAP)
+        .collect();
+
+    let smart = coord("smart", "wubi86_pinyin");
+    press(&smart, "q");
+    assert_eq!(commit_with_space(&smart), first, "前提：两档上屏同一个字");
+    let shown = assoc_texts(&smart);
+    assert_eq!(shown, expected, "智能联想只显示补出的那一截");
+
+    let out = match smart.handle_key_event(&key_event(0x31)) {
+        KeyAction::InsertText { text, .. } => text,
+        KeyAction::CommitThenDeferComposition { commit_text, .. } => commit_text,
+        other => panic!("数字键该上屏联想候选，实得 {other:?}"),
+    };
+    assert_eq!(out, shown[0], "上屏的就是显示的那一截");
+}
+
 /// 真机那次的确切复现：混输方案打 `lwty` 空格上屏，看联想出不出。
 ///
 /// 用户 2026-08-16 11:51 的日志里就是这一串（buf='lwty' → 2 候选 → 空格）。

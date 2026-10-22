@@ -1055,7 +1055,17 @@ impl Coordinator {
     ///
     /// 简繁：先转**整串**再取尾部——OpenCC 按词转换带上下文，后段单独转与整串转可能不同，
     /// 显示就会与上屏对不上。转换改变了字数（罕见）时退回后段单独转。
+    ///
+    /// 智能联想的前缀延伸候选（「中」→「中国」）只显示补出的那一截「国」，与同栏的下一词、
+    /// 标点同一口径（见 [`wind_assoc::AssocKind::shows_continuation`]）；`text` 仍是整词，
+    /// 联想历史照旧按它记。显示的正是上屏的那一截，故直接走上屏的转换。
     pub(crate) fn cand_display_text(&self, state: &State, c: &Candidate) -> String {
+        if c.source == wind_candidate::CandidateSource::Assoc
+            && let Some(tail) = &c.commit_override
+            && self.assoc_config().kind.shows_continuation()
+        {
+            return self.maybe_convert(state, tail);
+        }
         let full = self.cand_convert_text(state, c);
         if !Self::split_back_only(state, c) {
             return full;
