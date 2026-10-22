@@ -3347,12 +3347,20 @@ impl Coordinator {
 
     /// 按当前高亮候选类型重算 `state.preedit`（混输高亮跟随）。含已转换前缀（逐步转换）拼接。
     /// 普通模式走 [`Self::effective_preedit_body`]；临拼 / mix 走各自的 overlay 形态
-    /// （[`Self::sync_overlay_preedit_to_highlight`]）。其余 overlay 各自维护 preedit，同普通模式
-    /// 原样处理（调用方不应在那些模式下调用）。
+    /// （[`Self::sync_overlay_preedit_to_highlight`]）。其余 overlay 各自维护 preedit，这里什么都不做
+    /// ——按普通模式重算会把编码栏改写成 `committed_text + input_buffer`，在那些模式下就是清空
+    /// （分类标签点击 `grid_click_tab` 不分模式调本函数）。
+    ///
+    /// 辅助码（`AuxCode`）例外，同普通模式：它叠在主路缓冲上，部分上屏后由 `update_candidates`
+    /// 按主路重建组合区（已转换前缀 + 剩余编码），辅码前缀随后才拼上去。
     pub(crate) fn sync_preedit_to_highlight(&self, state: &mut State) {
-        if matches!(state.active, Some(ModeKind::TempPinyin | ModeKind::Mix(_))) {
-            self.sync_overlay_preedit_to_highlight(state);
-            return;
+        match state.active {
+            None | Some(ModeKind::AuxCode) => {}
+            Some(ModeKind::TempPinyin | ModeKind::Mix(_)) => {
+                self.sync_overlay_preedit_to_highlight(state);
+                return;
+            }
+            Some(_) => return,
         }
         let body = self.effective_preedit_body(state).to_string();
         // 用户按 Shift+字母打出的大写只在影子串里，此处投影回显示串（拼音拆分形态含引擎插入
@@ -6735,6 +6743,9 @@ mod finalize_candidates_tests {
 
 /// 高亮候选自带的编码栏切分（`CandidateMeta::preedit_split`）。只认拼音来源：拼音引擎里并进来
 /// 的英文候选等非拼音候选，编码栏按各自的现行规则显示。
+///
+/// ⚠️ 这道来源过滤目前是保险，测不出来：非拼音候选的 `boundary` 恒 0、码也不落在所打码的
+/// 音节前缀上，引擎本就不给它们切分。留着是防日后别的来源带上这个字段。
 fn own_preedit_split(cand: Option<&Candidate>) -> Option<&str> {
     cand.filter(|c| c.source == wind_candidate::CandidateSource::Pinyin)?
         .meta

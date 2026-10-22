@@ -5981,19 +5981,24 @@ impl Coordinator {
                 // 这一条出口，这里不回传就等于让游戏聊天框里的编码停在旧形态。
                 if self.preedit_in_app_effective() {
                     let text = state.preedit.clone();
-                    // 光标按新形态换算，与按键路径同源：缓冲中间编辑时它不在串尾，分隔符增减
-                    // 会挪动它的显示位置。纯拼音下高亮移动也会变形态，按串尾给会把宿主光标甩到末尾。
-                    let caret_pos = if state.active.is_some() {
-                        self.overlay_caret(state)
-                    } else {
-                        self.composition_caret(state)
-                    };
+                    let caret_pos = self.reshaped_caret(state);
                     composed = Some(KeyAction::UpdateComposition { text, caret_pos });
                 }
             }
         }
         self.notify_ui_update(state);
         composed
+    }
+
+    /// 编码栏形态随高亮变了之后回传宿主的光标（TSF 位置），按新形态换算，与按键路径同源：
+    /// 缓冲中间编辑时光标不在串尾，分隔符增减会挪动它的显示位置，按串尾给会把宿主光标甩到末尾。
+    /// 方向键移高亮（`after_nav_changed`）与整句切换（`try_sentence_cycle_key`）共用。
+    fn reshaped_caret(&self, state: &State) -> u32 {
+        if state.active.is_some() {
+            self.overlay_caret(state)
+        } else {
+            self.composition_caret(state)
+        }
     }
 
     /// 翻页键翻不动时是否按 `keys.overflow.page_key = "commit_and_input"` 交给标点臂。
@@ -9370,7 +9375,7 @@ impl Coordinator {
         self.sync_preedit_to_highlight(state);
         let composed = (state.preedit != before && self.preedit_in_app_effective()).then(|| {
             let text = state.preedit.clone();
-            let caret_pos = text.chars().count() as u32;
+            let caret_pos = self.reshaped_caret(state);
             KeyAction::UpdateComposition { text, caret_pos }
         });
         self.notify_ui_update(state);

@@ -1559,6 +1559,37 @@ mod tests {
         assert!(st.grid_full.is_empty());
     }
 
+    /// 临英自己维护编码栏（前缀 + 临英缓冲）：点分类标签换了候选，编码栏不能被按普通模式重算成
+    /// `committed_text + input_buffer`——在 overlay 下那就是空串。临英是能展开网格的 overlay 里
+    /// 唯一不走高亮跟随的（生僻字 / 特殊模式不展开，见 `grid_eligible`）。
+    #[test]
+    fn tab_click_in_temp_english_keeps_the_preedit() {
+        let (c, _rx) = coord(true);
+        {
+            let mut st = c.state.lock().unwrap();
+            st.active = Some(crate::pipeline::ModeKind::TempEnglish);
+            st.temp_english_buffer = "shi".into();
+            st.temp_english_cursor = 3;
+            st.preedit = "shi".into();
+            st.candidates = (0..PP * 3)
+                .map(|i| {
+                    let ch = char::from_u32(0x4e00 + i as u32).unwrap();
+                    cand(&if i % 2 == 0 {
+                        ch.to_string()
+                    } else {
+                        format!("{ch}{ch}")
+                    })
+                })
+                .collect();
+            c.reset_candidate_view(&mut st);
+            assert!(c.try_expand_grid(&mut st), "前提：展开");
+        }
+        c.grid_click_tab(GridTab::Phrase);
+        let st = c.state.lock().unwrap();
+        assert_eq!(st.grid_tab, GridTab::Phrase, "前提：点标签切到了词组");
+        assert_eq!(st.preedit, "shi", "临英的编码栏不随点标签改写");
+    }
+
     /// 当前候选里一条都没有的分类不给：合成候选全是非汉字，单字 / 词组都不出现，标签栏消失，
     /// Tab 回到它原本的绑定（出厂高亮下移 ⇒ 展开态下换行），而不是被一路跳过的循环吞掉。
     #[test]
