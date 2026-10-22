@@ -5927,10 +5927,22 @@ impl Coordinator {
         // 混输高亮跟随：普通模式下高亮在五笔↔拼音候选间移动可能切换 preedit 形态
         // （原始码 ↔ 音节拆分）。重算 preedit；若形态变化且嵌入编码（app_inline），须回传
         // 组合串使宿主内联编码同步；候选窗模式仅 notify_ui_update 刷新即可。
-        // 门控：仅普通模式（active==None）且存在拆分形态——纯五笔(无拆分)/纯拼音(全拼音
-        // 候选→形态恒定)均不触发，零回归。
+        // 拼音候选各带自己的切分（`pinan` 高亮「平安」`pin'an`、高亮「皮」`pi'nan`），纯拼音
+        // 下形态同样会变。
+        // 门控：普通模式存在拆分形态或有候选自带切分（混输下首选与原始码同形时前者为空）
+        // ——纯五笔不触发，零回归；overlay 各自维护 preedit，不碰。
         let mut composed: Option<KeyAction> = None;
-        if state.active.is_none() && !state.preedit_split_body.is_empty() {
+        let follows = match state.active {
+            None => {
+                !state.preedit_split_body.is_empty()
+                    || state
+                        .candidates
+                        .iter()
+                        .any(|c| c.meta.preedit_split.is_some())
+            }
+            Some(_) => false,
+        };
+        if follows {
             let before = state.preedit.clone();
             self.sync_preedit_to_highlight(state);
             if state.preedit != before {
@@ -5938,7 +5950,9 @@ impl Coordinator {
                 // 这一条出口，这里不回传就等于让游戏聊天框里的编码停在旧形态。
                 if self.preedit_in_app_effective() {
                     let text = state.preedit.clone();
-                    let caret_pos = text.chars().count() as u32;
+                    // 光标按新形态换算，与按键路径同源：缓冲中间编辑时它不在串尾，分隔符增减
+                    // 会挪动它的显示位置。纯拼音下高亮移动也会变形态，按串尾给会把宿主光标甩到末尾。
+                    let caret_pos = self.composition_caret(state);
                     composed = Some(KeyAction::UpdateComposition { text, caret_pos });
                 }
             }

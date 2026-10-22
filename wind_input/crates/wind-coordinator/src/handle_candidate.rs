@@ -3023,7 +3023,8 @@ impl Coordinator {
 
     /// 组合区「正文」形态选择（不含已转换前缀）：对齐微软五笔——按**当前高亮候选**的类型决定。
     /// - 无拆分形态（码表/无拼音，preedit_split_body 空）→ 恒原始码（input_buffer）。
-    /// - 高亮候选为拼音来源 → 音节拆分串（preedit_split_body，如 baoan 的拼音 / saaa 的 sa'a'a）。
+    /// - 高亮候选为拼音来源 → 它自带的切分（`meta.preedit_split`），没有则用音节拆分串
+    ///   （preedit_split_body，如 baoan 的拼音 / saaa 的 sa'a'a）。
     /// - 高亮候选为码表/五笔（或短语等非拼音）→ 原始码（input_buffer，如 saaa 选「模式」时不拆）。
     fn effective_preedit_body<'a>(&self, state: &'a State) -> &'a str {
         // 码表整句：高亮到整句候选时按**编码单元**切分显示（`aawt'aawt`）。
@@ -3047,6 +3048,15 @@ impl Coordinator {
         {
             return &state.direct_aux_body;
         }
+        // 拼音候选自带的切分：`pinan` 高亮「平安」是 `pin'an`、高亮「皮」是 `pi'nan`。引擎只在
+        // 全拼、无手动分隔符时给（见 `CandidateMeta::preedit_split`），双拼 / 简拼 / 全拼降级 /
+        // 手动分隔符的形态因此不受影响；分段上屏中它同样是拆分串，与下面「恒拆分」那条不冲突。
+        // 排在「无拆分形态」守卫之前：混输下首选的切分与原始码同形时拆分串为空，别的拼音
+        // 候选仍可能有自己的切法（`xian` 高亮「西安」）。
+        let cand = state.candidates.get(self.highlighted_global_index(state));
+        if let Some(split) = own_preedit_split(cand) {
+            return split;
+        }
         if state.preedit_split_body.is_empty() {
             return &state.input_buffer;
         }
@@ -3056,8 +3066,6 @@ impl Coordinator {
         if !state.committed_text.is_empty() {
             return &state.preedit_split_body;
         }
-        let hi = self.highlighted_global_index(state);
-        let cand = state.candidates.get(hi);
         // ★ 下面三条「按高亮选形态」的分支都必须在这里判，不能由引擎就地算定：引擎每次
         // 按键只 convert 一次，而翻页 / 方向键移动高亮都发生在那之后，就地算定的形态不会
         // 跟着变。本函数由 `sync_preedit_to_highlight` 在每次高亮变化时重算，是唯一能跟住
@@ -6678,6 +6686,15 @@ mod finalize_candidates_tests {
             );
         }
     }
+}
+
+/// 高亮候选自带的编码栏切分（`CandidateMeta::preedit_split`）。只认拼音来源：拼音引擎里并进来
+/// 的英文候选等非拼音候选，编码栏按各自的现行规则显示。
+fn own_preedit_split(cand: Option<&Candidate>) -> Option<&str> {
+    cand.filter(|c| c.source == wind_candidate::CandidateSource::Pinyin)?
+        .meta
+        .preedit_split
+        .as_deref()
 }
 
 /// 组合区是否该显示**码表的编码单元切分**（整句 `aawt'aawt` / 逆切分 `hf'kn`）。
