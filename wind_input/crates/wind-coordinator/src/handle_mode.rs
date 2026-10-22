@@ -1069,6 +1069,86 @@ impl Coordinator {
         }
     }
 
+    /// 候选的模糊音提示换算到显示文字 `display`（[`Self::cand_display_text`] 的结果）上；
+    /// 没有提示、或显示文字与引擎文字字数对不上（简繁转换改了字数）⇒ `None`。`tone` 有值
+    /// （`hint_tone` 开）时提示换成带调读音。
+    ///
+    /// 逆切分次选只显示后段时，字数要与引擎的后段（`display_text`）相同才按后段扣前段——
+    /// [`crate::fuzzy_hint_text::remap_hints`] 单凭字数分不清这两种情形，在这里先判掉。
+    pub(crate) fn cand_display_hints(
+        &self,
+        state: &State,
+        c: &Candidate,
+        display: &str,
+        tone: Option<&wind_reverse::ReverseLookup>,
+    ) -> Option<Vec<wind_candidate::FuzzyHint>> {
+        if c.meta.fuzzy_hints.is_empty() {
+            return None;
+        }
+        let engine_shown = if Self::split_back_only(state, c) {
+            &c.display_text
+        } else {
+            &c.text
+        };
+        if display.chars().count() != engine_shown.chars().count() {
+            return None;
+        }
+        let toned;
+        let hints = match tone {
+            Some(reverse) => {
+                toned = crate::fuzzy_hint_text::toned_hints(&c.text, &c.meta.fuzzy_hints, reverse);
+                &toned
+            }
+            None => &c.meta.fuzzy_hints,
+        };
+        crate::fuzzy_hint_text::remap_hints(&c.text, display, hints).filter(|h| !h.is_empty())
+    }
+
+    /// `state.candidates[start..end]` 逐条的带提示正文（空 = 不标），按 `fz.hint_scope` 定哪些
+    /// 候选标；`fz.hint` 关着一律不标（引擎可能因模板引用 `${fuzzy_pinyin}` 照样算了提示）。
+    ///
+    /// `styled(c)` 是该候选在**宿主自己的显示形态**（截断、前缀标注…）下的带提示正文——桌面候选窗
+    /// 与移动端拉取窗口显示形态不同，各自传入，标哪条的规则只此一份。`first` 只标最终界面顺序里
+    /// 第一个 `styled` 非空的候选（换算或截断丢光了提示的顺延给下一条）：在排好序的完整列表上找，
+    /// 与翻页 / 窗口无关，之后的永不带提示；`all` 每个都标。
+    pub(crate) fn fuzzy_hint_texts(
+        &self,
+        state: &State,
+        fz: &wind_config::PinyinFuzzy,
+        start: usize,
+        end: usize,
+        styled: impl Fn(&Candidate) -> wind_ui_types::StyledText,
+    ) -> Vec<wind_ui_types::StyledText> {
+        if !fz.hint {
+            return vec![Default::default(); end.saturating_sub(start)];
+        }
+        let hinted = |c: &Candidate| {
+            if c.meta.fuzzy_hints.is_empty() {
+                Default::default()
+            } else {
+                styled(c)
+            }
+        };
+        let first = match fz.hint_scope {
+            wind_config::FuzzyHintScope::All => None,
+            wind_config::FuzzyHintScope::First => {
+                Some(state.candidates.iter().enumerate().find_map(|(at, c)| {
+                    let s = hinted(c);
+                    (!s.is_empty()).then_some((at, s))
+                }))
+            }
+        };
+        state.candidates[start..end]
+            .iter()
+            .enumerate()
+            .map(|(i, c)| match &first {
+                None => hinted(c),
+                Some(Some((at, s))) if *at == start + i => s.clone(),
+                Some(_) => Default::default(),
+            })
+            .collect()
+    }
+
     /// 逆切分次选的 `(被隐藏的前段, 所见的后段)`；不是只显示后段的候选 ⇒ `("", text)`。
     /// 内部文本域（未做简繁），供以词定字按所见取字。`c` 须借自 `state.candidates`。
     pub(crate) fn split_front_and_shown(&self, state: &State, c: &Candidate) -> (String, String) {

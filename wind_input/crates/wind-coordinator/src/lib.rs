@@ -30,6 +30,7 @@ pub(crate) mod english_candidates;
 pub(crate) mod english_learn;
 #[cfg(test)]
 mod freq_learn_tests;
+pub(crate) mod fuzzy_hint_text;
 pub mod handle_addword;
 pub mod handle_assoc;
 pub mod handle_aux_code;

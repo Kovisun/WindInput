@@ -23,7 +23,7 @@ use crate::text::font_resolve::{FontNameSource, ResolvedFont, resolve_font_name}
 use crate::text::script::{FontPlan, ScriptClass};
 use crate::view::{Align, Edges, Layout, LeftBar, Rect, View, ViewImage, ViewLayer};
 use wind_theme::DEFAULT_ACCENT_BAR_HEIGHT_RATIO;
-use wind_ui_types::StyledText;
+use wind_ui_types::{SpanStyle, StyledText};
 
 /// 内置默认字族：`ui.font.family` 为空时用它。
 ///
@@ -92,6 +92,9 @@ fn effective_base_font_size(user: f32, theme: i32) -> f32 {
 
 /// 注释节点没配文字色时的渲染层兜底（分段着色求色的 `body_fallback` 与之同源）。
 const COMMENT_FALLBACK: [u8; 4] = wind_theme::fallback::COMMENT_TEXT;
+
+/// 候选正文节点没配文字色时的渲染层兜底（模糊音提示求色的 `text_fallback` 与之同源）。
+const TEXT_FALLBACK: [u8; 4] = [30, 30, 30, 255];
 
 /// 候选的文字状态：选中优先于悬停（与 `eff_text` / `wind_theme::span_color` 同一口径）。
 fn text_state(sel: bool, hov: bool) -> wind_theme::TextState {
@@ -205,6 +208,48 @@ fn visible_whitespace(s: &str) -> Cow<'_, str> {
         }
     }
     Cow::Owned(out)
+}
+
+/// 带样式文字按区间边界切开的各段：`(起, 止, 该段样式)`，覆盖整串、无空段。
+fn styled_segments(src: &StyledText) -> impl Iterator<Item = (usize, usize, SpanStyle)> + '_ {
+    let mut cuts: Vec<usize> = src
+        .spans()
+        .iter()
+        .flat_map(|sp| [sp.start as usize, sp.end as usize])
+        .chain([0, src.len()])
+        .collect();
+    cuts.sort_unstable();
+    cuts.dedup();
+    (1..cuts.len()).map(move |i| (cuts[i - 1], cuts[i], src.style_at(cuts[i - 1])))
+}
+
+/// 候选正文的显示副本（测宽 / 截断 / 绘制共用）：`text_styled` 非空用它（模糊音提示
+/// 「苹(ping)果」），否则 `text`；空白控制符换成可见符号（[`visible_whitespace`]）。
+/// 替换会改字节长度，带区间时逐段各自替换，区间才对得上。
+fn cand_display(c: &CandidateItem) -> StyledText {
+    if c.text_styled.is_empty() {
+        return StyledText::from(visible_whitespace(&c.text).into_owned());
+    }
+    let src = &c.text_styled;
+    if !src.as_str().contains(['\n', '\r', '\t']) {
+        return src.clone();
+    }
+    let mut out = StyledText::new();
+    for (a, b, style) in styled_segments(src) {
+        out.push(&visible_whitespace(&src.as_str()[a..b]), &style);
+    }
+    out
+}
+
+/// 去掉全部模糊音提示段（`(ping)`），其余段样式不变。
+fn without_fuzzy_hint(src: &StyledText) -> StyledText {
+    let mut out = StyledText::new();
+    for (a, b, style) in styled_segments(src) {
+        if style.role != Some(wind_theme::FUZZY_HINT_ROLE) {
+            out.push(&src.as_str()[a..b], &style);
+        }
+    }
+    out
 }
 
 /// 本帧上屏要做什么：返回 `(推像素, 摆位)`。`prev` 为窗口当前在屏上的几何，None = 不在屏上。
@@ -846,6 +891,29 @@ impl CandidateWindow {
         let mut out: String = cells[..keep.max(1)].concat();
         out.push('…');
         out
+    }
+
+    /// 候选正文（带分段）的截断：放得下原样返回；放不下时若带模糊音提示，**整段去掉全部提示**
+    /// 再按原逻辑截正文——提示要么完整、要么不在，不会截出 `(pi…`。截断走
+    /// [`Self::truncate_candidate_text`]（结果恒为「前缀 + …」），区间随 `cut_with_mark` 一起裁。
+    fn truncate_candidate_styled(
+        &self,
+        src: &StyledText,
+        style: &TextStyle,
+        max_w: f32,
+    ) -> StyledText {
+        let shown = self.truncate_candidate_text(src.as_str(), style, max_w);
+        if shown == src.as_str() {
+            return src.clone();
+        }
+        if src
+            .spans()
+            .iter()
+            .any(|s| s.role == Some(wind_theme::FUZZY_HINT_ROLE))
+        {
+            return self.truncate_candidate_styled(&without_fuzzy_hint(src), style, max_w);
+        }
+        src.cut_with_mark(shown.len() - '…'.len_utf8(), "…")
     }
 
     /// 带样式文本**逐行**按宽截断（`\n` 分行，每行各自 [`Self::truncate_text_for_width`]），
@@ -3177,7 +3245,7 @@ impl CandidateWindow {
         }
 
         // 候选项颜色（基态）。状态色（选中/悬停）逐项经 eff_text 计算。
-        let text_color = col(v.text.text_color, [30, 30, 30, 255]);
+        let text_color = col(v.text.text_color, TEXT_FALLBACK);
         let sel_bg = patch_bg(&v.item.selected, wind_theme::fallback::SELECTED_BG);
         let hover_bg = patch_bg(&v.item.hover, wind_theme::fallback::HOVER_BG);
         let index_color = col(v.index.text_color, [66, 133, 244, 255]);
@@ -3263,6 +3331,9 @@ impl CandidateWindow {
         if reversed {
             order.reverse();
         }
+        // 每候选正文的显示副本（与 `order` 同序）：模糊音提示「苹(ping)果」按含提示的实宽参与
+        // 预算分配（网格列宽同理），截断时提示整段保留或整段去掉（`truncate_candidate_styled`）。
+        let displays: Vec<StyledText> = order.iter().map(|(_, c)| cand_display(c)).collect();
         // 每候选的「固定开销」（除文字外无条件占用的宽度）与「自然文字宽」。
         // 一律用 [`Self::measure_style`] 按各节点真实字族/字重量，与渲染同源。
         let gap_w = if list_vertical { 0.0 } else { box_gap };
@@ -3270,7 +3341,8 @@ impl CandidateWindow {
         type WidthPairs = Vec<(f32, f32)>;
         let (cand_metrics, cand_comment_w): (WidthPairs, WidthPairs) = order
             .iter()
-            .map(|(i, cand)| {
+            .zip(&displays)
+            .map(|((i, cand), display)| {
                 let is_sel = *i == self.selected;
                 let is_hover = self.hover >= 0 && self.hover as usize == *i;
                 let idx_w = if cand.no_index {
@@ -3337,7 +3409,7 @@ impl CandidateWindow {
                 let natural = self
                     .text_renderer
                     .measure(
-                        &visible_whitespace(&cand.text),
+                        display.as_str(),
                         &Self::measure_style(
                             text_fs,
                             eff_weight(&v.text, &v.item, is_sel, is_hover),
@@ -4071,8 +4143,8 @@ impl CandidateWindow {
                 edges_or(&v.text.margin, [0.0, 0.0, 0.0, 4.0])
             };
             // 文字预算来自上方的统一分配（竖排=整行独占，横排=water-filling 公平份额）。
-            let display_text = self.truncate_candidate_text(
-                &visible_whitespace(&cand.text),
+            let display_text = self.truncate_candidate_styled(
+                &displays[k],
                 &Self::measure_style(
                     text_fs,
                     eff_weight(&v.text, &v.item, is_sel, is_hover),
@@ -4096,7 +4168,7 @@ impl CandidateWindow {
                     "候选[{i}]{} 原文={} 显示={} 预算={:.1} 字族={} 字号={:.1} 字重={}",
                     if is_sel { "(选中)" } else { "" },
                     cps(&cand.text),
-                    cps(&display_text),
+                    cps(display_text.as_str()),
                     cand_text_budgets.get(k).copied().unwrap_or(min_text_w),
                     text_family.as_deref().unwrap_or("<全局>"),
                     text_fs,
@@ -4105,12 +4177,25 @@ impl CandidateWindow {
             }
             // 直立态逐格扶正（见 `upright_text`）。装饰（底色/边框/内外边距）留在**外层
             // 容器**上，整段文字仍是一个整体，不会每个字各画一个药丸。
+            // 模糊音提示段的颜色区间（无提示 = 空，叶子与改动前逐字段相同）；直立态逐格切时
+            // 每格只拿自己那几段，同注释。
+            let txt_state = text_state(is_sel, is_hover);
+            let text_runs = crate::span_runs::fuzzy_hint_runs(
+                &v.text,
+                &v.comment,
+                txt_state,
+                TEXT_FALLBACK,
+                COMMENT_FALLBACK,
+                crate::span_runs::candidate_backdrop(v, txt_state),
+                &display_text,
+            );
             let mut tleaf = self
-                .upright_text(&display_text, None, |seg, _, _| {
+                .upright_text(display_text.as_str(), None, |seg, _, off| {
                     View::leaf(seg.to_string(), txt_color)
                         .font_size(text_fs)
                         .font_weight(text_weight)
                         .font_family(text_family.clone())
+                        .color_runs(ColorRun::slice(&text_runs, off, off + seg.len()))
                 })
                 .pad(text_pad)
                 .margin(text_margin);
@@ -5230,6 +5315,7 @@ mod pixel_release_tests {
         let items = ["一", "二", "三"]
             .iter()
             .map(|t| CandidateItem {
+                text_styled: Default::default(),
                 text: t.to_string(),
                 code: String::new(),
                 label: String::new(),
@@ -5284,6 +5370,7 @@ mod grid_tests {
 
     fn cand(text: &str) -> CandidateItem {
         CandidateItem {
+            text_styled: Default::default(),
             text: text.to_string(),
             code: String::new(),
             label: String::new(),
@@ -5319,6 +5406,7 @@ mod grid_tests {
             .iter()
             .enumerate()
             .map(|(i, t)| CandidateItem {
+                text_styled: Default::default(),
                 label: (i % cols as usize + 1).to_string(),
                 ..cand(t)
             })
@@ -5535,6 +5623,7 @@ mod min_size_tests {
 
     fn cand_c(text: &str, comment: &str) -> CandidateItem {
         CandidateItem {
+            text_styled: Default::default(),
             text: text.to_string(),
             code: String::new(),
             label: String::new(),
@@ -6122,6 +6211,7 @@ mod pager_inline_tests {
 
     fn cand(text: &str) -> CandidateItem {
         CandidateItem {
+            text_styled: Default::default(),
             text: text.to_string(),
             code: String::new(),
             label: String::new(),
@@ -6662,6 +6752,7 @@ mod width_budget_tests {
 
     fn cand(text: &str) -> CandidateItem {
         CandidateItem {
+            text_styled: Default::default(),
             text: text.to_string(),
             code: String::new(),
             label: String::new(),
@@ -7132,6 +7223,7 @@ mod vertical_comment_budget_tests {
 
     fn cand(text: &str, comment: &str) -> CandidateItem {
         CandidateItem {
+            text_styled: Default::default(),
             text: text.to_string(),
             code: String::new(),
             label: String::new(),
@@ -7258,6 +7350,7 @@ mod schema_font_tests {
 
     fn cand(text: &str) -> CandidateItem {
         CandidateItem {
+            text_styled: Default::default(),
             text: text.to_string(),
             code: String::new(),
             label: String::new(),
@@ -8048,6 +8141,7 @@ mod font_precedence_tests {
         let items = ["候选", "词"]
             .iter()
             .map(|t| CandidateItem {
+                text_styled: Default::default(),
                 text: t.to_string(),
                 code: String::new(),
                 label: String::new(),
@@ -8515,6 +8609,7 @@ mod tip_hold_tests {
         let (tx, rx) = channel();
         let mut w = CandidateWindow::new(CandidateWindowConfig::default(), tx).unwrap();
         let item = |t: &str| CandidateItem {
+            text_styled: Default::default(),
             text: t.into(),
             code: String::new(),
             label: String::new(),
@@ -8964,6 +9059,7 @@ mod comment_color_tests {
 
     fn cand(c: StyledText) -> CandidateItem {
         CandidateItem {
+            text_styled: Default::default(),
             text: "你".into(),
             code: String::new(),
             label: String::new(),
@@ -9148,6 +9244,7 @@ mod comment_above_tests {
 
     fn cand_above(text: &str, above: &str, comment: &str) -> CandidateItem {
         CandidateItem {
+            text_styled: Default::default(),
             text: text.to_string(),
             code: String::new(),
             label: String::new(),

@@ -358,6 +358,12 @@ uan_uang = false
 # 韵母组（un/eng 与 ong）
 un_ong = false
 eng_ong = false
+# 显示正确拼音：模糊命中的候选正文内嵌正确全拼并着色（「苹(ping)果」）。仅模糊音 enabled 时生效。
+hint = false
+# 提示范围：first = 只标第一个带提示的候选；all = 标全部。
+hint_scope = "first"
+# 提示带声调（「苹(píng)果」）；注释变量 ${fuzzy_pinyin} 同样跟随。
+hint_tone = false
 
 # 拼音调频（衰减参数；三个数值 0 = 用词频 store 的内置默认）。
 [schema.pinyin.frequency]
@@ -1416,6 +1422,8 @@ comment_enabled = true
 #                      **全拼方案下照样有值**：布局按「活跃方案→主拼音方案→已装的首个
 #                      双拼方案」回退，一个双拼方案都没装才恒空
 #   pinyin             带声调注音 nǐ hǎo（多音字按词典消歧：「行长」得 háng zhǎng 而非 xíng cháng）
+#   fuzzy_pinyin       模糊音命中的候选的整词正确拼音 zhong guo，其余候选为空；
+#                      带调随 schema.pinyin.fuzzy.hint_tone，不依赖 hint 开关
 #   chaizi             拆字字根串，仅单字候选（需方案配了 [engine.chaizi]）
 #   chaizi_code        该字在拆字库里的编码，仅单字候选
 #   chaizi_all[:分隔符] 拆字字根不限字数，默认空格连接；如 ${chaizi_all:／}（可能很长，慎用于横排）

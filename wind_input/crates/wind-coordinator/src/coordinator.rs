@@ -2665,6 +2665,8 @@ impl Coordinator {
             &bundle.config,
             &crate::data_needs::SchemaFacts::collect(&engine_mgr),
         );
+        // 模板引用 `${fuzzy_pinyin}` 时拼音引擎要算提示（只翻开关，不重建引擎）。
+        engine_mgr.set_fuzzy_pinyin_in_templates(needs.fuzzy_pinyin);
 
         // 短语层（方案 B）：TOML 变更时同步进 store，再从 store（仅 enabled）建层。
         // 启动解析的条目缓存进结构体，作为"恢复默认"重读文件失败时的回退。
@@ -7476,19 +7478,47 @@ impl Coordinator {
         // 本页每个候选的气泡原文，右键菜单按段 / 按行复制、上屏时从这里取（见 handle_tooltip）。
         let mut tip_page: Vec<crate::handle_tooltip::TooltipPageEntry> =
             Vec::with_capacity(end.saturating_sub(start));
+        // 命令候选加前缀标注（截断后再加,保证前缀不被截掉）。
+        // 检索范围放宽补进来的候选同理加标注（`input.scope_relax.prefix`），让用户
+        // 一眼看出「这几条是超出当前检索范围补来的」，而非词库里本该有的常用字。
+        let prefix_of = |c: &Candidate| {
+            if c.is_command && !cmd_prefix.is_empty() {
+                cmd_prefix
+            } else if c.is_scope_filtered {
+                scope_prefix
+            } else {
+                ""
+            }
+        };
+        // 显示截断（超长加 …）：短语与普通候选统一按用户可配的 ui.candidate.max_chars。
+        // 短语 text 在生成层已存完整原文（仅一行化），此处仅裁显示——上屏仍用完整原文。
+        // 展开态按列对齐，一个长词会撑宽整列，另有更紧的格宽上限。
+        let truncate = |full: &str| {
+            if grid_range.is_some() {
+                cand_cfg.truncate_grid_cell(full)
+            } else {
+                cand_cfg.truncate_display(full)
+            }
+        };
+        // 模糊音提示（「苹(ping)果」）：换算到显示文字、过了截断与前缀后的带提示正文。
+        let hint_tone = rt.config.schema.pinyin.fuzzy.hint_tone.then_some(&*reverse);
+        let hint_styled = |c: &Candidate, full: &str, disp: &str| {
+            self.cand_display_hints(state, c, full, hint_tone)
+                .map(|h| crate::fuzzy_hint_text::styled_for_shown(full, disp, prefix_of(c), &h))
+                .unwrap_or_default()
+        };
+        // 哪些候选标（`first` / `all`）见 `fuzzy_hint_texts`。
+        let mut hint_texts =
+            self.fuzzy_hint_texts(state, &rt.config.schema.pinyin.fuzzy, start, end, |c| {
+                let full = self.cand_display_text(state, c);
+                hint_styled(c, &full, &truncate(&full))
+            });
         let items: Vec<CandidateItem> = state.candidates[start..end]
             .iter()
             .enumerate()
             .map(|(i, c)| {
                 let full = self.cand_display_text(state, c);
-                // 显示截断（超长加 …）：短语与普通候选统一按用户可配的 ui.candidate.max_chars。
-                // 短语 text 在生成层已存完整原文（仅一行化），此处仅裁显示——上屏仍用完整原文。
-                // 展开态按列对齐，一个长词会撑宽整列，另有更紧的格宽上限。
-                let disp = if grid_range.is_some() {
-                    cand_cfg.truncate_grid_cell(&full)
-                } else {
-                    cand_cfg.truncate_display(&full)
-                };
+                let disp = truncate(&full);
                 let tip_skipped = grid_range.is_some() && i as i32 != hover_now;
                 let rendered = if tip_skipped {
                     Default::default()
@@ -7531,17 +7561,16 @@ impl Coordinator {
                     );
                     (wind_ui_types::StyledText::new(), comment)
                 };
+                let prefix = prefix_of(c);
+                let text_styled = std::mem::take(&mut hint_texts[i]);
+                let text = if prefix.is_empty() {
+                    disp
+                } else {
+                    format!("{prefix}{disp}")
+                };
                 CandidateItem {
-                    // 命令候选加前缀标注（截断后再加,保证前缀不被截掉）。
-                    // 检索范围放宽补进来的候选同理加标注（`input.scope_relax.prefix`），让用户
-                    // 一眼看出「这几条是超出当前检索范围补来的」，而非词库里本该有的常用字。
-                    text: if c.is_command && !cmd_prefix.is_empty() {
-                        format!("{cmd_prefix}{disp}")
-                    } else if c.is_scope_filtered && !scope_prefix.is_empty() {
-                        format!("{scope_prefix}{disp}")
-                    } else {
-                        disp
-                    },
+                    text,
+                    text_styled,
                     code: c.code.clone(),
                     label: if alpha {
                         ((b'a' + i as u8) as char).to_string()
@@ -8059,6 +8088,8 @@ impl Coordinator {
     ///   改了要重启才生效（沿用原有行为，已加载的那份不重读）。
     pub(crate) fn apply_data_needs(&self) {
         let needs = self.data_needs();
+        self.engine_mgr
+            .set_fuzzy_pinyin_in_templates(needs.fuzzy_pinyin);
         self.sync_chaizi_assets_with(&needs);
         if needs.reverse_index {
             self.spawn_index_warm(&self.engine_mgr.code_source_schema(), false);
@@ -11209,7 +11240,7 @@ mod mode_comment_e2e_tests {
         let vars: Vec<&str> = wind_ui_types::TEXT_ROLES
             .iter()
             .copied()
-            .filter(|r| !matches!(*r, "title" | "literal" | "separator"))
+            .filter(|r| !wind_ui_types::STRUCTURAL_ROLES.contains(r))
             .collect();
         let whole: String = vars
             .iter()

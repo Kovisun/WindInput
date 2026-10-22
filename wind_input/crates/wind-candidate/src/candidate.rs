@@ -28,6 +28,14 @@ pub enum CandidateSource {
     Assoc,
 }
 
+/// 模糊音提示：候选**引擎文字**第 `char_index` 个字（0 起）对应的音节被读错，
+/// 正确音节为 `correct`。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FuzzyHint {
+    pub char_index: u16,
+    pub correct: String,
+}
+
 /// 候选词元数据
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CandidateMeta {
@@ -95,6 +103,14 @@ pub struct CandidateMeta {
     /// 长」代替：英文方案、混输自己的前缀候选也长那样，却不该被挪动。
     #[serde(skip)]
     pub from_prefix_complete: bool,
+    /// 模糊音提示（空 = 无提示）。仅在模糊音与 `hint` 都开启时由引擎填充。
+    #[serde(skip)]
+    pub fuzzy_hints: Vec<FuzzyHint>,
+    /// 带提示候选的整词正确音节（一字一个，`["zhong", "guo"]`）；与 `fuzzy_hints` 同时由引擎
+    /// 填，`fuzzy_hints` 空时也空。切法与提示同源（词条码无边界时按音节图现切），协调器的
+    /// `${fuzzy_pinyin}` 直接用它，不另行切分。
+    #[serde(skip)]
+    pub fuzzy_syllables: Vec<String>,
 }
 
 /// 命令栏动作

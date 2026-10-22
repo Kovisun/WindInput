@@ -4,7 +4,27 @@
 //! 允许用户输入时忽略常见发音混淆（如 z/zh, c/ch, s/sh, n/l）。
 
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::sync::LazyLock;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, LazyLock};
+
+/// 「算不算模糊音提示」的运行时开关：克隆共享同一份值，`EngineManager` 持有一份并注入各引擎，
+/// 翻转即时生效、无需重建引擎。提示只是 `convert` 收尾的后处理，不影响候选集合与排序。
+#[derive(Debug, Clone, Default)]
+pub struct HintSwitch(Arc<AtomicBool>);
+
+impl HintSwitch {
+    pub fn new(on: bool) -> Self {
+        Self(Arc::new(AtomicBool::new(on)))
+    }
+
+    pub fn get(&self) -> bool {
+        self.0.load(Ordering::Relaxed)
+    }
+
+    pub fn set(&self, on: bool) {
+        self.0.store(on, Ordering::Relaxed);
+    }
+}
 
 /// 模糊音配置
 #[derive(Debug, Clone, Default)]
@@ -24,6 +44,9 @@ pub struct FuzzyConfig {
     pub un_ong: bool,
     /// `eng ↔ ong`（`deng`↔`dong`、`zheng`↔`zhong`）。
     pub eng_ong: bool,
+    /// 算不算模糊音提示（见 [`HintSwitch`]；管理器按 `enabled && (hint || 模板引用 ${fuzzy_pinyin})`
+    /// 置值）。不影响展开/匹配，仅供上层消费。
+    pub hint: HintSwitch,
     /// 双拼**同键韵母**推出的等价音节：音节 → 同一键对下其余的合法读音
     /// （自定义布局 `q = ["iu", "ui"]` 时 `diu` → `[dui]`、`dui` → `[diu]`）。
     ///
@@ -530,6 +553,35 @@ impl FuzzyMatcher {
             }
         }
         variants
+    }
+
+    /// 单音节的**拼写级**模糊变体（只看用户模糊组，不含双拼同键）：合法变体之外，再收
+    /// 非法错音串（`ding`→`din`），但不收零声母的非法串（与 [`fuzzy_spellings`] 同口径）。
+    ///
+    /// 供「模糊音提示」判定用户敲的段是不是这个音节的模糊拼写；[`Self::fuzzy_variants`]
+    /// 对合法音节会滤掉非法产物，`din` 这类真实误打因此判不出来。
+    ///
+    /// 不读 [`FuzzyConfig::shared_key`]：调用方传整份配置即可，无需先 `without_shared_key`。
+    pub(crate) fn fuzzy_spelling_variants(input: &str, config: &FuzzyConfig) -> Vec<String> {
+        let (initial, final_) = split_initial_final(input);
+        let initials = part_options(initial, INITIAL_GROUPS, config);
+        let finals = part_options(final_, FINAL_GROUPS, config);
+        let mut out = Vec::new();
+        for (i, init) in initials.iter().enumerate() {
+            for (j, fin) in finals.iter().enumerate() {
+                if i == 0 && j == 0 {
+                    continue;
+                }
+                let variant = format!("{init}{fin}");
+                if variant == input
+                    || (init.is_empty() && !VALID_SYLLABLES.contains(variant.as_str()))
+                {
+                    continue;
+                }
+                out.push(variant);
+            }
+        }
+        out
     }
 
     /// [`Self::fuzzy_variants_scored`] 的丢弃计数版本。
