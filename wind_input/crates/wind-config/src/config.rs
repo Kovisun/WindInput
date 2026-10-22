@@ -2491,8 +2491,11 @@ impl CodetableGlobal {
             if let Some(v) = e.complete_min_length {
                 out.english_merge.complete_min_length = v;
             }
-            if let Some(v) = e.position {
-                out.english_merge.position = v;
+            if let Some(v) = e.exact_position {
+                out.english_merge.exact_position = v;
+            }
+            if let Some(v) = e.complete_position {
+                out.english_merge.complete_position = v;
             }
             if let Some(v) = e.max_count {
                 out.english_merge.max_count = v;
@@ -2873,10 +2876,14 @@ pub struct MixGlobal {
     /// 口径同 `schema.codetable.english_merge.complete_min_length`。
     #[serde(default)]
     pub english_complete_min_length: usize,
-    /// 英文候选最靠前排第几位（1 起；0 / 1 = 不额外限制）。
-    /// 口径同 `schema.codetable.english_merge.position`。
-    #[serde(default = "default_english_position")]
-    pub english_position: usize,
+    /// 完整单词英文最靠前排第几位（1 起；0 = 默认 1）。
+    /// 口径同 `schema.codetable.english_merge.exact_position`。
+    #[serde(default = "default_english_exact_position")]
+    pub english_exact_position: usize,
+    /// 前缀补全英文最靠前排第几位（1 起；0 = 默认 2）。
+    /// 口径同 `schema.codetable.english_merge.complete_position`。
+    #[serde(default = "default_english_complete_position")]
+    pub english_complete_position: usize,
     /// 中文侧有候选时英文最多几条（0 = 默认 2），截断时为它们保底留座。
     /// 口径同 `schema.codetable.english_merge.max_count`。
     #[serde(default = "default_english_max_count")]
@@ -2930,7 +2937,8 @@ impl Default for MixGlobal {
             min_pinyin_length: 0,
             min_english_length: 0,
             english_complete_min_length: 0,
-            english_position: default_english_position(),
+            english_exact_position: default_english_exact_position(),
+            english_complete_position: default_english_complete_position(),
             english_max_count: default_english_max_count(),
             block_commit_on_pinyin_word: true,
             pinyin_word_min_weight: 0,
@@ -2994,18 +3002,27 @@ pub struct CodetableEnglishMerge {
     /// 0 = 不补，只在中文侧为空时补（出厂值）。
     #[serde(default)]
     pub complete_min_length: usize,
-    /// 英文候选最靠前排第几位（1 起）。仍先让过开头连续的常用完整中文解，只会更靠后；
-    /// 0 / 1 = 不额外限制。由协调器 `place_english_after_common_exact` 应用。
-    #[serde(default = "default_english_position")]
-    pub position: usize,
+    /// 完整单词英文最靠前排第几位（1 起；0 = 默认 1）。仍先让过开头连续的完整匹配中文，
+    /// 只会更靠后。由协调器 `place_english_after_common_exact` 应用。
+    #[serde(default = "default_english_exact_position")]
+    pub exact_position: usize,
+    /// 前缀补全英文最靠前排第几位（1 起；0 = 默认 2）。同样先让过开头的完整匹配中文，且恒排在
+    /// 完整单词英文之后。
+    #[serde(default = "default_english_complete_position")]
+    pub complete_position: usize,
     /// 中文侧有候选时英文最多几条（完整单词 + 补全合计，完整单词优先；0 = 默认 2）。
     /// 中文侧为空时不受本项约束（给一页前缀补全）。
     #[serde(default = "default_english_max_count")]
     pub max_count: usize,
 }
 
-/// 英文候选最靠前位次的出厂值（码表 / 混输两份同值）。
-fn default_english_position() -> usize {
+/// 完整单词英文最靠前位次的出厂值（码表 / 混输两份同值）。
+pub fn default_english_exact_position() -> usize {
+    1
+}
+
+/// 前缀补全英文最靠前位次的出厂值（码表 / 混输两份同值）。
+pub fn default_english_complete_position() -> usize {
     2
 }
 
@@ -3022,7 +3039,8 @@ impl Default for CodetableEnglishMerge {
             // 见字段文档：这一项与 `schema.mix.auto_commit_block_on_english` 默认值相反是刻意的。
             block_commit: true,
             complete_min_length: 0,
-            position: default_english_position(),
+            exact_position: default_english_exact_position(),
+            complete_position: default_english_complete_position(),
             max_count: default_english_max_count(),
         }
     }

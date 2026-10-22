@@ -239,7 +239,8 @@ static REGISTRY: &[ConfigField] = &[
     f("schema.codetable.english_merge.min_length", Int),
     f("schema.codetable.english_merge.block_commit", Bool),
     f("schema.codetable.english_merge.complete_min_length", Int),
-    f("schema.codetable.english_merge.position", Int),
+    f("schema.codetable.english_merge.exact_position", Int),
+    f("schema.codetable.english_merge.complete_position", Int),
     f("schema.codetable.english_merge.max_count", Int),
     // 带参数的值域（`mix:<id>` / `special:<id>`）故用 Str 而非 Enum；解析与校验见 `BoundAction`。
     f("schema.codetable.z_key_action", Str),
@@ -383,7 +384,8 @@ static REGISTRY: &[ConfigField] = &[
     f("schema.mix.min_pinyin_length", Int),
     f("schema.mix.min_english_length", Int),
     f("schema.mix.english_complete_min_length", Int),
-    f("schema.mix.english_position", Int),
+    f("schema.mix.english_exact_position", Int),
+    f("schema.mix.english_complete_position", Int),
     f("schema.mix.english_max_count", Int),
     f("schema.mix.block_commit_on_pinyin_word", Bool),
     f("schema.mix.pinyin_word_min_weight", Int),
@@ -1034,8 +1036,12 @@ pub fn schema_overridden_keys(schema: &crate::schema::Schema) -> Vec<&'static st
             em.complete_min_length.is_some(),
         ),
         (
-            "schema.codetable.english_merge.position",
-            em.position.is_some(),
+            "schema.codetable.english_merge.exact_position",
+            em.exact_position.is_some(),
+        ),
+        (
+            "schema.codetable.english_merge.complete_position",
+            em.complete_position.is_some(),
         ),
         (
             "schema.codetable.english_merge.max_count",

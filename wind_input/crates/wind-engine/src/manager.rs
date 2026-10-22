@@ -4839,29 +4839,37 @@ impl EngineManager {
             && crate::english_merge::has_any(eng.as_ref(), input, cfg.veto_min_length())
     }
 
-    /// 活跃方案里英文候选最靠前排第几位（1 起；1 = 不额外限制），供协调器
-    /// `place_english_after_common_exact` 定位。
+    /// 活跃方案里英文候选的位次下限 `(完整单词, 前缀补全)`（1 起），供协调器
+    /// `place_english_after_common_exact` 定位。配置 0 回退各自出厂值（1 / 2）。
     ///
-    /// 码表取方案级折叠后的 `english_merge.position`，混输取 `schema.mix.english_position`；
-    /// 拼音与英文方案没有这一项，恒 1（行为不变）。
-    pub fn active_english_position(&self) -> usize {
+    /// 码表取方案级折叠后的 `english_merge.{exact,complete}_position`，混输取
+    /// `schema.mix.english_{exact,complete}_position`；拼音与英文方案没有这两项，恒 `(1, 1)`
+    /// （= 不额外限制，行为不变）。
+    pub fn active_english_positions(&self) -> (usize, usize) {
         let Some(engine) = self.active_engine() else {
-            return 1;
+            return (1, 1);
         };
-        match engine.engine_type() {
+        let (exact, complete) = match engine.engine_type() {
             EngineType::CodeTable => {
-                self.codetable_settings_of(&self.active_schema_id())
-                    .english_merge
-                    .position
+                let e = self
+                    .codetable_settings_of(&self.active_schema_id())
+                    .english_merge;
+                (e.exact_position, e.complete_position)
             }
             EngineType::Mixed => {
-                self.mix
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .english_position
+                let m = self.mix.lock().unwrap_or_else(|e| e.into_inner());
+                (m.english_exact_position, m.english_complete_position)
             }
-            EngineType::Pinyin | EngineType::English => 1,
-        }
+            EngineType::Pinyin | EngineType::English => return (1, 1),
+        };
+        let or = |v: usize, d: usize| if v > 0 { v } else { d };
+        (
+            or(exact, wind_config::config::default_english_exact_position()),
+            or(
+                complete,
+                wind_config::config::default_english_complete_position(),
+            ),
+        )
     }
 
     /// 当前活跃引擎类型（必要时懒加载）

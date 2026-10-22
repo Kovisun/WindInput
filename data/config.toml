@@ -134,8 +134,10 @@ block_commit = true
 # 中文侧有候选时，输入达到几码起也给英文前缀补全（如设 4：五笔打 gith 也出 github）。
 # 0 = 不补，只在中文侧没有候选时补全。
 complete_min_length = 0
-# 英文候选最靠前排第几位（1 起）。仍先让过开头连续的常用完整中文解，只会更靠后；1 = 不额外限制。
-position = 2
+# 完整单词英文最靠前排第几位（1 起；0 = 默认 1）。仍先让过开头连续的完整匹配中文，只会更靠后。
+exact_position = 1
+# 前缀补全英文最靠前排第几位（1 起；0 = 默认 2）。同样先让过开头的完整匹配中文，且恒在完整单词之后。
+complete_position = 2
 # 中文侧有候选时英文最多几条（完整单词优先，再补前缀补全）；中文侧没有候选时给一页补全。
 max_count = 2
 
@@ -563,11 +565,14 @@ auto_commit_block_on_english = false
 min_pinyin_length = 2
 # 英文最小触发长度（2 字符以内不查英文；0=回退 3）。
 min_english_length = 3
-# 以下三项口径同 [schema.codetable.english_merge] 的 complete_min_length / position / max_count。
+# 以下四项口径同 [schema.codetable.english_merge] 的 complete_min_length / exact_position /
+# complete_position / max_count。
 # 中文侧有候选时，输入达到几码起也给英文前缀补全（0 = 不补，只在中文侧没有候选时补全）。
 english_complete_min_length = 0
-# 英文候选最靠前排第几位（1 起；仍先让过开头连续的常用完整中文解）。
-english_position = 2
+# 完整单词英文最靠前排第几位（1 起；0 = 默认 1；仍先让过开头连续的完整匹配中文）。
+english_exact_position = 1
+# 前缀补全英文最靠前排第几位（1 起；0 = 默认 2；恒在完整单词之后）。
+english_complete_position = 2
 # 中文侧有候选时英文最多几条；截断时为这几条保底留座。
 english_max_count = 2
 # 拼音歧义拦截（词强度）：整串是强拼音词时否决五笔自动/顶码上屏，让拼音赢

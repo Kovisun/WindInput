@@ -528,7 +528,9 @@ pub struct CodeTableEnglishMergeSpec {
     #[serde(default)]
     pub complete_min_length: Option<usize>,
     #[serde(default)]
-    pub position: Option<usize>,
+    pub exact_position: Option<usize>,
+    #[serde(default)]
+    pub complete_position: Option<usize>,
     #[serde(default)]
     pub max_count: Option<usize>,
 }
