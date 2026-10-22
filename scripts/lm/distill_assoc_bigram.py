@@ -17,11 +17,15 @@
 
     上文<TAB>后继1 后继2 …
 
-- 按上文的 UTF-8 字节序升序（读端二分查找）；后继按分值降序。
+- 按上文的 UTF-8 字节序升序（读端二分查找）；后继按概率降序。
+- 后继有两类，放在同一把尺子上排（见 `_mix`）：模型里的「下一词」，与词库里以上文开头的
+  更长的词补出的那截（「我」→「们」）。逐字上屏时后者才是用户要的；两类都只显示、上屏
+  补出的那截，读端不必区分。
 - `$` 是模型里的句末记号，原样保留在它的名次上：读端据此决定标点要不要提前。
 """
 import argparse
 import hashlib
+import math
 import mmap
 import os
 import struct
@@ -30,6 +34,17 @@ from multiprocessing import Pool
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from gram import encode  # noqa: E402
+
+# 网页界面上的套话词：bgw / 万象都是网页语料，「添加到播放列表」「开发和发布」「在弹出窗口」
+# 这类按钮文字重复成千上万次，把「到 → 播放」「和 → 发布」顶到了常用字后继的前几名。
+# 只拦「下一词」，不拦词内接续（「小游戏」是词库里的词，照出）。
+WEB_BOILERPLATE = frozenset(
+    "播放 播放列表 发布 弹出 弹出窗口 查看 评论 下载 登录 注册 点击 浏览 收藏 分享 转发 "
+    "回复 提示 酒店 游戏 网 首页 页面 链接 帖子 楼主 版权 隐私 上传 订阅".split()
+)
+
+# .gram 分值 = ln(频次) × 10000
+SCORE_SCALE = 10000.0
 
 # .gram 键最多 8 个字（gram_encoding.h::kMaxEncodedUnicode），上文 + 后继合起来不能超过
 MAX_KEY_CHARS = 8
@@ -125,12 +140,14 @@ def _straddles(ctx, s):
 
 
 def _successors(ctx):
-    """上文 ctx 的后继：(词, 分值) 按分值降序。后继须是词库里的词（或单字），全汉字。"""
+    """上文 ctx 的后继：(词, 分值) 按分值降序，后继须是词库里的词（或单字），全汉字；
+    以及 ctx 下**全部**后继（不论在不在词库）的总量 ln Σ e^分值——归一化成条件概率用。"""
     node = _walk(encode(ctx))
     if node is None:
-        return ctx, []
+        return ctx, [], None
     limit = min(_max_succ_chars, MAX_KEY_CHARS - len(ctx))
     found = []
+    total = None
     # 显式栈 DFS；深度按**字**算（CJK 一字两字节，$ 一字节）
     stack = [(node, b"")]
     while stack:
@@ -138,6 +155,7 @@ def _successors(ctx):
         if acc:
             v = _leaf(idx)
             if v is not None:
+                total = _logaddexp(total, v / SCORE_SCALE)
                 s = _decode(acc)
                 if s == "$" or (s and _is_han(s) and s in _vocab and not _straddles(ctx, s)):
                     found.append((s, v))
@@ -146,7 +164,59 @@ def _successors(ctx):
         for b, c in _children(idx):
             stack.append((c, acc + bytes([b])))
     found.sort(key=lambda x: -x[1])
-    return ctx, found
+    return ctx, found, total
+
+
+def _logaddexp(a, b):
+    if a is None:
+        return b
+    hi, lo = max(a, b), min(a, b)
+    return hi + math.log1p(math.exp(lo - hi))
+
+
+def _mix(ctx, found, total, han, words_sorted, max_succ_chars):
+    """把「下一词」与「词内接续」放到同一把尺子上，返回按概率降序的 [(显示, 概率)]。
+
+    打完 ctx 后用户接着要的东西有两类：
+    - **词内接续**：ctx 只是一个更长的词的开头（五笔逐字打「我」「们」）。按词库：
+      权重(ctx+尾) / D，D = 权重(ctx) + Σ 权重(以 ctx 开头的更长的词)；
+    - **下一词**：ctx 是个完整的词，后面接别的词。按模型：权重(ctx) / D × P(后继 | ctx)，
+      P 在 ctx 的全部后继（含句末）上归一。
+
+    两类显示都是「补出的那截」，同一截两处都有就相加。接续尾巴最多 `max_succ_chars`
+    之内的 2 字（与读端 `SMART_PREFIX_TAIL_MAX` 一致：更长的读端也不出）。
+    """
+    import bisect
+    w_ctx = han.get(ctx, 0)
+    i = bisect.bisect_left(words_sorted, ctx)
+    longer = []
+    while i < len(words_sorted) and words_sorted[i].startswith(ctx):
+        w = words_sorted[i]
+        if len(w) > len(ctx):
+            longer.append(w)
+        i += 1
+    d = w_ctx + sum(han[w] for w in longer)
+    if d <= 0:
+        return [(s, 0.0) for s, _ in found]
+    probs = {}
+    for w in longer:
+        rest = w[len(ctx):]
+        if len(rest) <= min(2, max_succ_chars) and han[w] > 0:
+            probs[rest] = probs.get(rest, 0.0) + han[w] / d
+    if total is not None and w_ctx > 0:
+        for s, v in found:
+            if s in WEB_BOILERPLATE:
+                continue
+            p = w_ctx / d * math.exp(v / SCORE_SCALE - total)
+            probs[s] = probs.get(s, 0.0) + p
+    ranked = sorted(probs.items(), key=lambda x: -x[1])
+    # 「们」排在前面时「们的」只是它的延长，同栏里两个都出是重复
+    out = []
+    for s, p in ranked:
+        if s != "$" and any(s.startswith(t) for t, _ in out if t != "$"):
+            continue
+        out.append((s, p))
+    return out
 
 
 def _read_dict(path):
@@ -195,24 +265,28 @@ def main():
     with open(a.gram, "rb") as f:
         digest = hashlib.sha256(f.read()).hexdigest()
     rows = []
+    words_sorted = sorted(han)
     with Pool(a.jobs, initializer=_init, initargs=(a.gram, set(han), a.max_succ_chars)) as pool:
-        for i, (ctx, succ) in enumerate(pool.imap_unordered(_successors, contexts, chunksize=1)):
-            if succ:
-                rows.append((ctx, [s for s, _ in succ[: a.top]]))
+        for i, (ctx, succ, total) in enumerate(
+            pool.imap_unordered(_successors, contexts, chunksize=1)
+        ):
+            mixed = _mix(ctx, succ, total, han, words_sorted, a.max_succ_chars)
+            if mixed:
+                rows.append((ctx, [s for s, _ in mixed[: a.top]]))
             if i % 5000 == 0:
                 print(f"  {i}/{len(contexts)}", file=sys.stderr)
     rows.sort(key=lambda r: r[0].encode("utf-8"))
 
     os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
     with open(a.out, "w", encoding="utf-8", newline="\n") as f:
-        f.write("# 联想「下一词」表：上文<TAB>后继（按模型分值降序，空格分隔；$ = 句末）\n")
+        f.write("# 联想「下一词」表：上文<TAB>后继（按概率降序，空格分隔；$ = 句末）\n")
         f.write("# 由 scripts/lm/distill_assoc_bigram.py 生成，勿手改\n")
         if a.source:
             f.write(f"# 模型来源：{a.source}\n")
         f.write(f"# 模型 sha256：{digest}\n")
         f.write(
             f"# 参数：上文 {a.contexts} 个（≤{a.max_context_chars} 字），每个留 {a.top} 个后继"
-            f"（≤{a.max_succ_chars} 字），后继须在词库内\n"
+            f"（≤{a.max_succ_chars} 字），后继须在词库内；混入词库里的词内接续，按概率排\n"
         )
         for ctx, succ in rows:
             f.write(f"{ctx}\t{' '.join(succ)}\n")

@@ -264,7 +264,7 @@ fn smart_assoc_shows_only_the_continuation() {
 }
 
 /// ★ 智能联想出「下一词」（离线蒸馏表 `data/assoc/assoc_bigram.txt`）：上屏「我」后首位是
-/// 一个词（表里排第一的后继），句末记号换成的「，」排第二，名额用满。
+/// 词内接续「们」（逐字打字最常要的），紧跟着是下一词「的」，名额用满。
 #[test]
 fn smart_assoc_brings_next_words() {
     let dir = data_dir();
@@ -277,8 +277,11 @@ fn smart_assoc_brings_next_words() {
     assert_eq!(commit_with_space(&c), "我", "前提：q 上屏「我」");
     let shown = assoc_texts(&c);
     assert_eq!(shown.len(), 9, "名额用满：{shown:?}");
-    assert_ne!(shown[0], "，", "首位留给词：{shown:?}");
-    assert_eq!(shown[1], "，", "句末记号换成逗号排第二：{shown:?}");
+    assert_eq!(
+        &shown[..2],
+        ["们", "的"],
+        "接续与下一词按概率混排：{shown:?}"
+    );
     assert!(
         !shown.iter().any(|t| t.starts_with('我')),
         "智能联想不显示带上文的整词：{shown:?}"
@@ -298,7 +301,7 @@ fn next_words_borrow_from_preceding_text() {
     assert_eq!(commit_with_space(&c), "天", "前提：gdi 上屏「天」");
     let alone = assoc_texts(&c);
     assert!(
-        !alone.iter().any(|t| t == "晚上"),
+        !alone.iter().any(|t| t == "早上"),
         "没有前文：按「天」接 {alone:?}"
     );
 
@@ -308,7 +311,7 @@ fn next_words_borrow_from_preceding_text() {
     assert_eq!(commit_with_space(&c), "天");
     let joined = assoc_texts(&c);
     assert!(
-        joined.iter().any(|t| t == "晚上"),
+        joined.iter().any(|t| t == "早上"),
         "按「今天」接：{joined:?}"
     );
 }
@@ -1217,4 +1220,60 @@ fn assoc_yields_custom_letter_select_key() {
         host_visible(&idle.handle_key_event(&key_event(0x5A))),
         "该与联想窗不在时按 `z` 一致"
     );
+}
+
+/// 常用单字上屏后的联想（手机配置：智能、持续、带标点）。测量工具，手动跑看输出：
+///
+/// ```text
+/// cargo test -p wind-coordinator --test assoc_end_to_end common_char_dump -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore = "测量工具：打印常用字的联想，手动跑"]
+fn common_char_dump() {
+    let dir = data_dir();
+    if !dict_ready(&dir) {
+        return;
+    }
+    let c = coord_tweak("smart", "pinyin", |cfg| {
+        cfg.input.association.mode = "continuous".to_string();
+        cfg.input.association.punct = true;
+    });
+    for (code, want) in [
+        ("wo", "我"),
+        ("de", "的"),
+        ("da", "大"),
+        ("shi", "是"),
+        ("ni", "你"),
+        ("ta", "他"),
+        ("zai", "在"),
+        ("le", "了"),
+        ("bu", "不"),
+        ("you", "有"),
+        ("yi", "一"),
+        ("zhe", "这"),
+        ("hao", "好"),
+        ("jiu", "就"),
+        ("ye", "也"),
+        ("dou", "都"),
+        ("hen", "很"),
+        ("yao", "要"),
+        ("hui", "会"),
+        ("shuo", "说"),
+        ("ren", "人"),
+        ("dao", "到"),
+        ("shang", "上"),
+        ("ge", "个"),
+        ("zhong", "中"),
+        ("lai", "来"),
+        ("xiao", "小"),
+        ("men", "们"),
+        ("na", "那"),
+        ("he", "和"),
+    ] {
+        c.handle_key_event(&key_event(0x1B));
+        press(&c, code);
+        let out = commit_with_space(&c);
+        let mark = if out == want { "" } else { " ⚠" };
+        println!("{out}{mark}\t{}", assoc_texts(&c).join(" "));
+    }
 }

@@ -442,9 +442,18 @@ pub fn associate(
             } else {
                 &h.text
             };
-            if shown.is_empty() || !seen.insert(shown.to_string()) {
+            if shown.is_empty() || seen.contains(shown) {
                 continue;
             }
+            // 只显示补出的那截时，前缀词常是前面某条的延长：「我」后已有「们」（下一词表），
+            // 前缀词「我们的」再补「们的」就是重复的一格
+            if cfg.kind.shows_continuation()
+                && src == AssocSource::Prefix
+                && seen.iter().any(|s| shown.starts_with(s.as_str()))
+            {
+                continue;
+            }
+            seen.insert(shown.to_string());
             out.push(h);
             taken += 1;
         }
@@ -926,7 +935,7 @@ mod tests {
     }
 
     /// ★ 智能联想按上屏的那一截去重：前缀延伸「中国」（补「国」）与下一词「国」只留先到的，
-    /// 名额顺延给后面的；词语联想仍按整词去重（两条都留）。
+    /// 名额顺延给后面的；补出的那截延长了已有一格的前缀词也不出。词语联想仍按整词去重（都留）。
     #[test]
     fn smart_dedups_by_continuation() {
         struct WithCommit(AssocSource, Vec<(&'static str, Option<&'static str>)>);
@@ -947,7 +956,11 @@ mod tests {
         let history = WithCommit(AssocSource::History, vec![("国", None)]);
         let prefix = WithCommit(
             AssocSource::Prefix,
-            vec![("中国", Some("国")), ("中间", Some("间"))],
+            vec![
+                ("中国", Some("国")),
+                ("中国人", Some("国人")),
+                ("中间", Some("间")),
+            ],
         );
         let providers: [(AssocSource, &dyn AssocProvider); 2] = [
             (AssocSource::History, &history),
@@ -973,11 +986,11 @@ mod tests {
         assert_eq!(
             run(AssocKind::Smart),
             ["国", "中间"],
-            "「中国」显示同为「国」，去掉"
+            "「中国」显示同为「国」，去掉；「中国人」补「国人」是「国」的延长，也去掉"
         );
         assert_eq!(
             run(AssocKind::Word),
-            ["国", "中国", "中间"],
+            ["国", "中国", "中国人", "中间"],
             "词语联想按整词，都留"
         );
     }
