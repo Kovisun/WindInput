@@ -25,6 +25,11 @@ fn has_pinyin() -> bool {
 }
 
 fn candidates_for(input: &str, apply: impl FnOnce(&mut Config)) -> Vec<String> {
+    typed(input, apply).0
+}
+
+/// 敲完 `input` 后的（界面候选, 编码栏）。
+fn typed(input: &str, apply: impl FnOnce(&mut Config)) -> (Vec<String>, String) {
     let mut cfg = Config::default();
     cfg.schema.available = vec!["pinyin".into()];
     cfg.schema.active = "pinyin".into();
@@ -42,7 +47,7 @@ fn candidates_for(input: &str, apply: impl FnOnce(&mut Config)) -> Vec<String> {
             prev_char: 0,
         });
     }
-    coord.debug_all_candidate_texts()
+    (coord.debug_all_candidate_texts(), coord.debug_preedit())
 }
 
 /// 开关打开时 `input` 的界面候选前 `top` 项含 `want`，模糊音关着时全列表不含。
@@ -153,4 +158,88 @@ fn an_ang_xian_word_candidates_do_not_borrow_xiang() {
         !head.iter().any(|t| t == "想"),
         "只开 an↔ang 时 xian 前 30 项不该有「想」，实际: {head:?}"
     );
+}
+
+/// 编码栏跟随首选：模糊命中的首选按它实际走的那条**所打码**切分显示，而不是 `maximum_match`。
+/// 首选「平安」走的是 `pin|an → ping|an`，编码栏显示 `pi'nan` 就与候选自相矛盾。
+fn assert_fuzzy_preedit(input: &str, want_top: &str, want_preedit: &str, on: fn(&mut Config)) {
+    let (cands, preedit) = typed(input, |cfg| {
+        cfg.schema.pinyin.fuzzy.enabled = true;
+        on(cfg);
+    });
+    assert_eq!(
+        cands.first().map(String::as_str),
+        Some(want_top),
+        "前提：开模糊音后 {input} 首选应是「{want_top}」，实际: {:?}",
+        &cands[..cands.len().min(5)]
+    );
+    assert_eq!(
+        preedit, want_preedit,
+        "{input} 首选「{want_top}」时的编码栏"
+    );
+}
+
+#[test]
+fn in_ing_pinan_preedit_follows_pingan() {
+    if !has_pinyin() {
+        return;
+    }
+    assert_fuzzy_preedit("pinan", "平安", "pin'an", |cfg| {
+        cfg.schema.pinyin.fuzzy.in_ing = true
+    });
+}
+
+/// 另一对切分：`di|nan`（堤南）与 `din|an → ding|an`（定安）。
+#[test]
+fn in_ing_dinan_preedit_follows_dingan() {
+    if !has_pinyin() {
+        return;
+    }
+    assert_fuzzy_preedit("dinan", "定安", "din'an", |cfg| {
+        cfg.schema.pinyin.fuzzy.in_ing = true
+    });
+}
+
+/// 韵母组换成 an↔ang：`cha|nan` 与 `chan|an → chang|an`（长安）。
+#[test]
+fn an_ang_chanan_preedit_follows_changan() {
+    if !has_pinyin() {
+        return;
+    }
+    assert_fuzzy_preedit("chanan", "长安", "chan'an", |cfg| {
+        cfg.schema.pinyin.fuzzy.an_ang = true
+    });
+}
+
+/// 三音节整词同口径（`chan|an|jie → chang|an|jie` 长安街）。
+#[test]
+fn an_ang_chananjie_preedit_follows_changanjie() {
+    if !has_pinyin() {
+        return;
+    }
+    assert_fuzzy_preedit("chananjie", "长安街", "chan'an'jie", |cfg| {
+        cfg.schema.pinyin.fuzzy.an_ang = true
+    });
+}
+
+/// 首选是精确词时照旧跟随它：`jinan` 首选「济南」（`ji|nan`），静安排在后面。
+#[test]
+fn in_ing_jinan_preedit_follows_exact_top() {
+    if !has_pinyin() {
+        return;
+    }
+    assert_fuzzy_preedit("jinan", "济南", "ji'nan", |cfg| {
+        cfg.schema.pinyin.fuzzy.in_ing = true
+    });
+}
+
+/// 对照：模糊音关着时 `dinan` 首选「堤南」，编码栏仍是 `di'nan`。
+#[test]
+fn dinan_preedit_unchanged_without_fuzzy() {
+    if !has_pinyin() {
+        return;
+    }
+    let (cands, preedit) = typed("dinan", |_| {});
+    assert_eq!(cands.first().map(String::as_str), Some("堤南"));
+    assert_eq!(preedit, "di'nan");
 }
