@@ -165,8 +165,16 @@ pub(crate) fn place_english_after_common_exact(
     // 「精确英文 → 短语 → 前缀英文」（审查查出）。
     let has_completion = english.iter().any(|c| c.meta.from_prefix_complete);
     let pos_prefix = if has_completion {
-        let yielded = lead
-            + rest[lead..]
+        // 位次是**最终列表**里的：补全前面还会插进完整单词那几条，下限要扣掉它们。
+        let n_exact = english
+            .iter()
+            .filter(|c| !c.meta.from_prefix_complete)
+            .count();
+        // 起点：有完整单词时从它们落位处（`pos`）起数，补全恒在其后；没有时完整单词的下限
+        // 与补全无关，只从开头完整匹配段之后（`lead`）起数。
+        let start = if n_exact > 0 { pos } else { lead };
+        let yielded = start
+            + rest[start..]
                 .iter()
                 .take_while(|c| {
                     c.source == CandidateSource::Pinyin
@@ -174,14 +182,7 @@ pub(crate) fn place_english_after_common_exact(
                         && wind_candidate::effective_consumed(c, input.len()) >= input.len()
                 })
                 .count();
-        // 位次是**最终列表**里的：补全前面还会插进完整单词那几条，下限要扣掉它们。
-        let n_exact = english
-            .iter()
-            .filter(|c| !c.meta.from_prefix_complete)
-            .count();
-        yielded
-            .max(floor(positions.1.saturating_sub(n_exact)))
-            .max(pos)
+        yielded.max(floor(positions.1.saturating_sub(n_exact)))
     } else {
         pos
     };
@@ -7379,12 +7380,6 @@ mod english_placement_tests {
         assert_eq!(texts(&v), vec!["和理论哦", "hello", "和", "喝"]);
     }
 
-    fn en_completion(text: &str, code: &str) -> Candidate {
-        let mut c = en(text, code);
-        c.meta.from_prefix_complete = true;
-        c
-    }
-
     /// 回归：五笔打 `git` / `vim` / `npm`（中文侧只有前缀补全、没有完整匹配）时，出厂
     /// `(exact 1, complete 2)` 下完整单词英文排第 1。
     #[test]
@@ -7407,7 +7402,7 @@ mod english_placement_tests {
                 zh("喝", "he", true, 2),
                 zh("贺", "he", true, 2),
                 en("hell", "hell"),
-                en_completion("hello", "hello"),
+                completion("hello", "hello"),
             ]
         };
         // 出厂：完整单词第 1、补全第 2。
@@ -7446,6 +7441,65 @@ mod english_placement_tests {
         let mut v = vec![en("GitHub", "github")];
         place_english_after_common_exact(&mut v, "github", (2, 2));
         assert_eq!(texts(&v), vec!["GitHub"]);
+    }
+
+    /// 没有完整单词英文时，补全只看自己的下限：完整单词那项（5）不得把它压后。
+    #[test]
+    fn completion_alone_ignores_exact_floor() {
+        let mut v = vec![
+            zh("和", "he", true, 2),
+            zh("喝", "he", true, 2),
+            zh("贺", "he", true, 2),
+            completion("hello", "hello"),
+        ];
+        place_english_after_common_exact(&mut v, "hell", (5, 2));
+        assert_eq!(texts(&v), vec!["和", "hello", "喝", "贺"]);
+    }
+
+    /// 完整单词被下限压后时，补全从完整单词落位处起让拼音真词，不得插到真词前面。
+    #[test]
+    fn completion_yields_to_whole_words_after_floored_exact() {
+        let mut v = vec![
+            zh("小", "xiao", false, 4),
+            zh("小米", "xiaomi", false, 5),
+            zh("消灭", "xiaomie", false, 5),
+            zh("晓", "xiao", false, 4),
+            en("xiaom", "xiaom"),
+            completion("Xiaomi", "xiaomi"),
+        ];
+        place_english_after_common_exact(&mut v, "xiaom", (2, 1));
+        assert_eq!(
+            texts(&v),
+            vec!["小", "xiaom", "小米", "消灭", "Xiaomi", "晓"]
+        );
+    }
+
+    /// 开头有完整匹配段时：完整单词紧随其后，补全再跟完整单词。
+    #[test]
+    fn exact_then_completion_after_lead() {
+        let mut v = vec![
+            zh("很", "hen", true, 3),
+            zh("恨", "hen", true, 3),
+            zh("和", "he", true, 2),
+            en("hen", "hen"),
+            completion("henry", "henry"),
+        ];
+        place_english_after_common_exact(&mut v, "hen", (1, 2));
+        assert_eq!(texts(&v), vec!["很", "恨", "hen", "henry", "和"]);
+    }
+
+    /// 完整单词 ≥2 条时补全下限扣成 0：补全直接跟在完整单词之后，不再往后压。
+    #[test]
+    fn completion_floor_counts_exact_words() {
+        let mut v = vec![
+            zh("和", "he", true, 2),
+            zh("喝", "he", true, 2),
+            en("hell", "hell"),
+            en("Hell", "hell"),
+            completion("hello", "hello"),
+        ];
+        place_english_after_common_exact(&mut v, "hell", (1, 2));
+        assert_eq!(texts(&v), vec!["hell", "Hell", "hello", "和", "喝"]);
     }
 
     /// 真机场景三：`github`。中文侧无候选 ⇒ 英文自然居首。
