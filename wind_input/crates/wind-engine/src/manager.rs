@@ -4839,6 +4839,31 @@ impl EngineManager {
             && crate::english_merge::has_any(eng.as_ref(), input, cfg.veto_min_length())
     }
 
+    /// 活跃方案里英文候选最靠前排第几位（1 起；1 = 不额外限制），供协调器
+    /// `place_english_after_common_exact` 定位。
+    ///
+    /// 码表取方案级折叠后的 `english_merge.position`，混输取 `schema.mix.english_position`；
+    /// 拼音与英文方案没有这一项，恒 1（行为不变）。
+    pub fn active_english_position(&self) -> usize {
+        let Some(engine) = self.active_engine() else {
+            return 1;
+        };
+        match engine.engine_type() {
+            EngineType::CodeTable => {
+                self.codetable_settings_of(&self.active_schema_id())
+                    .english_merge
+                    .position
+            }
+            EngineType::Mixed => {
+                self.mix
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .english_position
+            }
+            EngineType::Pinyin | EngineType::English => 1,
+        }
+    }
+
     /// 当前活跃引擎类型（必要时懒加载）
     pub fn current_engine_type(&self) -> Option<EngineType> {
         self.active_engine().map(|e| e.engine_type())
