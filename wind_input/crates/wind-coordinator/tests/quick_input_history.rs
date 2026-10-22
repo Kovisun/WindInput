@@ -665,6 +665,27 @@ fn numeric_lens_history_only_does_not_eat_letters() {
     assert_eq!(committed(&act).as_deref(), Some(".xlsx"));
 }
 
+/// 同上，数字在前：`.7` 只召回历史 `.7z`，接着的 `z` 照样字面入缓冲。
+#[test]
+fn numeric_lens_history_only_after_digit_does_not_eat_letters() {
+    skip_without_data!();
+    let (coord, store) = open("dot_7z", true);
+    store
+        .record_completion(CompletionKind::QuickHistory, ".7z")
+        .unwrap();
+    enter_quick(&coord);
+    type_str(&coord, ".7");
+    assert_eq!(
+        coord.debug_page_texts(),
+        vec![".7z".to_string()],
+        "前提：`.7` 只召回历史"
+    );
+    type_str(&coord, "z");
+    assert_eq!(coord.debug_preedit(), ";.7z", "字母不该被当选词键吃掉");
+    let act = coord.handle_key_event(&key(VK_RETURN, 0));
+    assert_eq!(committed(&act).as_deref(), Some(".7z"));
+}
+
 /// ★反向对照：数字透镜有**本透镜的**候选时，即便历史也命中，字母仍是选词键
 /// （`a` 选首选，越界的 `z` 仍被吃掉、不污染缓冲）。
 #[test]
