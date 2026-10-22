@@ -3023,7 +3023,8 @@ impl Coordinator {
 
     /// 组合区「正文」形态选择（不含已转换前缀）：对齐微软五笔——按**当前高亮候选**的类型决定。
     /// - 无拆分形态（码表/无拼音，preedit_split_body 空）→ 恒原始码（input_buffer）。
-    /// - 高亮候选为拼音来源 → 音节拆分串（preedit_split_body，如 baoan 的拼音 / saaa 的 sa'a'a）。
+    /// - 高亮候选为拼音来源 → 它自带的切分（`meta.preedit_split`），没有则用音节拆分串
+    ///   （preedit_split_body，如 baoan 的拼音 / saaa 的 sa'a'a）。
     /// - 高亮候选为码表/五笔（或短语等非拼音）→ 原始码（input_buffer，如 saaa 选「模式」时不拆）。
     fn effective_preedit_body<'a>(&self, state: &'a State) -> &'a str {
         // 码表整句：高亮到整句候选时按**编码单元**切分显示（`aawt'aawt`）。
@@ -3047,6 +3048,16 @@ impl Coordinator {
         {
             return &state.direct_aux_body;
         }
+        // 拼音候选自带的切分：`pinan` 高亮「平安」是 `pin'an`、高亮「皮」是 `pi'nan`。引擎只在
+        // 全拼、无手动分隔符时给，双拼下只给全拼降级候选（见 `CandidateMeta::preedit_split`），
+        // 双拼击键分段 / 简拼 / 手动分隔符的形态因此不受影响，全拼降级没给时退回下面的
+        // `preedit_fp_body`；分段上屏中它同样是拆分串，与下面「恒拆分」那条不冲突。
+        // 排在「无拆分形态」守卫之前：混输下首选的切分与原始码同形时拆分串为空，别的拼音
+        // 候选仍可能有自己的切法（`xian` 高亮「西安」）。
+        let cand = state.candidates.get(self.highlighted_global_index(state));
+        if let Some(split) = own_preedit_split(cand) {
+            return split;
+        }
         if state.preedit_split_body.is_empty() {
             return &state.input_buffer;
         }
@@ -3056,8 +3067,6 @@ impl Coordinator {
         if !state.committed_text.is_empty() {
             return &state.preedit_split_body;
         }
-        let hi = self.highlighted_global_index(state);
-        let cand = state.candidates.get(hi);
         // ★ 下面三条「按高亮选形态」的分支都必须在这里判，不能由引擎就地算定：引擎每次
         // 按键只 convert 一次，而翻页 / 方向键移动高亮都发生在那之后，就地算定的形态不会
         // 跟着变。本函数由 `sync_preedit_to_highlight` 在每次高亮变化时重算，是唯一能跟住
@@ -3298,9 +3307,62 @@ impl Coordinator {
         )
     }
 
+    /// 临拼 / mix 文本透镜的编码栏正文，按高亮候选选形态，优先级同主路
+    /// [`Self::effective_preedit_body`]（候选自带切分 → 简拼 → 全拼降级 → 默认切分）。
+    /// 没有任何形态（码表目标、数字透镜、引擎没给显示串）时是缓冲本身。
+    fn overlay_effective_body<'a>(&self, state: &'a State, buffer: &'a str) -> &'a str {
+        let cand = state.candidates.get(self.highlighted_global_index(state));
+        let forms = &state.overlay_forms;
+        if let Some(split) = own_preedit_split(cand) {
+            return split;
+        }
+        if !forms.abbrev.is_empty() && cand.is_some_and(|c| c.is_abbrev) {
+            return &forms.abbrev;
+        }
+        if !forms.fullpinyin.is_empty() && cand.is_some_and(|c| c.is_fullpinyin_fallback) {
+            return &forms.fullpinyin;
+        }
+        if forms.split.is_empty() {
+            buffer
+        } else {
+            &forms.split
+        }
+    }
+
+    /// 临拼 / mix 按高亮重算 `state.preedit` 与供光标换算的 `overlay_body`（两者必须同步，
+    /// 否则形态一变 caret 就错位）。组合区 = 只读前缀 + 已转换前缀 + 正文，同各自的候选刷新。
+    fn sync_overlay_preedit_to_highlight(&self, state: &mut State) {
+        let (prefix, buffer) = match state.active {
+            Some(ModeKind::TempPinyin) => (&state.temp_pinyin_prefix, &state.temp_pinyin_buffer),
+            Some(ModeKind::Mix(_)) => (&state.mix_prefix, &state.mix_buffer),
+            _ => return,
+        };
+        // 空缓冲时组合区只剩前缀，由各自的刷新函数写好，不在这里动。
+        if buffer.is_empty() {
+            return;
+        }
+        let body = self.overlay_effective_body(state, buffer).to_string();
+        state.preedit = format!("{prefix}{}{body}", state.committed_text);
+        state.overlay_body = body;
+    }
+
     /// 按当前高亮候选类型重算 `state.preedit`（混输高亮跟随）。含已转换前缀（逐步转换）拼接。
-    /// 仅普通模式（active==None）有意义；覆盖层模式各自维护 preedit，不应调用此方法。
+    /// 普通模式走 [`Self::effective_preedit_body`]；临拼 / mix 走各自的 overlay 形态
+    /// （[`Self::sync_overlay_preedit_to_highlight`]）。其余 overlay 各自维护 preedit，这里什么都不做
+    /// ——按普通模式重算会把编码栏改写成 `committed_text + input_buffer`，在那些模式下就是清空
+    /// （分类标签点击 `grid_click_tab` 不分模式调本函数）。
+    ///
+    /// 辅助码（`AuxCode`）例外，同普通模式：它叠在主路缓冲上，部分上屏后由 `update_candidates`
+    /// 按主路重建组合区（已转换前缀 + 剩余编码），辅码前缀随后才拼上去。
     pub(crate) fn sync_preedit_to_highlight(&self, state: &mut State) {
+        match state.active {
+            None | Some(ModeKind::AuxCode) => {}
+            Some(ModeKind::TempPinyin | ModeKind::Mix(_)) => {
+                self.sync_overlay_preedit_to_highlight(state);
+                return;
+            }
+            Some(_) => return,
+        }
         let body = self.effective_preedit_body(state).to_string();
         // 用户按 Shift+字母打出的大写只在影子串里，此处投影回显示串（拼音拆分形态含引擎插入
         // 的分隔符，故按贪心同步扫描投影而非整串替换）。大小写不改字符数，caret 换算不受影响。
@@ -6678,6 +6740,18 @@ mod finalize_candidates_tests {
             );
         }
     }
+}
+
+/// 高亮候选自带的编码栏切分（`CandidateMeta::preedit_split`）。只认拼音来源：拼音引擎里并进来
+/// 的英文候选等非拼音候选，编码栏按各自的现行规则显示。
+///
+/// ⚠️ 这道来源过滤目前是保险，测不出来：非拼音候选的 `boundary` 恒 0、码也不落在所打码的
+/// 音节前缀上，引擎本就不给它们切分。留着是防日后别的来源带上这个字段。
+fn own_preedit_split(cand: Option<&Candidate>) -> Option<&str> {
+    cand.filter(|c| c.source == wind_candidate::CandidateSource::Pinyin)?
+        .meta
+        .preedit_split
+        .as_deref()
 }
 
 /// 组合区是否该显示**码表的编码单元切分**（整句 `aawt'aawt` / 逆切分 `hf'kn`）。

@@ -81,6 +81,13 @@ impl Coordinator {
             .clone()
     }
 
+    /// 自绘编码栏插入符在 [`Self::debug_preedit`] 里的字节偏移（测试/诊断用）。编码栏形态随
+    /// 高亮切换后它必须跟着换算，集成测试够不着 `state`，只能经这里断言。
+    pub fn debug_ui_caret_bytes(&self) -> usize {
+        let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        self.ui_caret_bytes(&s)
+    }
+
     /// 推给 TSF 的 key_up 热键白名单（测试/诊断用）。
     ///
     /// 这正是 `push_activation_status` 发出去的那份，不是另算一遍——修饰键类绑定
