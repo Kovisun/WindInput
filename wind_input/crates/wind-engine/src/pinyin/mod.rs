@@ -2232,6 +2232,7 @@ impl PinyinEngine {
                 order: h.order,
                 is_fuzzy: false,
                 boundary: h.boundary,
+                typed_boundary: 0,
                 // 精确命中：候选码即词典码，无需另带。
                 dict: None,
             })
@@ -2249,7 +2250,7 @@ impl PinyinEngine {
             // 走 `search_with_boundary` 而非 `search`：变体码与它自己的边界同域，
             // 那份真值正是造词要的（候选对外仍报 boundary=0，见上）。
             for h in self.dict.search_with_boundary(&variant) {
-                let Some(edits) = fuzzy_shape_edits(&shapes, h.boundary) else {
+                let Some((edits, typed_boundary)) = fuzzy_shape_edits(&shapes, h.boundary) else {
                     continue;
                 };
                 if seen.insert(h.text.clone()) {
@@ -2262,6 +2263,7 @@ impl PinyinEngine {
                         // 双拼同键音节计 0 处：不罚、也不标模糊（各处「非模糊」准入照常放行）。
                         is_fuzzy: edits > 0,
                         boundary: 0,
+                        typed_boundary,
                         dict: Some((variant.clone(), h.boundary)),
                     });
                 }
@@ -2271,7 +2273,7 @@ impl PinyinEngine {
         results
     }
 
-    /// `code` 的全部模糊变体码，各附它的形态 `(变体边界, 改动处数)`，**不含** `code` 本身；
+    /// `code` 的全部模糊变体码，各附它的形态 `(变体边界, 所打码边界, 改动处数)`，**不含** `code` 本身；
     /// 按最少改动处数、再按码排序（同文去重时先到者占位，改动少的先到）。
     ///
     /// 系统词库（[`Self::lookup_with_fuzzy`]）与用户/临时造词层（[`Self::search_store_fuzzy`]）
@@ -2289,7 +2291,7 @@ impl PinyinEngine {
         fixed: bool,
         fz: &FuzzyConfig,
         can_extend: &dyn Fn(&str) -> bool,
-    ) -> Vec<(String, Vec<(u64, usize)>)> {
+    ) -> Vec<(String, Vec<FuzzyCodeShape>)> {
         if !fz.any_enabled() {
             return Vec::new();
         }
@@ -2298,7 +2300,7 @@ impl PinyinEngine {
         } else {
             SegGraph::from_dag(&Dag::build(code, &self.trie))
         };
-        let mut out: Vec<(String, Vec<(u64, usize)>)> = self
+        let mut out: Vec<(String, Vec<FuzzyCodeShape>)> = self
             .lattice_builder
             .fuzzy_spans(
                 0,
@@ -2314,12 +2316,18 @@ impl PinyinEngine {
             .into_iter()
             .filter(|((q, _), _)| *q == code.len())
             .map(|((_, variant), shapes)| {
-                let shapes = shapes.into_iter().map(|(mask, _, edits)| (mask, edits));
+                let shapes = shapes.into_iter().map(|(mask, offsets, edits)| {
+                    let typed = offsets
+                        .iter()
+                        .filter(|&&o| o < 64)
+                        .fold(0u64, |m, &o| m | 1u64 << o);
+                    (mask, typed, edits)
+                });
                 (variant, shapes.collect())
             })
             .collect();
         out.sort_by_cached_key(|(variant, shapes)| {
-            let edits = shapes.iter().map(|(_, e)| *e).min();
+            let edits = shapes.iter().map(|(_, _, e)| *e).min();
             (edits, variant.clone())
         });
         out
@@ -2350,9 +2358,10 @@ impl PinyinEngine {
             for mut c in store_dm.search(&variant, limit) {
                 // 手输码的记录没有边界：按码现切一次再核对，否则任何切法都能借到它。
                 let boundary = effective_boundary(&variant, c.boundary, &self.trie);
-                let Some(edits) = fuzzy_shape_edits(&shapes, boundary) else {
+                let Some((edits, typed_boundary)) = fuzzy_shape_edits(&shapes, boundary) else {
                     continue;
                 };
+                c.meta.fuzzy_typed_boundary = typed_boundary;
                 c.meta.store_code = Some(c.code.as_str().into());
                 c.meta.learn_code = Some((std::mem::take(&mut c.code), c.boundary));
                 c.code = code.to_string();
@@ -2473,13 +2482,22 @@ fn normalized_typed(code: &str) -> String {
 /// 改动最少的那个；边界为 0（没有可用信息）时不设防、取全部形态里最少的。用户层的手输码
 /// 记录先经 [`effective_boundary`] 现切，到这里才是 0 的只剩切不出的码。对不上任何形态返回 `None`
 /// ——切法不同的词撞上了同一个码（`xi|an → xi|ang` 拼出的 `xiang` 不是单音节的「想」）。
-fn fuzzy_shape_edits(shapes: &[(u64, usize)], boundary: u64) -> Option<usize> {
+///
+/// 一并返回该形态的**所打码边界**（供 [`Candidate`] 的 `meta.fuzzy_typed_boundary`）；
+/// 边界为 0 时不知道是哪个形态，给 0。
+fn fuzzy_shape_edits(shapes: &[FuzzyCodeShape], boundary: u64) -> Option<(usize, u64)> {
+    if boundary == 0 {
+        return shapes.iter().map(|(_, _, edits)| (*edits, 0)).min();
+    }
     shapes
         .iter()
-        .filter(|(mask, _)| boundary == 0 || *mask == boundary)
-        .map(|(_, edits)| *edits)
+        .filter(|(mask, _, _)| *mask == boundary)
+        .map(|(_, typed, edits)| (*edits, *typed))
         .min()
 }
+
+/// 变体码的一个形态：(变体边界, 所打码边界, 改动处数)，见 [`PinyinEngine::fuzzy_codes`]。
+type FuzzyCodeShape = (u64, u64, usize);
 
 /// 候选码 `code` 是否恰好落在前 k 个音节的边界上（`syllables[..k].join("") == code`）。
 /// 命中返回 `Some(k)`（k>=1）；不落任何边界（如前缀补全的超长码）返回 `None`。
@@ -2509,6 +2527,8 @@ struct LookupHit {
     is_fuzzy: bool,
     /// 该候选 code 的音节边界；0=无信息（模糊变体/非拼音词库/旧数据），不参与校验。
     boundary: u64,
+    /// 模糊命中走的那条**所打码**切分，见 `CandidateMeta::fuzzy_typed_boundary`；精确命中为 0。
+    typed_boundary: u64,
     /// **词典里登记的那个码**与它自己的真值边界；`None` = 与候选 `code` 同一个（精确命中）。
     ///
     /// 模糊命中时两者不同：用户敲 `senri`，词典里的词是 `shengri`。候选对外的 `code`
@@ -2995,6 +3015,7 @@ impl Engine for PinyinEngine {
             // 与 `is_abbrev` 那几处同款：`push_unique` 的参数已经很长，附加信息走事后赋值，
             // 用 `before` 判断这次是否真的新增了候选（同文去重时不新增）。
             let learn = h.dict.clone();
+            let typed = h.typed_boundary;
             let before = candidates.len();
             push_unique(
                 &mut candidates,
@@ -3009,6 +3030,7 @@ impl Engine for PinyinEngine {
             );
             if candidates.len() > before {
                 candidates[before].meta.learn_code = learn;
+                candidates[before].meta.fuzzy_typed_boundary = typed;
             }
         }
 
@@ -3482,6 +3504,7 @@ impl Engine for PinyinEngine {
                 for h in self.lookup_with_fuzzy(&code, &syllables[..end], fixed_segmentation) {
                     // 同 step1：词典规范码另走 `learn_code`，不覆盖候选的 `code`。
                     let learn = h.dict.clone();
+                    let typed = h.typed_boundary;
                     let before = candidates.len();
                     push_unique(
                         &mut candidates,
@@ -3496,6 +3519,7 @@ impl Engine for PinyinEngine {
                     );
                     if candidates.len() > before {
                         candidates[before].meta.learn_code = learn;
+                        candidates[before].meta.fuzzy_typed_boundary = typed;
                     }
                 }
             }
@@ -4675,8 +4699,14 @@ impl Engine for PinyinEngine {
             && !has_sep
             && let Some(top) = candidates.first()
         {
-            if top.boundary != 0 && top.code == completed && !completed.is_empty() {
-                preedit_display = render_preedit(completed, top.boundary, &partial_syllable);
+            // 模糊命中的 `boundary` 恒 0（与所打码不同域），它走的切分另放在 `fuzzy_typed_boundary`。
+            let top_boundary = if top.boundary != 0 {
+                top.boundary
+            } else {
+                top.meta.fuzzy_typed_boundary
+            };
+            if top_boundary != 0 && top.code == completed && !completed.is_empty() {
+                preedit_display = render_preedit(completed, top_boundary, &partial_syllable);
             } else if top.is_sentence && top.boundary != 0 && top.code == raw_input {
                 // 混合整句（step 2b）：它的 code 是整串**击键**、boundary 也在击键空间
                 // （简拼段每字母一位），故直接渲染击键串即可，得 `b'z'd'hao'bu'hao`。

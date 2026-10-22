@@ -8456,6 +8456,44 @@ fn test_shuangpin_fuzzy_final_ziranma() {
     );
 }
 
+/// 双拼的编码栏按击键两两分段，模糊命中不改写它：自然码开 in↔ing 后 `dnaj`（din|an）首选
+/// 「定安」显示 `dn'aj`。关模糊音时首选是简拼混合整句，编码栏随之按简拼切。
+#[test]
+fn test_shuangpin_fuzzy_preedit_ziranma() {
+    let d = data_dir();
+    if !d.join("schemas/shuangpin.schema.toml").exists() {
+        eprintln!("跳过：缺 shuangpin.schema.toml");
+        return;
+    }
+    // (击键, 开模糊音的首选与编码栏, 关模糊音的首选与编码栏)
+    let cases = [
+        ("dn", ("定", "dn"), ("当年", "d'n")),
+        ("dnaj", ("定安", "dn'aj"), ("到那家", "d'na'j")),
+    ];
+    for (keys, fuzzy, plain) in cases {
+        for (on, (top, want)) in [(true, fuzzy), (false, plain)] {
+            let ov = shuangpin_layout_override(&format!("zrm_fuzzy_pre_{keys}_{on}"), "ziranma");
+            let mut cfg = shuangpin_cfg();
+            cfg.schema.pinyin.fuzzy.enabled = on;
+            cfg.schema.pinyin.fuzzy.in_ing = true;
+            let coord = Coordinator::new_headless_with_override(cfg, Some(&d), Some(ov.clone()));
+            for c in keys.chars() {
+                press_letter(&coord, c);
+            }
+            let cands = coord.debug_all_candidate_texts();
+            let preedit = coord.debug_preedit();
+            let _ = std::fs::remove_dir_all(&ov);
+            assert_eq!(
+                cands.first().map(String::as_str),
+                Some(top),
+                "前提：模糊音 {on} 时 {keys} 首选应是「{top}」，实际 {:?}",
+                &cands[..cands.len().min(5)]
+            );
+            assert_eq!(preedit, want, "模糊音 {on} 时 {keys} 首选「{top}」的编码栏");
+        }
+    }
+}
+
 /// 造一份带自定义双拼布局的数据目录：其余内容逐项软链到 `data_dir()`，只在
 /// `schemas/shuangpin/` 下多放一份 `{layout}.toml`（布局 = 自然码改 `[finals]` 一行）。
 /// 返回 `(数据目录, 方案 override 目录)`。

@@ -96,6 +96,13 @@ pub struct CandidateMeta {
     /// 排序/去重/显示一律不读本字段，它只服务「把这条候选写进词库」这个方向。
     #[serde(skip)]
     pub learn_code: Option<(String, u64)>,
+    /// 模糊命中走的那条**所打码**（候选 `code`）切分，各音节起点的 bitmask；`0` = 不是模糊
+    /// 命中，或命中词条没有边界真值。
+    ///
+    /// 模糊命中的 `boundary` 恒 0（见 `learn_code`），而 `pinan` 的「平安」走的是 `pin|an`、
+    /// 不是 `maximum_match` 的 `pi|nan`。只服务编码栏跟随首选，排序/造词/边界核对一律不读。
+    #[serde(skip)]
+    pub fuzzy_typed_boundary: u64,
     /// 拼音「英文前缀补全」（`schema.pinyin.english_merge.prefix_complete`）补出来的英文候选。
     ///
     /// 只由 `wind_engine::english_merge::lookup_prefix_complete` 置位；协调器
