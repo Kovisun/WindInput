@@ -298,6 +298,46 @@ impl AssocProvider for PrefixWords<'_> {
     }
 }
 
+/// 智能联想的「下一词」源：离线蒸馏的上文 → 后继表（[`wind_assoc::bigram`]）。
+///
+/// 表里的句末记号 `$` 换成「，」：模型说这里常断句，就把逗号给到候选条上。但它几乎是
+/// 每个上文的头名——原样放第一位，每次上屏后首位都是逗号，最可能的那个词反被挤到第二；
+/// 故至少放在第二位（[`SENTENCE_END_MIN_RANK`]），其余标点仍由标点源按规则补。
+struct BigramWords<'a> {
+    table: &'a wind_assoc::bigram::AssocBigram,
+}
+
+/// 句末记号换成的逗号最早排在第几位（0 起）。
+const SENTENCE_END_MIN_RANK: usize = 1;
+
+impl AssocProvider for BigramWords<'_> {
+    fn suggest(&self, ctx: &AssocContext<'_>, limit: usize) -> Vec<AssocHit> {
+        let Some((_, succ)) = self.table.lookup(ctx.text) else {
+            return Vec::new();
+        };
+        let mut words: Vec<&str> = succ.into_iter().take(limit).collect();
+        if let Some(i) = words
+            .iter()
+            .position(|w| *w == wind_assoc::bigram::SENTENCE_END)
+        {
+            words.remove(i);
+            words.insert(i.max(SENTENCE_END_MIN_RANK).min(words.len()), "，");
+        }
+        let n = words.len() as i64;
+        words
+            .into_iter()
+            .enumerate()
+            .map(|(i, w)| AssocHit {
+                text: w.to_string(),
+                commit: None,
+                source: AssocSource::Bigram,
+                // 按名次给分：表里已按模型分值排好
+                score: n - i as i64,
+            })
+            .collect()
+    }
+}
+
 /// 联想历史的取数源：用户**在这个上文之后**从联想里选过的词（论坛 t185 方案 B）。
 ///
 /// 读 store 的 `assoc_history` 表（一次范围扫描）；写在 [`Coordinator::record_assoc_pick`]。
@@ -466,6 +506,28 @@ impl Coordinator {
         true
     }
 
+    /// 「下一词」表：首次用到时读文件，之后复用；没有数据文件或读失败是 None。
+    pub(crate) fn assoc_bigram(&self) -> Option<std::sync::Arc<wind_assoc::bigram::AssocBigram>> {
+        self.assoc_bigram
+            .get_or_init(|| {
+                let path = self.assoc_bigram_path.as_ref()?;
+                let loaded = std::fs::read_to_string(path)
+                    .map_err(|e| e.to_string())
+                    .and_then(wind_assoc::bigram::AssocBigram::parse);
+                match loaded {
+                    Ok(t) => {
+                        tracing::info!(n = t.len(), path = %path.display(), "联想下一词表已加载");
+                        Some(std::sync::Arc::new(t))
+                    }
+                    Err(e) => {
+                        tracing::warn!(path = %path.display(), "联想下一词表读不了，本次运行不出: {e}");
+                        None
+                    }
+                }
+            })
+            .clone()
+    }
+
     /// `[input.association]`（移动端再叠 `[mobile.association]`）的运行时视图（热重载快照）。
     pub(crate) fn assoc_config(&self) -> AssocConfig {
         let rt = self.rt();
@@ -492,10 +554,9 @@ impl Coordinator {
             // 恰恰常是混输。解析规则见 `assoc_word_schema`。
             schema: self.engine_mgr.assoc_word_schema(),
         };
-        // ⚠️ 四个源里目前接了三个（History 见 `HistoryWords`，2026-09 接入；2026-10 起
-        // 也出用户自己的「下一词」，见 `learn_next_word`）。Bigram
-        // （词→后继表，需离线蒸馏）尚无 provider ⇒ `associate` 对它 `continue`，
-        // 配额顺延。这是有意的分期，不是漏接。
+        // 四个源全部接上：History 见 `HistoryWords`（2026-09；2026-10 起也出用户自己的
+        // 「下一词」，见 `learn_next_word`），Bigram 见 `BigramWords`（2026-10，离线蒸馏表；
+        // 数据文件缺失时不登记 ⇒ `associate` 对它 `continue`，配额顺延）。
         //
         // 档位过滤在 `AssocConfig::source_enabled` 里，**不在这里**：这里一律登记全部
         // 已实现的源，由 kind 决定谁能出场。两处都做过滤会让「词语联想为什么没标点」
@@ -508,10 +569,15 @@ impl Coordinator {
             profile: self.engine_mgr.pinyin_freq_profile(),
             next_words: cfg.kind == AssocKind::Smart,
         });
+        let bigram_table = self.assoc_bigram();
+        let bigram = bigram_table.as_deref().map(|table| BigramWords { table });
         let mut providers: Vec<(AssocSource, &dyn AssocProvider)> =
             vec![(AssocSource::Prefix, &prefix), (AssocSource::Punct, &punct)];
         if let Some(h) = &history {
             providers.push((AssocSource::History, h));
+        }
+        if let Some(b) = &bigram {
+            providers.push((AssocSource::Bigram, b));
         }
         wind_assoc::associate(&ctx, cfg, &providers)
     }

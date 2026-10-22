@@ -246,7 +246,10 @@ fn smart_assoc_shows_only_the_continuation() {
         .take(wind_assoc::SMART_PREFIX_CAP)
         .collect();
 
-    let smart = coord("smart", "wubi86_pinyin");
+    // 关掉下一词源：本条只测前缀词的显示口径（下一词另见 `smart_assoc_brings_next_words`）
+    let smart = coord_tweak("smart", "wubi86_pinyin", |c| {
+        c.input.association.bigram = false
+    });
     press(&smart, "q");
     assert_eq!(commit_with_space(&smart), first, "前提：两档上屏同一个字");
     let shown = assoc_texts(&smart);
@@ -258,6 +261,28 @@ fn smart_assoc_shows_only_the_continuation() {
         other => panic!("数字键该上屏联想候选，实得 {other:?}"),
     };
     assert_eq!(out, shown[0], "上屏的就是显示的那一截");
+}
+
+/// ★ 智能联想出「下一词」（离线蒸馏表 `data/assoc/assoc_bigram.txt`）：上屏「我」后首位是
+/// 一个词（表里排第一的后继），句末记号换成的「，」排第二，名额用满。
+#[test]
+fn smart_assoc_brings_next_words() {
+    let dir = data_dir();
+    if !dict_ready(&dir) || !dir.join("assoc/assoc_bigram.txt").exists() {
+        eprintln!("!!! 跳过：build_dev 词库或下一词表不存在");
+        return;
+    }
+    let c = coord("smart", "wubi86_pinyin");
+    press(&c, "q");
+    assert_eq!(commit_with_space(&c), "我", "前提：q 上屏「我」");
+    let shown = assoc_texts(&c);
+    assert_eq!(shown.len(), 9, "名额用满：{shown:?}");
+    assert_ne!(shown[0], "，", "首位留给词：{shown:?}");
+    assert_eq!(shown[1], "，", "句末记号换成逗号排第二：{shown:?}");
+    assert!(
+        !shown.iter().any(|t| t.starts_with('我')),
+        "智能联想不显示带上文的整词：{shown:?}"
+    );
 }
 
 /// 真机那次的确切复现：混输方案打 `lwty` 空格上屏，看联想出不出。

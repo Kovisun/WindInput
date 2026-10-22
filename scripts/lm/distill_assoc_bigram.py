@@ -1,0 +1,223 @@
+#!/usr/bin/env python3
+"""从 octagram `.gram` 语法模型蒸馏联想的「下一词」表（智能联想 Bigram 源的出厂数据）。
+
+    python3 scripts/lm/distill_assoc_bigram.py \
+        --gram bgw.gram --dict base.dict.yaml [--dict 8105.dict.yaml ...] \
+        --out data/assoc/assoc_bigram.txt
+
+为什么要蒸馏、不直接在线查 `.gram`：`.gram` 的键是「前文 + 后词」直接拼起来的字串，
+**没有词边界**，要取某词的全部后继得把它下面整棵子树走一遍再按词库切——在线做太慢，
+模型本身（bgw 41MB、万象 400MB）也不适合随手机包带。这里离线走一遍，只留常用上文的
+前 K 个后继，产物一两 MB 的纯文本。
+
+★ 只能用 **ln(频次) 单调** 的模型（bgw）。万象 `.gram` 的分值不随频次增减
+（实测「今天+三缺一」22.3 > 「今天+是」16.0），按分值排出来是乱的。
+
+产物格式（UTF-8，`#` 开头是注释）：
+
+    上文<TAB>后继1 后继2 …
+
+- 按上文的 UTF-8 字节序升序（读端二分查找）；后继按分值降序。
+- `$` 是模型里的句末记号，原样保留在它的名次上：读端据此决定标点要不要提前。
+"""
+import argparse
+import hashlib
+import mmap
+import os
+import struct
+import sys
+from multiprocessing import Pool
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from gram import encode  # noqa: E402
+
+# .gram 键最多 8 个字（gram_encoding.h::kMaxEncodedUnicode），上文 + 后继合起来不能超过
+MAX_KEY_CHARS = 8
+
+_arr = None
+_n = 0
+_vocab = None
+_max_succ_chars = 4
+
+
+def _open(path):
+    f = open(path, "rb")
+    mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+    (off,) = struct.unpack_from("<i", mm, 40)
+    start = 40 + off
+    n = (len(mm) - start) // 4
+    return memoryview(mm)[start:start + n * 4].cast("I"), n
+
+
+def _offset(u):
+    return (u >> 10) << ((u & 0x200) >> 6)
+
+
+def _label(u):
+    return u & 0x800000FF
+
+
+def _walk(key):
+    idx = 0
+    u = _arr[idx]
+    for b in key:
+        idx ^= _offset(u) ^ b
+        if idx >= _n:
+            return None
+        u = _arr[idx]
+        if _label(u) != b:
+            return None
+    return idx
+
+
+def _leaf(idx):
+    u = _arr[idx]
+    if not (u >> 8) & 1:
+        return None
+    return _arr[idx ^ _offset(u)] & 0x7FFFFFFF
+
+
+def _children(idx):
+    base = idx ^ _offset(_arr[idx])
+    for b in range(1, 256):
+        c = base ^ b
+        if c < _n and _label(_arr[c]) == b:
+            yield b, c
+
+
+def _decode(bs):
+    """encode 的逆（只认 ASCII 与 CJK 主区两种形态，其余返回 None）。"""
+    out = []
+    i = 0
+    while i < len(bs):
+        b = bs[i]
+        if b < 0x80:
+            out.append(chr(b))
+            i += 1
+        elif 0x80 <= b < 0xE0 and i + 1 < len(bs):
+            out.append(chr(((b - 0x40) << 8) | bs[i + 1]))
+            i += 2
+        elif b == 0xE1 and i + 1 < len(bs):
+            out.append(chr((bs[i + 1] - 0x40) << 8))
+            i += 2
+        else:
+            return None
+    return "".join(out)
+
+
+def _is_han(s):
+    return all("一" <= c <= "鿿" for c in s)
+
+
+def _init(gram, vocab, max_succ_chars):
+    global _arr, _n, _vocab, _max_succ_chars
+    _arr, _n = _open(gram)
+    _vocab = vocab
+    _max_succ_chars = max_succ_chars
+
+
+def _straddles(ctx, s):
+    """多字后继的开头几个字能与上文连成词（「中」+「国人」：中国|人）⇒ 键是跨词边界切错的。
+
+    单字后继不算：「中」+「国」正是「中国」的后半截，智能联想里只显示「国」，正是要的。
+    """
+    return any(ctx + s[:k] in _vocab for k in range(1, len(s)))
+
+
+def _successors(ctx):
+    """上文 ctx 的后继：(词, 分值) 按分值降序。后继须是词库里的词（或单字），全汉字。"""
+    node = _walk(encode(ctx))
+    if node is None:
+        return ctx, []
+    limit = min(_max_succ_chars, MAX_KEY_CHARS - len(ctx))
+    found = []
+    # 显式栈 DFS；深度按**字**算（CJK 一字两字节，$ 一字节）
+    stack = [(node, b"")]
+    while stack:
+        idx, acc = stack.pop()
+        if acc:
+            v = _leaf(idx)
+            if v is not None:
+                s = _decode(acc)
+                if s == "$" or (s and _is_han(s) and s in _vocab and not _straddles(ctx, s)):
+                    found.append((s, v))
+        if len(acc) >= 2 * limit or acc == b"$":
+            continue
+        for b, c in _children(idx):
+            stack.append((c, acc + bytes([b])))
+    found.sort(key=lambda x: -x[1])
+    return ctx, found
+
+
+def _read_dict(path):
+    """rime dict.yaml：`...` 之后每行 `词<TAB>编码[<TAB>权重]`。返回 {词: 最大权重}。"""
+    words = {}
+    body = False
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            if not body:
+                body = line.startswith("...")
+                continue
+            if not line.strip() or line.startswith("#"):
+                continue
+            p = line.rstrip("\n").split("\t")
+            w = int(p[2]) if len(p) >= 3 and p[2].strip().isdigit() else 0
+            if words.get(p[0], -1) < w:
+                words[p[0]] = w
+    return words
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("--gram", required=True, help=".gram 模型（须 ln 频次单调，如 bgw）")
+    ap.add_argument("--dict", action="append", required=True, help="词库 dict.yaml，可多次给")
+    ap.add_argument("--out", required=True)
+    ap.add_argument("--contexts", type=int, default=40000, help="取词库权重最高的多少个上文")
+    ap.add_argument("--top", type=int, default=12, help="每个上文留几个后继")
+    ap.add_argument("--max-context-chars", type=int, default=4)
+    ap.add_argument("--max-succ-chars", type=int, default=4)
+    ap.add_argument("--source", default="", help="写进产物头注释的模型来源说明")
+    ap.add_argument("--jobs", type=int, default=os.cpu_count())
+    a = ap.parse_args()
+
+    vocab = {}
+    for d in a.dict:
+        for w, wt in _read_dict(d).items():
+            if vocab.get(w, -1) < wt:
+                vocab[w] = wt
+    han = {w: wt for w, wt in vocab.items() if _is_han(w)}
+    contexts = sorted(
+        (w for w in han if len(w) <= a.max_context_chars),
+        key=lambda w: -han[w],
+    )[: a.contexts]
+    print(f"词库 {len(han)} 词，上文 {len(contexts)} 个", file=sys.stderr)
+
+    with open(a.gram, "rb") as f:
+        digest = hashlib.sha256(f.read()).hexdigest()
+    rows = []
+    with Pool(a.jobs, initializer=_init, initargs=(a.gram, set(han), a.max_succ_chars)) as pool:
+        for i, (ctx, succ) in enumerate(pool.imap_unordered(_successors, contexts, chunksize=1)):
+            if succ:
+                rows.append((ctx, [s for s, _ in succ[: a.top]]))
+            if i % 5000 == 0:
+                print(f"  {i}/{len(contexts)}", file=sys.stderr)
+    rows.sort(key=lambda r: r[0].encode("utf-8"))
+
+    os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
+    with open(a.out, "w", encoding="utf-8", newline="\n") as f:
+        f.write("# 联想「下一词」表：上文<TAB>后继（按模型分值降序，空格分隔；$ = 句末）\n")
+        f.write("# 由 scripts/lm/distill_assoc_bigram.py 生成，勿手改\n")
+        if a.source:
+            f.write(f"# 模型来源：{a.source}\n")
+        f.write(f"# 模型 sha256：{digest}\n")
+        f.write(
+            f"# 参数：上文 {a.contexts} 个（≤{a.max_context_chars} 字），每个留 {a.top} 个后继"
+            f"（≤{a.max_succ_chars} 字），后继须在词库内\n"
+        )
+        for ctx, succ in rows:
+            f.write(f"{ctx}\t{' '.join(succ)}\n")
+    print(f"写出 {len(rows)} 行 → {a.out}", file=sys.stderr)
+
+
+if __name__ == "__main__":
+    main()

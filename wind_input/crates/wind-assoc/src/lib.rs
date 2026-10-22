@@ -26,6 +26,7 @@
 
 use std::collections::HashSet;
 
+pub mod bigram;
 pub mod punct;
 
 /// 联想的上文。
@@ -47,6 +48,10 @@ pub struct AssocContext<'a> {
 
 /// 智能联想里前缀词最多占几个名额，见 [`AssocKind::source_cap`]。
 pub const SMART_PREFIX_CAP: usize = 4;
+
+/// 智能联想里「下一词」最多占几个名额：留几个位置给前缀词与标点（表里每个上文有十来个后继，
+/// 不设限会把名额全占掉）。
+pub const SMART_BIGRAM_CAP: usize = 6;
 
 /// 智能联想里前缀词补出部分的最大字数，见 [`AssocKind::keeps`]。
 pub const SMART_PREFIX_TAIL_MAX: usize = 2;
@@ -202,6 +207,7 @@ impl AssocKind {
     pub fn source_cap(self, src: AssocSource, remaining: usize) -> usize {
         match (self, src) {
             (AssocKind::Smart, AssocSource::Prefix) => remaining.min(SMART_PREFIX_CAP),
+            (AssocKind::Smart, AssocSource::Bigram) => remaining.min(SMART_BIGRAM_CAP),
             _ => remaining,
         }
     }

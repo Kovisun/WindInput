@@ -1492,6 +1492,13 @@ pub struct Coordinator {
     /// 最近一次解析的系统短语条目（启动时填充；"恢复默认"重读文件成功后刷新）。
     /// 作为重读失败（文件缺失/TOML 语法错误）时的回退，避免把库里系统短语清空。
     pub(crate) system_phrase_entries: std::sync::RwLock<Vec<wind_phrase::SystemPhraseEntry>>,
+    /// 智能联想「下一词」表的路径（`assoc/assoc_bigram.txt`，用户目录同名文件整体替代）；
+    /// None = 数据缺失，Bigram 源不出、配额顺延。
+    pub(crate) assoc_bigram_path: Option<std::path::PathBuf>,
+    /// 「下一词」表本体：**首次用到时才读**（桌面联想默认关，不该为它多占内存）。
+    /// 读失败记一条警告、之后一直是 None，不反复重试。
+    pub(crate) assoc_bigram:
+        std::sync::OnceLock<Option<std::sync::Arc<wind_assoc::bigram::AssocBigram>>>,
     /// system.phrases.toml 路径（None=无 data_dir，如 headless 测试）。
     /// "恢复默认"据此重读文件，使手工编辑无需重启服务即可生效。
     pub(crate) system_phrase_path: Option<std::path::PathBuf>,
@@ -2703,6 +2710,7 @@ impl Coordinator {
         // 用户目录同名文件整体替代安装目录那份（覆盖替换，非合并）。
         // ⚠️ 解析在此**一次定死**：后续 `current_system_phrase_entries` 的重读走同一路径，
         // 故运行时新放的覆盖文件要下次启动才生效（与全仓其它覆盖点一致，无文件监视）。
+        let assoc_bigram_path = Config::resolve_data_file(data_dir, "assoc/assoc_bigram.txt");
         let system_phrase_path = Config::resolve_data_file(data_dir, "system.phrases.toml");
         if system_phrase_path.is_none() && data_dir.is_some() {
             warn!("system.phrases.toml 缺失（用户/安装目录均未找到），系统短语将为空");
@@ -3083,6 +3091,8 @@ impl Coordinator {
             phrases,
             system_phrase_entries: std::sync::RwLock::new(system_phrase_entries),
             system_phrase_path,
+            assoc_bigram_path,
+            assoc_bigram: std::sync::OnceLock::new(),
             s2t: Mutex::new(s2t),
             t2s: Mutex::new(t2s),
             // 只含出厂基表：用户覆盖住在 store 里，而 store 在本结构体构造之后才可用，
