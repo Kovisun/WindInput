@@ -12,10 +12,12 @@
 //! ⚠️ 词典缺失时整族静默跳过（判据是**耗时 0.00s**，不是通过条数）。
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use wind_bridge::handler::{KeyEventData, MessageHandler};
 use wind_config::Config;
 use wind_coordinator::Coordinator;
 use wind_ipc::protocol::EVENT_KEY_DOWN;
+use wind_store::Store;
 
 fn data_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../build_dev/data")
@@ -39,6 +41,11 @@ fn typed(input: &str, apply: impl FnOnce(&mut Config)) -> (Vec<String>, String) 
     cfg.input.default.chinese_mode = true;
     apply(&mut cfg);
     let coord = Coordinator::new_headless(cfg, Some(&data_dir()));
+    type_keys(&coord, input);
+    (coord.debug_all_candidate_texts(), coord.debug_preedit())
+}
+
+fn type_keys(coord: &Coordinator, input: &str) {
     for c in input.chars() {
         coord.handle_key_event(&KeyEventData {
             key_code: (c.to_ascii_uppercase() as u32) & 0xFF,
@@ -50,7 +57,6 @@ fn typed(input: &str, apply: impl FnOnce(&mut Config)) -> (Vec<String>, String) 
             prev_char: 0,
         });
     }
-    (coord.debug_all_candidate_texts(), coord.debug_preedit())
 }
 
 /// 开关打开时 `input` 的界面候选前 `top` 项含 `want`，模糊音关着时全列表不含。
@@ -229,4 +235,53 @@ fn an_ang_chananjie_preedit_follows_changanjie() {
         ("长安街", "chan'an'jie"),
         ("差难解", "cha'nan'jie"),
     );
+}
+
+/// 用户词层的模糊命中同口径：系统词库里没有的「瓶安」只在用户层（规范码 `ping|an`），
+/// 高权重压过系统词「平安」成为首选，编码栏同样按它走的 `pin|an` 显示。
+#[test]
+fn in_ing_user_word_preedit_follows_typed_segmentation() {
+    if !has_pinyin() {
+        return;
+    }
+    // (输入, 用户词, 规范码, 开模糊音时的编码栏, 关模糊音时的首选与编码栏)
+    let cases = [("pinan", "瓶安", "pingan", "pin'an", ("拼按", "pin'an"))];
+    for (input, word, code, want, plain) in cases {
+        for on in [true, false] {
+            let db =
+                std::env::temp_dir().join(format!("wind_fuzzy_preedit_user_{input}_{on}.redb"));
+            let _ = std::fs::remove_file(&db);
+            let store = Arc::new(Store::open(&db).unwrap());
+            // 两个音节都在 4 字节以内：边界位 0 与 4。
+            store
+                .add_user_word("pinyin", code, word, 2_000_000_000, 0b1_0001)
+                .unwrap();
+            let mut cfg = Config::default();
+            cfg.schema.available = vec!["pinyin".into()];
+            cfg.schema.active = "pinyin".into();
+            cfg.input.default.chinese_mode = true;
+            cfg.schema.pinyin.fuzzy.enabled = on;
+            cfg.schema.pinyin.fuzzy.in_ing = true;
+            // 关掉整句用用户词：否则「瓶安」先由词图的用户词模糊节点组成整句（边界由解码器
+            // 回填），用户层词候选那一路（`search_store_fuzzy`）就测不到了。
+            cfg.schema.pinyin.sentence_uses_user_words = false;
+            let coord = Coordinator::new_headless_with_store(cfg, Some(&data_dir()), store);
+            type_keys(&coord, input);
+            let cands = coord.debug_all_candidate_texts();
+            let preedit = coord.debug_preedit();
+            drop(coord);
+            let _ = std::fs::remove_file(&db);
+            let (top, want) = if on { (word, want) } else { plain };
+            assert_eq!(
+                cands.first().map(String::as_str),
+                Some(top),
+                "前提：模糊音 {on} 时 {input} 首选应是「{top}」，实际: {:?}",
+                &cands[..cands.len().min(5)]
+            );
+            assert_eq!(
+                preedit, want,
+                "模糊音 {on} 时 {input} 首选「{top}」的编码栏"
+            );
+        }
+    }
 }
