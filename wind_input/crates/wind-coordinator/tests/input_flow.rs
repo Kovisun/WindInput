@@ -3120,6 +3120,57 @@ fn quick_input_off_dot_prefix_types_file_extension() {
     }
 }
 
+/// `off` 档零候选下 Shift+字母按大写收进缓冲（同 auto 档大写走字面）。
+#[test]
+fn quick_input_off_empty_candidates_keeps_uppercase() {
+    use wind_ipc::protocol::MOD_SHIFT;
+    if !has_schemas() {
+        return;
+    }
+    let mut cfg = config_with("wubi86");
+    cfg.schema.mix_modes[0].free_input = wind_config::config::FreeInputMode::Off;
+    let coord = Coordinator::new_headless(cfg, Some(&data_dir()));
+    coord.handle_key_event(&key_event(0xBA, EVENT_KEY_DOWN)); // ;
+    press_char(&coord, '.');
+    let act = coord.handle_key_event(&key_event_mods(0x58, EVENT_KEY_DOWN, MOD_SHIFT));
+    assert_eq!(action_text(&act).unwrap(), ";.X");
+}
+
+/// 零候选就地收字面时按**光标处**插入，不是追加到末尾（auto / off 各一）。
+///
+/// auto 档的 `;.xlsx` 在第一个字母后就进了 Free，后续字母走 Free 的字面臂；真正走零候选
+/// 那条路的是光标落在仍属数字透镜的缓冲中间——`.5` 换不来候选，左移一格打 `x`。
+#[test]
+fn quick_input_empty_candidates_literal_inserts_at_cursor() {
+    use wind_config::config::FreeInputMode;
+    if !has_schemas() {
+        return;
+    }
+    const VK_LEFT: u32 = 0x25;
+    for mode in [FreeInputMode::Auto, FreeInputMode::Off] {
+        let mut cfg = config_with("wubi86");
+        cfg.schema.mix_modes[0].free_input = mode;
+        let coord = Coordinator::new_headless(cfg, Some(&data_dir()));
+        coord.handle_key_event(&key_event(0xBA, EVENT_KEY_DOWN)); // ;
+        press_str(&coord, ".xlsx");
+        coord.handle_key_event(&key_event(VK_LEFT, EVENT_KEY_DOWN));
+        coord.handle_key_event(&key_event(VK_LEFT, EVENT_KEY_DOWN));
+        let last = press_char(&coord, 'a');
+        assert_eq!(action_text(&last).unwrap(), ";.xlasx", "{mode:?}");
+
+        coord.handle_key_event(&key_event(0x1B, EVENT_KEY_DOWN)); // Esc 退出
+        coord.handle_key_event(&key_event(0xBA, EVENT_KEY_DOWN));
+        press_str(&coord, ".5");
+        assert!(
+            coord.debug_page_texts().is_empty(),
+            "{mode:?}：前提：`.5` 无候选"
+        );
+        coord.handle_key_event(&key_event(VK_LEFT, EVENT_KEY_DOWN));
+        let last = press_char(&coord, 'x');
+        assert_eq!(action_text(&last).unwrap(), ";.x5", "{mode:?}");
+    }
+}
+
 /// ★反向对照：`off` 档下数字透镜有候选时，越界序号的选词键仍被吃掉、不污染缓冲。
 #[test]
 fn quick_input_off_out_of_range_select_key_is_still_eaten() {
