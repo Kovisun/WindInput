@@ -4641,22 +4641,11 @@ impl EngineManager {
             // 无中文候选 ⇒ 给前缀补全（此时用户显然在打英文，补全正是他要的），
             // 精确那条由英文引擎自己排在最前。
             //
-            // 例外是可选的 `prefix_complete`（拼音，出厂关）：中文侧有候选、但整串不是完整
-            // 拼音时，在精确之外再补至多 2 条前缀词。判据见 `prefix_complete_applies`；
+            // 例外是可选的前缀补全：拼音 `prefix_complete`（整串不是完整拼音时）与码表
+            // `complete_min_length`（够长就补）。判据与条数上限都在 `english_merge::select`；
             // 双拼已在 `english_merge_cfg_for` 折掉。
-            let english = if r.candidates.is_empty() {
-                crate::english_merge::lookup_prefix_fallback(eng.as_ref(), input, cfg.min_length)
-            } else {
-                let mut v = crate::english_merge::lookup(eng.as_ref(), input, cfg.min_length);
-                if cfg.prefix_complete
-                    && crate::english_merge::prefix_complete_applies(input, cfg.min_length)
-                {
-                    let extra =
-                        crate::english_merge::lookup_prefix_complete(eng.as_ref(), input, &v);
-                    v.extend(extra);
-                }
-                v
-            };
+            let english =
+                crate::english_merge::select(eng.as_ref(), input, r.candidates.is_empty(), &cfg);
             // 通路①（满码自动上屏 / 满码空码清空）的英文守护。
             //
             // ★ 判据是「列表里有英文」**或**「按前缀英文可能出现」（`has_any`，与通路②③同口径）。
@@ -4669,7 +4658,7 @@ impl EngineManager {
             if cfg.block_commit
                 && (r.should_commit || r.should_clear)
                 && (!english.is_empty()
-                    || crate::english_merge::has_any(eng.as_ref(), input, cfg.min_length))
+                    || crate::english_merge::has_any(eng.as_ref(), input, cfg.veto_min_length()))
             {
                 r.should_commit = false;
                 r.commit_text.clear();
@@ -4742,6 +4731,8 @@ impl EngineManager {
                     min_length: c.min_length,
                     block_commit: c.block_commit,
                     prefix_complete: false,
+                    complete_min_length: c.complete_min_length,
+                    max_count: crate::english_merge::max_count_or_default(c.max_count),
                 })
             }
             EngineType::Pinyin => {
@@ -4759,6 +4750,9 @@ impl EngineManager {
                     // 判据按全拼音节定义，双拼下不生效（双拼码两键一音节，几乎任何串都解得开）。
                     // 开关关着时短路，不问方案；开着时是一次按方案 id 的缓存命中。
                     prefix_complete: p.prefix_complete && !self.pinyin_is_shuangpin_of(schema_id),
+                    // 拼音侧没有这两项：条数由精确 / 补全各自的上限决定，行为不变。
+                    complete_min_length: 0,
+                    max_count: usize::MAX,
                 })
             }
             // 混输有自带的英文混入（`schema.mix.enable_english`，带三方档位仲裁），
@@ -4841,7 +4835,8 @@ impl EngineManager {
         let Some(eng) = self.shared_english_engine() else {
             return false;
         };
-        cfg.block_commit && crate::english_merge::has_any(eng.as_ref(), input, cfg.min_length)
+        cfg.block_commit
+            && crate::english_merge::has_any(eng.as_ref(), input, cfg.veto_min_length())
     }
 
     /// 当前活跃引擎类型（必要时懒加载）

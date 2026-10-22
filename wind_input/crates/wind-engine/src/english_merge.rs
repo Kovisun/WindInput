@@ -12,42 +12,43 @@
 //!
 //! ## 与 `MixedEngine` 那套的分工——不是重复实现
 //!
-//! 混输的英文走 `MixedEngine::english_candidates` + `merge_sort_dedup`，其合并策略与
-//! `MixedEngine::truncation_tier` 的**三方档位仲裁**（码表精确 / 短语 / 英文精确+码表前缀 /
-//! 其余）耦合，而那套档位的语义又与 `convert_overflow` 的截断归属绑在一起。本模块服务的
-//! 场景只有**一路**基础候选，三方仲裁无从谈起——故另写一份简单的，而不是把混输那套拆通用。
+//! 混输的英文**取哪些**与本模块同一个入口（[`select`]、否决判据 [`has_any`]），但合并走
+//! `MixedEngine::merge_sort_dedup`：那里与 `MixedEngine::truncation_tier` 的**三方档位仲裁**
+//! （码表精确 / 短语 / 英文精确+码表前缀 / 其余）耦合，而那套档位的语义又与
+//! `convert_overflow` 的截断归属绑在一起。本模块的 [`merge`] 服务的场景只有**一路**基础候选，
+//! 三方仲裁无从谈起——故合并另写一份简单的，而不是把混输那套拆通用。
 //!
-//! ⇒ 混输方案**两份都不读**（见 `manager::EngineManager::english_merge_cfg` 的分流），
-//! 否则两套英文各混一遍，档位与配额双重失真。
+//! ⇒ 混输方案**两份配置都不读**（见 `manager::EngineManager::english_merge_cfg` 的分流），
+//! 读自己的 `schema.mix.*`，否则两套英文各混一遍，档位与配额双重失真。
 //!
 //! ## 配置按引擎分两份，本模块只认折叠后的形态
 //!
-//! `[schema.codetable.english_merge]`（三项，且经方案级 `[engine.codetable.english_merge]`
+//! `[schema.codetable.english_merge]`（六项，且经方案级 `[engine.codetable.english_merge]`
 //! 折叠）与 `[schema.pinyin.english_merge]`（两项，无 `block_commit`）是**两件独立的事**
 //! ——理由见 `wind_config::CodetableEnglishMerge` 的文档。管理器把它们折叠成
 //! [`Effective`] 再交给本模块，故这里的函数不关心取值来自哪一份。
 //!
 //! ## ★ 英文必须有保底席位，否则开关等于没做
 //!
-//! 混输里英文**没有任何配额**——这是已记录的已知缺口（见
-//! `MixedEngine` 的 `english_has_no_quota_under_codetable_flood` 测试）：英文精确虽在档 2，
-//! 但档内按合并顺序、码表先入，码表洪水下英文被整片挤掉。
+//! 混输里英文精确与码表前缀补全同在档 2，档内按合并顺序、码表先入，码表洪水下英文曾被整片
+//! 挤掉（现由 `MixedEngine::truncate_with_english_seats` 保底，见
+//! `english_survives_codetable_flood`）。
 //!
-//! 那在混输里影响有限（码表候选数有限），在**纯拼音下却是致命的**：拼音一次就能吐满
+//! 那在混输里影响尚且有限（码表候选数有限），在**纯拼音下却是致命的**：拼音一次就能吐满
 //! `max_candidates`（`ConvertOptions::admit` 的实测表里 `ni` 装满 100 条），英文若追加在
 //! 尾部再截断，会被**全部**丢掉——用户打开开关后什么也看不到，且日志、设置页均无痕迹。
 //!
 //! 故本模块反过来做：**取回来的每一条都保证活到最后**（[`merge`] 先腾座后追加）。
 //!
-//! 「英文条数」本身由 [`lookup`] 的**精确命中收窄**限住（至多 [`EXACT_MAX`] 条），
-//! 不再需要按 `max_candidates` 比例分席——用户要的是「打 hello 能看见 hello」，
+//! 「英文条数」本身由 [`select`] 限住（精确命中至多 [`EXACT_MAX`] 条，码表 / 混输再受
+//! `max_count` 封顶），不再需要按 `max_candidates` 比例分席——用户要的是「打 hello 能看见 hello」，
 //! 不是「hello 的二十个前缀词把候选页占满」。
 //!
 //! ## 位次不在本模块决定
 //!
 //! 本模块只管「查哪些、谁活下来」。英文候选**排第几**由协调器
 //! `place_english_after_common_exact` 在所有排序（含自动调频）跑完之后统一定位：
-//! 排在「中文常用精确解」之后、其余候选之前。放在这里做不到——引擎看不见协调器随后并入的
+//! 排在「中文常用精确解」之后、其余候选之前；码表 / 混输另有位次下限 `position`。放在这里做不到——引擎看不见协调器随后并入的
 //! 短语候选，也看不见调频的位置提升。
 
 use crate::engine::Engine;
@@ -94,9 +95,11 @@ const DEFAULT_MIN_LENGTH: usize = 3;
 
 /// 本次转换**生效**的英文混入参数。
 ///
-/// 来源有两个且字段不同——码表侧是 `schema.codetable.english_merge`（三项，且经方案级
+/// 来源有三个且字段不同——码表侧是 `schema.codetable.english_merge`（经方案级
 /// `[engine.codetable.english_merge]` 折叠），拼音侧是 `schema.pinyin.english_merge`
-/// （两项，无 `block_commit`）。本结构是它们折叠后的**共同形态**，让下游三条通路只认一种。
+/// （三项，无 `block_commit`），混输侧是 `schema.mix` 的 `english_*` 与
+/// `auto_commit_block_on_english`（`MixedEngine` 构建时折叠）。本结构是它们折叠后的
+/// **共同形态**，让下游三条通路只认一种。
 ///
 /// ⚠️ 拼音侧构造时 `block_commit` 恒为 `false`：那一项否决的是满码自动上屏 / 顶码上屏，
 /// 拼音方案两者都没有。写成 `false` 不是"默认关"，是"这条路上没有可否决的动作"。
@@ -106,8 +109,77 @@ pub struct Effective {
     pub min_length: usize,
     pub block_commit: bool,
     /// 中文侧有候选时也补英文前缀（[`prefix_complete_applies`] 判据下）。只有拼音侧有这项，
-    /// 码表侧恒 `false`。
+    /// 码表 / 混输侧恒 `false`（它们走 `complete_min_length`）。
     pub prefix_complete: bool,
+    /// 中文侧有候选时，输入达到几码起按长度给前缀补全（码表 / 混输的
+    /// `complete_min_length`）。0 = 不按长度补。拼音侧恒 0（它走 `prefix_complete`）。
+    pub complete_min_length: usize,
+    /// 中文侧有候选时英文合计至多几条（完整单词优先）。已解析回退值（≥1）；
+    /// 拼音侧为 `usize::MAX`（不封顶，条数由精确 / 补全各自的上限决定）。
+    pub max_count: usize,
+}
+
+impl Effective {
+    /// 上屏否决（[`has_any`]）的长度门槛：英文从几码起**可能**出现在候选里就从几码起否决。
+    ///
+    /// 完整单词从 `min_length` 起出；开了按长度补全时补全从 `complete_min_length` 起出，
+    /// 取两者较小者。门槛再低就是「英文还不会露面却先挡住上屏」。
+    pub fn veto_min_length(&self) -> usize {
+        let base = min_length_or_default(self.min_length);
+        if self.complete_min_length > 0 {
+            base.min(self.complete_min_length)
+        } else {
+            base
+        }
+    }
+}
+
+/// 中文侧有候选时英文条数上限的回退值（配置为 0 时）。码表 / 混输同口径。
+const DEFAULT_MAX_COUNT: usize = 2;
+
+/// 配置值 0 视作「用回退值」，口径同 [`min_length_or_default`]。
+pub fn max_count_or_default(configured: usize) -> usize {
+    if configured > 0 {
+        configured
+    } else {
+        DEFAULT_MAX_COUNT
+    }
+}
+
+/// 按中文侧有无候选，取这次要进候选列表的英文。码表、拼音（经 `manager::convert`）与混输
+/// （`MixedEngine`）共用这一个入口，三处口径一致。
+///
+/// | 中文侧 | 给什么 |
+/// |---|---|
+/// | 空 | [`lookup_prefix_fallback`]：前缀补全一页（不受 `max_count` 约束） |
+/// | 有 | [`lookup`] 的完整单词；补全开着且适用时再补前缀词；合计不超 `max_count` |
+///
+/// 补全两种判据：拼音走 `prefix_complete`（[`prefix_complete_applies`]，至多
+/// [`PREFIX_COMPLETE_MAX`] 条）；码表 / 混输走 `complete_min_length`（够长就补，补到
+/// `max_count` 为止）。
+pub fn select(
+    english: &dyn Engine,
+    input: &str,
+    base_empty: bool,
+    cfg: &Effective,
+) -> Vec<Candidate> {
+    if base_empty {
+        return lookup_prefix_fallback(english, input, cfg.min_length);
+    }
+    let mut v = lookup(english, input, cfg.min_length);
+    let room = if cfg.prefix_complete && prefix_complete_applies(input, cfg.min_length) {
+        PREFIX_COMPLETE_MAX
+    } else if cfg.complete_min_length > 0 && input.chars().count() >= cfg.complete_min_length {
+        cfg.max_count.saturating_sub(v.len())
+    } else {
+        0
+    };
+    if room > 0 {
+        let extra = lookup_prefix_complete(english, input, &v, room);
+        v.extend(extra);
+    }
+    v.truncate(cfg.max_count);
+    v
 }
 
 /// 配置值 0 视作「用回退值」，口径同 `schema.mix.min_english_length`。
@@ -248,8 +320,8 @@ pub fn prefix_complete_applies(input: &str, min_length: usize) -> bool {
     !crate::pinyin::syllable::is_full_pinyin_code(&input.to_ascii_lowercase(), 0)
 }
 
-/// 中文侧有候选时的英文前缀补全：至多 [`PREFIX_COMPLETE_MAX`] 条，跳过精确命中（`exact`
-/// 即 [`lookup`] 的结果，调用方会把两者拼在一起）。是否该补由 [`prefix_complete_applies`] 判。
+/// 中文侧有候选时的英文前缀补全：至多 `max` 条，跳过精确命中（`exact` 即 [`lookup`] 的
+/// 结果，调用方会把两者拼在一起）。是否该补、补几条由 [`select`] 定。
 ///
 /// 次序取英文引擎的前缀排序（按词频权重，见 `wind_dict::freq_rank`），故 `produc` 先补
 /// product。查询失败静默退化为空，口径同 [`lookup`]。
@@ -257,9 +329,10 @@ pub fn lookup_prefix_complete(
     english: &dyn Engine,
     input: &str,
     exact: &[Candidate],
+    max: usize,
 ) -> Vec<Candidate> {
     let lower = input.to_lowercase();
-    let Ok(r) = english.convert(&lower, EXACT_SCAN + PREFIX_COMPLETE_MAX) else {
+    let Ok(r) = english.convert(&lower, EXACT_SCAN + max) else {
         return Vec::new();
     };
     r.candidates
@@ -272,7 +345,7 @@ pub fn lookup_prefix_complete(
             c.meta.from_prefix_complete = true;
             c
         })
-        .take(PREFIX_COMPLETE_MAX)
+        .take(max)
         .collect()
 }
 
@@ -566,7 +639,7 @@ mod tests {
         ]);
         let exact = lookup(&eng, "hello", 0);
         assert_eq!(exact.len(), 1, "前提：精确命中 hello");
-        let extra = lookup_prefix_complete(&eng, "hello", &exact);
+        let extra = lookup_prefix_complete(&eng, "hello", &exact, PREFIX_COMPLETE_MAX);
         let texts: Vec<&str> = extra.iter().map(|c| c.text.as_str()).collect();
         assert_eq!(texts, vec!["hellos", "Hellow"], "至多 2 条、跳过精确那条");
         assert!(extra.iter().all(|c| !c.is_exact_code));
@@ -578,7 +651,104 @@ mod tests {
         // 无精确命中时照补。
         let none = lookup(&eng, "hell", 0);
         assert!(none.is_empty());
-        assert_eq!(lookup_prefix_complete(&eng, "hell", &none).len(), 2);
+        assert_eq!(
+            lookup_prefix_complete(&eng, "hell", &none, PREFIX_COMPLETE_MAX).len(),
+            2
+        );
+    }
+
+    /// 码表侧出厂口径（补全关、上限 2）。
+    fn codetable_cfg() -> Effective {
+        Effective {
+            enable: true,
+            min_length: 0,
+            block_commit: true,
+            prefix_complete: false,
+            complete_min_length: 0,
+            max_count: max_count_or_default(0),
+        }
+    }
+
+    fn texts_of(v: &[Candidate]) -> Vec<&str> {
+        v.iter().map(|c| c.text.as_str()).collect()
+    }
+
+    fn git_words() -> FakeEnglish {
+        FakeEnglish(vec![
+            ("git", "git"),
+            ("github", "GitHub"),
+            ("githubpages", "GitHub Pages"),
+            ("gitlab", "GitLab"),
+        ])
+    }
+
+    /// 出厂口径：中文侧有候选时 3 / 4 码只出完整单词，不补前缀（现状不变）。
+    #[test]
+    fn select_default_only_exact_when_base_present() {
+        let eng = git_words();
+        let cfg = codetable_cfg();
+        assert_eq!(texts_of(&select(&eng, "git", false, &cfg)), vec!["git"]);
+        assert!(select(&eng, "gith", false, &cfg).is_empty());
+        // 中文侧为空：给前缀补全一页（不受 max_count 约束）。
+        assert_eq!(
+            texts_of(&select(&eng, "gith", true, &cfg)),
+            vec!["GitHub", "GitHub Pages"]
+        );
+    }
+
+    /// `complete_min_length = 4`：4 码起中文有候选也补，3 码不补。
+    #[test]
+    fn select_complete_min_length_gates_completion() {
+        let eng = git_words();
+        let cfg = Effective {
+            complete_min_length: 4,
+            ..codetable_cfg()
+        };
+        let got = select(&eng, "gith", false, &cfg);
+        assert_eq!(texts_of(&got), vec!["GitHub", "GitHub Pages"]);
+        assert!(got.iter().all(|c| c.meta.from_prefix_complete));
+        assert_eq!(
+            texts_of(&select(&eng, "git", false, &cfg)),
+            vec!["git"],
+            "3 码不到补全门槛，只给完整单词"
+        );
+    }
+
+    /// `max_count` 封顶：完整单词优先，补全只填剩下的座位。
+    #[test]
+    fn select_max_count_caps_exact_first() {
+        let eng = git_words();
+        let one = Effective {
+            complete_min_length: 3,
+            max_count: 1,
+            ..codetable_cfg()
+        };
+        assert_eq!(texts_of(&select(&eng, "git", false, &one)), vec!["git"]);
+        let three = Effective {
+            max_count: 3,
+            ..one
+        };
+        assert_eq!(
+            texts_of(&select(&eng, "git", false, &three)),
+            vec!["git", "GitHub", "GitHub Pages"]
+        );
+    }
+
+    /// 否决门槛跟着「英文最早从几码露面」走。
+    #[test]
+    fn veto_gate_follows_completion_gate() {
+        let cfg = codetable_cfg();
+        assert_eq!(cfg.veto_min_length(), 3);
+        let early = Effective {
+            complete_min_length: 2,
+            ..cfg
+        };
+        assert_eq!(early.veto_min_length(), 2, "补全 2 码起出，否决也该 2 码起");
+        let late = Effective {
+            complete_min_length: 5,
+            ..cfg
+        };
+        assert_eq!(late.veto_min_length(), 3, "完整单词仍从 3 码起出");
     }
 
     /// 同文本不重复入列，且被丢弃那条的码位并进幸存者。

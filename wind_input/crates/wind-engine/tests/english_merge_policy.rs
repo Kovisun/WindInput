@@ -1,4 +1,9 @@
-//! 码表方案英文混入的上屏否决在**真实词库**下的验证。
+//! 英文混入策略（`complete_min_length` / `max_count` / 上屏否决口径）在**真实词库**下的验证：
+//! 码表方案（`[schema.codetable.english_merge]`，可经方案级覆盖）与混输（`[schema.mix]`
+//! 的 `english_*`）同一套口径。
+//!
+//! 位次（`position`）在协调器定位，守门测试在 `wind-coordinator` 的 `english_placement_tests`。
+
 use std::path::PathBuf;
 use wind_candidate::{Candidate, CandidateSource};
 use wind_config::Config;
@@ -32,11 +37,70 @@ fn english(r: &wind_engine::ConvertResult) -> Vec<&Candidate> {
         .collect()
 }
 
+fn has_chinese(r: &wind_engine::ConvertResult) -> bool {
+    r.candidates
+        .iter()
+        .any(|c| c.source != CandidateSource::English)
+}
+
 fn wubi(f: impl FnOnce(&mut Config)) -> EngineManager {
     let mut cfg = make_config("wubi86");
     cfg.schema.codetable.english_merge.enable = true;
     f(&mut cfg);
     EngineManager::new(&cfg, Some(&data_dir()))
+}
+
+/// ① 出厂口径：中文侧有候选时 3 / 4 码只出完整单词，`gith` 不补 github（现状不变）。
+#[test]
+fn codetable_default_only_exact_words() {
+    if !ready("wubi86") {
+        return;
+    }
+    let mgr = wubi(|_| {});
+    let r = mgr.convert("gith", 50);
+    assert!(has_chinese(&r), "前提：五笔 gith 有中文候选");
+    assert!(
+        english(&r).is_empty(),
+        "出厂不补前缀，实际 {:?}",
+        english(&r)
+    );
+    let r3 = mgr.convert("git", 50);
+    assert!(has_chinese(&r3), "前提：五笔 git 有中文候选");
+    assert!(
+        english(&r3).iter().all(|c| c.code == "git"),
+        "3 码只收完整单词：{:?}",
+        english(&r3)
+    );
+}
+
+/// ② `complete_min_length = 4`：`gith` 中文侧有候选也补出 github；3 码不补。
+/// ③ `max_count` 限条数。
+#[test]
+fn codetable_complete_min_length_and_max_count() {
+    if !ready("wubi86") {
+        return;
+    }
+    let mgr = wubi(|c| c.schema.codetable.english_merge.complete_min_length = 4);
+    let r = mgr.convert("gith", 50);
+    assert!(has_chinese(&r), "前提：五笔 gith 有中文候选");
+    let en = english(&r);
+    assert!(
+        en.iter().any(|c| c.text.eq_ignore_ascii_case("github")),
+        "gith 应补出 github，实际 {en:?}"
+    );
+    assert!(en.len() <= 2, "出厂上限 2 条，实际 {}", en.len());
+    assert!(
+        english(&mgr.convert("git", 50))
+            .iter()
+            .all(|c| c.code == "git"),
+        "3 码不到补全门槛"
+    );
+
+    let one = wubi(|c| {
+        c.schema.codetable.english_merge.complete_min_length = 4;
+        c.schema.codetable.english_merge.max_count = 1;
+    });
+    assert_eq!(english(&one.convert("gith", 50)).len(), 1, "max_count = 1");
 }
 
 /// ⑤ 漏洞：开满码自动上屏时，英文词的 4 码前缀（此刻无精确命中、列表里没有英文）须被
@@ -70,5 +134,30 @@ fn codetable_block_commit_vetoes_prefix_at_full_code() {
     assert_eq!(
         plain.should_commit,
         build(false).convert("aaaa", 50).should_commit
+    );
+}
+
+/// ⑦ 方案级 `[engine.codetable.english_merge]` 逐字段覆盖全局。
+#[test]
+fn codetable_schema_override_applies() {
+    if !ready("wubi86") {
+        return;
+    }
+    let mut cfg = make_config("wubi86");
+    cfg.schema.codetable.english_merge.enable = true;
+    let ov = std::env::temp_dir().join("wind_english_merge_policy_ov");
+    let _ = std::fs::remove_dir_all(&ov);
+    std::fs::create_dir_all(&ov).unwrap();
+    std::fs::write(
+        ov.join("wubi86.toml"),
+        "[engine.codetable.english_merge]\ncomplete_min_length = 4\n",
+    )
+    .unwrap();
+    let mgr = EngineManager::with_store_override(&cfg, Some(&data_dir()), None, Some(ov));
+    assert!(
+        english(&mgr.convert("gith", 50))
+            .iter()
+            .any(|c| c.text.eq_ignore_ascii_case("github")),
+        "方案里写的 complete_min_length 应生效"
     );
 }
