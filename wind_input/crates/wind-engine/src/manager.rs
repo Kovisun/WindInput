@@ -4641,34 +4641,28 @@ impl EngineManager {
             // 无中文候选 ⇒ 给前缀补全（此时用户显然在打英文，补全正是他要的），
             // 精确那条由英文引擎自己排在最前。
             //
-            // 例外是可选的 `prefix_complete`（拼音，出厂关）：中文侧有候选、但整串不是完整
-            // 拼音时，在精确之外再补至多 2 条前缀词。判据见 `prefix_complete_applies`；
+            // 例外是可选的前缀补全：拼音 `prefix_complete`（整串不是完整拼音时）与码表
+            // `complete_min_length`（够长就补）。判据与条数上限都在 `english_merge::select`；
             // 双拼已在 `english_merge_cfg_for` 折掉。
-            let english = if r.candidates.is_empty() {
-                crate::english_merge::lookup_prefix_fallback(eng.as_ref(), input, cfg.min_length)
-            } else {
-                let mut v = crate::english_merge::lookup(eng.as_ref(), input, cfg.min_length);
-                if cfg.prefix_complete
-                    && crate::english_merge::prefix_complete_applies(input, cfg.min_length)
-                {
-                    let extra =
-                        crate::english_merge::lookup_prefix_complete(eng.as_ref(), input, &v);
-                    v.extend(extra);
-                }
-                v
-            };
+            let english =
+                crate::english_merge::select(eng.as_ref(), input, r.candidates.is_empty(), &cfg);
+            // 通路①（满码自动上屏 / 满码空码清空）的英文守护，两级判据见
+            // `english_merge::vetoes_commit`（与通路②③、混输同口径）。
+            //
+            // ★ 前缀级不能只看列表：默认配置下 `gith` 的精确命中还不存在、列表里没有英文，满码
+            // 就在第 4 键把中文顶上屏，`github` 永远敲不完。`AGENTS.md` 要求的「对方确有候选」
+            // 由前缀命中兑现：拦下后用户继续敲，完整单词必然露面。
+            //
+            // `should_clear` 一并否决：满码无码表匹配时清空缓冲会把用户正在打的英文词
+            // 一起抹掉，与顶掉它是同一种伤害。只在确有可否决的动作时才多查一次英文。
+            if (r.should_commit || r.should_clear)
+                && crate::english_merge::vetoes_commit(eng.as_ref(), input, &english, &cfg)
+            {
+                r.should_commit = false;
+                r.commit_text.clear();
+                r.should_clear = false;
+            }
             if !english.is_empty() {
-                // 通路①（满码自动上屏 / 满码空码清空）的英文守护。
-                // `AGENTS.md`：否决必须叠「对方确有候选」——本分支已在 `!english.is_empty()`
-                // 之内，判据与下面并入列表的是**同一批候选、同一个 input**，天然同源。
-                //
-                // `should_clear` 一并否决：满码无码表匹配时清空缓冲会把用户正在打的英文词
-                // 一起抹掉，与顶掉它是同一种伤害。
-                if cfg.block_commit {
-                    r.should_commit = false;
-                    r.commit_text.clear();
-                    r.should_clear = false;
-                }
                 crate::english_merge::merge(&mut r.candidates, english, max_candidates);
                 // 「有输入但无候选」的判据须随之更新：英文进来了就不再是空码，
                 // 漏掉这行会让协调器按空码处置（吃键 / 清空），候选却是有的。
@@ -4734,7 +4728,10 @@ impl EngineManager {
                     enable: c.enable,
                     min_length: c.min_length,
                     block_commit: c.block_commit,
+                    block_commit_on_word: c.block_commit_on_word,
                     prefix_complete: false,
+                    complete_min_length: c.complete_min_length,
+                    max_count: crate::english_merge::max_count_or_default(c.max_count),
                 })
             }
             EngineType::Pinyin => {
@@ -4749,9 +4746,13 @@ impl EngineManager {
                     min_length: p.min_length,
                     // 见 `Effective::block_commit`：拼音没有满码上屏 / 顶码可否决。
                     block_commit: false,
+                    block_commit_on_word: false,
                     // 判据按全拼音节定义，双拼下不生效（双拼码两键一音节，几乎任何串都解得开）。
                     // 开关关着时短路，不问方案；开着时是一次按方案 id 的缓存命中。
                     prefix_complete: p.prefix_complete && !self.pinyin_is_shuangpin_of(schema_id),
+                    // 拼音侧没有这两项：条数由精确 / 补全各自的上限决定，行为不变。
+                    complete_min_length: 0,
+                    max_count: usize::MAX,
                 })
             }
             // 混输有自带的英文混入（`schema.mix.enable_english`，带三方档位仲裁），
@@ -4834,7 +4835,40 @@ impl EngineManager {
         let Some(eng) = self.shared_english_engine() else {
             return false;
         };
-        cfg.block_commit && crate::english_merge::has_any(eng.as_ref(), input, cfg.min_length)
+        crate::english_merge::vetoes_commit(eng.as_ref(), input, &[], &cfg)
+    }
+
+    /// 活跃方案里英文候选的位次下限 `(完整单词, 前缀补全)`（1 起），供协调器
+    /// `place_english_after_common_exact` 定位。配置 0 回退各自出厂值（1 / 2）。
+    ///
+    /// 码表取方案级折叠后的 `english_merge.{exact,complete}_position`，混输取
+    /// `schema.mix.english_{exact,complete}_position`；拼音与英文方案没有这两项，恒 `(1, 1)`
+    /// （= 不额外限制，行为不变）。
+    pub fn active_english_positions(&self) -> (usize, usize) {
+        let Some(engine) = self.active_engine() else {
+            return (1, 1);
+        };
+        let (exact, complete) = match engine.engine_type() {
+            EngineType::CodeTable => {
+                let e = self
+                    .codetable_settings_of(&self.active_schema_id())
+                    .english_merge;
+                (e.exact_position, e.complete_position)
+            }
+            EngineType::Mixed => {
+                let m = self.mix.lock().unwrap_or_else(|e| e.into_inner());
+                (m.english_exact_position, m.english_complete_position)
+            }
+            EngineType::Pinyin | EngineType::English => return (1, 1),
+        };
+        let or = |v: usize, d: usize| if v > 0 { v } else { d };
+        (
+            or(exact, wind_config::config::default_english_exact_position()),
+            or(
+                complete,
+                wind_config::config::default_english_complete_position(),
+            ),
+        )
     }
 
     /// 当前活跃引擎类型（必要时懒加载）
@@ -6769,6 +6803,9 @@ impl EngineManager {
                 show_source_hint: mix_cfg.show_source_hint,
                 min_english_length: min_en,
                 auto_commit_block_on_english: mix_cfg.auto_commit_block_on_english,
+                block_commit_on_english_word: mix_cfg.block_commit_on_english_word,
+                english_complete_min_length: mix_cfg.english_complete_min_length,
+                english_max_count: mix_cfg.english_max_count,
                 block_commit_on_pinyin_word: mix_cfg.block_commit_on_pinyin_word,
                 pinyin_word_min_weight: mix_cfg.pinyin_word_min_weight,
                 pinyin_partial_candidates: mix_cfg.pinyin_partial_candidates,

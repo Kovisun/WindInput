@@ -2488,6 +2488,21 @@ impl CodetableGlobal {
             if let Some(v) = e.block_commit {
                 out.english_merge.block_commit = v;
             }
+            if let Some(v) = e.complete_min_length {
+                out.english_merge.complete_min_length = v;
+            }
+            if let Some(v) = e.block_commit_on_word {
+                out.english_merge.block_commit_on_word = v;
+            }
+            if let Some(v) = e.exact_position {
+                out.english_merge.exact_position = v;
+            }
+            if let Some(v) = e.complete_position {
+                out.english_merge.complete_position = v;
+            }
+            if let Some(v) = e.max_count {
+                out.english_merge.max_count = v;
+            }
         }
         out
     }
@@ -2852,14 +2867,36 @@ pub struct MixGlobal {
     #[serde(default = "default_true")]
     pub auto_commit_block_on_pinyin: bool,
     /// 满码上屏遇英文候选则否决（保护正在输入英文词的用户；仅 enable_english 开时有意义）。
+    /// **前缀级**：有英文词以当前串开头即否决；开着时涵盖下面的成词级。
     #[serde(default)]
     pub auto_commit_block_on_english: bool,
+    /// **成词级**英文否决：整串恰是一个英文完整单词时否决满码 / 顶码上屏（英文临时词不算）。
+    /// 默认开；与前缀级 `auto_commit_block_on_english` 的关系同拼音那对
+    /// （`auto_commit_block_on_pinyin` / `block_commit_on_pinyin_word`）。
+    #[serde(default = "default_true")]
+    pub block_commit_on_english_word: bool,
     /// 拼音最小触发长度（0=回退 2）。
     #[serde(default)]
     pub min_pinyin_length: usize,
     /// 英文最小触发长度（0=回退 3，即 2 字符以内不查英文；预留可配）。
     #[serde(default)]
     pub min_english_length: usize,
+    /// 中文侧有候选时，输入达到几码起也给英文前缀补全。0 = 不补（出厂值）。
+    /// 口径同 `schema.codetable.english_merge.complete_min_length`。
+    #[serde(default)]
+    pub english_complete_min_length: usize,
+    /// 完整单词英文最靠前排第几位（1 起；0 = 默认 1）。
+    /// 口径同 `schema.codetable.english_merge.exact_position`。
+    #[serde(default = "default_english_exact_position")]
+    pub english_exact_position: usize,
+    /// 前缀补全英文最靠前排第几位（1 起；0 = 默认 2）。
+    /// 口径同 `schema.codetable.english_merge.complete_position`。
+    #[serde(default = "default_english_complete_position")]
+    pub english_complete_position: usize,
+    /// 中文侧有候选时英文最多几条（0 = 默认 2），截断时为它们保底留座。
+    /// 口径同 `schema.codetable.english_merge.max_count`。
+    #[serde(default = "default_english_max_count")]
+    pub english_max_count: usize,
     /// 拼音歧义拦截（词强度启发式）：整串是强拼音词时否决五笔自动/顶码上屏，让拼音赢
     /// （如 wangba→网吧；aipu 无强词则放行落实）。默认开；独立于 auto_commit_block_on_pinyin。
     #[serde(default = "default_true")]
@@ -2906,8 +2943,13 @@ impl Default for MixGlobal {
             top_code_override_pinyin: false,
             auto_commit_block_on_pinyin: true,
             auto_commit_block_on_english: false,
+            block_commit_on_english_word: true,
             min_pinyin_length: 0,
             min_english_length: 0,
+            english_complete_min_length: 0,
+            english_exact_position: default_english_exact_position(),
+            english_complete_position: default_english_complete_position(),
+            english_max_count: default_english_max_count(),
             block_commit_on_pinyin_word: true,
             pinyin_word_min_weight: 0,
             // ⚠️ 同属「三处同源」：本处 / `MixConfig::default()` / `data/config.toml`。
@@ -2946,14 +2988,15 @@ impl Default for MixGlobal {
 /// 归属绑在一起。混输方案不读本段，否则两套英文各混一遍、档位与配额双重失真。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CodetableEnglishMerge {
-    /// 在候选列表里混入英文词库候选（只收**精确命中**，前缀扩展不入列）。出厂关。
+    /// 在候选列表里混入英文词库候选（中文侧有候选时只收**精确命中**，按
+    /// [`Self::complete_min_length`] 才补前缀）。出厂关。
     #[serde(default)]
     pub enable: bool,
     /// 最小触发长度（0=回退 3，即 2 字符以内不查英文）。口径同 `schema.mix.min_english_length`。
     #[serde(default)]
     pub min_length: usize,
     /// 存在英文候选时否决**满码自动上屏 / 顶码上屏 / 满码空码清空**（保护正在输入英文词的用户）。
-    /// 默认开。
+    /// 默认开。**前缀级**：有英文词以当前串开头即否决，开着时涵盖成词级 [`Self::block_commit_on_word`]。
     ///
     /// ⚠️ 默认值与 `schema.mix.auto_commit_block_on_english`（默认**关**）刻意相反，不是漂移。
     /// 那边默认关，是因为混输用户以码表为主、顶码要保持可用，英文只是捎带；而本段是用户
@@ -2965,6 +3008,42 @@ pub struct CodetableEnglishMerge {
     /// `gith` 时精确命中还不存在，若否决也要求精确，满码就会在第 4 键把中文顶上屏。
     #[serde(default = "default_true")]
     pub block_commit: bool,
+    /// **成词级**否决：整串恰是一个英文完整单词时否决满码 / 顶码上屏 / 满码空码清空（英文
+    /// 临时词不算）。默认开。前缀级 [`Self::block_commit`] 关掉时，用它保住「打完一个英文词
+    /// 不被顶走」，又不让英文词的前缀拦住五笔满码。两级关系同混输拼音那对。
+    #[serde(default = "default_true")]
+    pub block_commit_on_word: bool,
+    /// 中文侧有候选时，输入达到几码起也给英文前缀补全（`gith` → github）。
+    /// 0 = 不补，只在中文侧为空时补（出厂值）。
+    #[serde(default)]
+    pub complete_min_length: usize,
+    /// 完整单词英文最靠前排第几位（1 起；0 = 默认 1）。仍先让过开头连续的完整匹配中文，
+    /// 只会更靠后。由协调器 `place_english_after_common_exact` 应用。
+    #[serde(default = "default_english_exact_position")]
+    pub exact_position: usize,
+    /// 前缀补全英文最靠前排第几位（1 起；0 = 默认 2）。同样先让过开头的完整匹配中文，且恒排在
+    /// 完整单词英文之后。
+    #[serde(default = "default_english_complete_position")]
+    pub complete_position: usize,
+    /// 中文侧有候选时英文最多几条（完整单词 + 补全合计，完整单词优先；0 = 默认 2）。
+    /// 中文侧为空时不受本项约束（给一页前缀补全）。
+    #[serde(default = "default_english_max_count")]
+    pub max_count: usize,
+}
+
+/// 完整单词英文最靠前位次的出厂值（码表 / 混输两份同值）。
+pub fn default_english_exact_position() -> usize {
+    1
+}
+
+/// 前缀补全英文最靠前位次的出厂值（码表 / 混输两份同值）。
+pub fn default_english_complete_position() -> usize {
+    2
+}
+
+/// 中文侧有候选时英文条数上限的出厂值（码表 / 混输两份同值）。
+fn default_english_max_count() -> usize {
+    2
 }
 
 impl Default for CodetableEnglishMerge {
@@ -2974,6 +3053,11 @@ impl Default for CodetableEnglishMerge {
             min_length: 0,
             // 见字段文档：这一项与 `schema.mix.auto_commit_block_on_english` 默认值相反是刻意的。
             block_commit: true,
+            block_commit_on_word: true,
+            complete_min_length: 0,
+            exact_position: default_english_exact_position(),
+            complete_position: default_english_complete_position(),
+            max_count: default_english_max_count(),
         }
     }
 }

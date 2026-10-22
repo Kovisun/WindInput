@@ -116,8 +116,8 @@ leading_chars = ""
 # 的比较链**不含 weight**，只看「有没有被选过」。五笔一简 25 个码每个都是二选一
 # （a → 工 9999 / 戈 9998），次选字被误选一次就永久翻转。故简码位保住首选、全码位放开。
 # 英文候选混入（码表方案）：候选列表里捎带英文词库候选，打 hello 直接选到 hello，
-# 不必切英文方案或走临时英文。只有**整串恰好是一个英文词**时才混入——打 githu 不出
-# GitHub，想打某个词要敲完整。
+# 不必切英文方案或走临时英文。有中文候选时默认只在**整串恰好是一个英文词**时混入——
+# 打 githu 不出 GitHub；想边打边补全，见下方 complete_min_length。
 #
 # 与 [schema.pinyin.english_merge] 是**两件独立的事**：码表用户常打命令行、变量名，
 # 开着有用；全拼的英文词与拼音串大面积重叠，是否要开是另一个判断。取值互不共享。
@@ -127,10 +127,23 @@ leading_chars = ""
 enable = false
 # 最小触发长度（2 字符以内不查英文；0=回退 3）。调小只是让更短的词（the/and）也参与。
 min_length = 3
-# 有英文候选时否决满码自动上屏 / 顶码上屏 / 满码空码清空。
-# 定长码表**必须开着**：4 码即满码上屏，关掉的话打 github 到第 4 键就被顶出中文。
+# 有英文候选时否决满码自动上屏 / 顶码上屏 / 满码空码清空（**前缀级**：有英文词以当前串开头即否决）。
+# 定长码表建议开着：4 码即满码上屏，关掉的话打 github 到第 4 键就被顶出中文。
 # ⚠️ 本项按**前缀**命中判（打到 gith 时精确命中还不存在），与「只收精确命中」不同域。
+# 开着时涵盖下面的成词级。
 block_commit = true
+# **成词级**：整串恰是一个英文完整单词时否决上屏（英文临时词不算）。前缀级关掉时，
+# 它仍保住「打完一个英文词不被顶走」，又不让英文词的前缀拦住五笔满码。
+block_commit_on_word = true
+# 中文侧有候选时，输入达到几码起也给英文前缀补全（如设 4：五笔打 gith 也出 github）。
+# 0 = 不补，只在中文侧没有候选时补全。
+complete_min_length = 0
+# 完整单词英文最靠前排第几位（1 起；0 = 默认 1）。仍先让过开头连续的完整匹配中文，只会更靠后。
+exact_position = 1
+# 前缀补全英文最靠前排第几位（1 起；0 = 默认 2）。同样先让过开头的完整匹配中文，且恒在完整单词之后。
+complete_position = 2
+# 中文侧有候选时英文最多几条（完整单词优先，再补前缀补全）；中文侧没有候选时给一页补全。
+max_count = 2
 
 [schema.codetable.frequency]
 enabled = false
@@ -552,10 +565,24 @@ top_code_override_pinyin = false
 # （wanle→完了，消费整串）照常拦住清空。
 auto_commit_block_on_pinyin = true
 # 满码上屏遇英文候选则否决（保护正在输入英文词的用户；仅 enable_english 开时有意义）。
+# **前缀级**：有英文词以当前串开头即否决；开着时涵盖下面的成词级。
 auto_commit_block_on_english = false
+# **成词级**：整串恰是一个英文完整单词时否决满码 / 顶码上屏（英文临时词不算；仅 enable_english
+# 开时有意义）。两级关系同上面拼音那对（auto_commit_block_on_pinyin / block_commit_on_pinyin_word）。
+block_commit_on_english_word = true
 min_pinyin_length = 2
 # 英文最小触发长度（2 字符以内不查英文；0=回退 3）。
 min_english_length = 3
+# 以下四项口径同 [schema.codetable.english_merge] 的 complete_min_length / exact_position /
+# complete_position / max_count。
+# 中文侧有候选时，输入达到几码起也给英文前缀补全（0 = 不补，只在中文侧没有候选时补全）。
+english_complete_min_length = 0
+# 完整单词英文最靠前排第几位（1 起；0 = 默认 1；仍先让过开头连续的完整匹配中文）。
+english_exact_position = 1
+# 前缀补全英文最靠前排第几位（1 起；0 = 默认 2；恒在完整单词之后）。
+english_complete_position = 2
+# 中文侧有候选时英文最多几条；截断时为这几条保底留座。
+english_max_count = 2
 # 拼音歧义拦截（词强度）：整串是强拼音词时否决五笔自动/顶码上屏，让拼音赢
 # （wangba→网吧 拦；aipu→落实 无强词放行）。独立于 auto_commit_block_on_pinyin。
 block_commit_on_pinyin_word = true
