@@ -380,6 +380,8 @@ impl Coordinator {
 
     fn refill_temp_pinyin_candidates(&self, state: &mut State) {
         state.candidates.clear();
+        // 不分批加载：主路残留的 `has_more` 会让翻页 / 展开按主路缓冲扩容，冲掉本模式的候选。
+        state.has_more = false;
         self.reset_candidate_view(state);
         state.overlay_forms = Default::default();
         let prefix = format!("{}{}", state.temp_pinyin_prefix, state.committed_text);

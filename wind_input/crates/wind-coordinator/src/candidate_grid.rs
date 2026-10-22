@@ -2067,4 +2067,36 @@ mod tests {
         c.reset_candidate_view(&mut st);
         assert!(!c.try_expand_grid(&mut st), "数字透镜不展开");
     }
+
+    /// 主路残留的 `has_more = true` 不能带进临拼 / 快捷输入：它们不分批加载，`expand_candidates`
+    /// 只认主路缓冲，带进来的话 PageDown 展开时会按主路重建、把本模式的候选冲掉。
+    #[test]
+    fn stale_has_more_does_not_leak_into_overlays() {
+        for (lead, mode) in [(0xC0u32, ModeKind::TempPinyin), (0xBA, ModeKind::Mix(0))] {
+            let Some((c, _rx)) = mix_coord(wind_config::LayoutIntent::Horizontal, false) else {
+                return;
+            };
+            {
+                let mut st = c.state.lock().unwrap();
+                st.has_more = true;
+                st.candidate_limit = 50;
+                st.candidate_input = String::new(); // 与 overlay 下恒空的主路缓冲同形
+            }
+            c.handle_key_event(&key(lead));
+            for ch in "SHI".chars() {
+                c.handle_key_event(&key(ch as u32));
+            }
+            let before = texts(&c);
+            c.handle_key_event(&key(keymap::VK_NEXT));
+            assert_eq!(view(&c).2, Some(0), "{mode:?}：展开");
+            // 一路换行到底：途经可见区要预取的位置（`grid_ensure_loaded`）。
+            for _ in 0..16 {
+                c.handle_key_event(&key(keymap::VK_DOWN));
+            }
+            assert_eq!(texts(&c), before, "{mode:?}：候选不被主路扩容改写");
+            let st = c.state.lock().unwrap();
+            assert_eq!(st.active, Some(mode));
+            assert!(!st.has_more, "{mode:?}：不分批加载");
+        }
+    }
 }
