@@ -6796,6 +6796,8 @@ impl EngineManager {
                 show_source_hint: mix_cfg.show_source_hint,
                 min_english_length: min_en,
                 auto_commit_block_on_english: mix_cfg.auto_commit_block_on_english,
+                english_complete_min_length: mix_cfg.english_complete_min_length,
+                english_max_count: mix_cfg.english_max_count,
                 block_commit_on_pinyin_word: mix_cfg.block_commit_on_pinyin_word,
                 pinyin_word_min_weight: mix_cfg.pinyin_word_min_weight,
                 pinyin_partial_candidates: mix_cfg.pinyin_partial_candidates,

@@ -161,3 +161,58 @@ fn codetable_schema_override_applies() {
         "方案里写的 complete_min_length 应生效"
     );
 }
+
+fn mixed(f: impl FnOnce(&mut Config)) -> EngineManager {
+    let mut cfg = make_config("wubi86_pinyin");
+    cfg.schema.mix.enable_english = true;
+    f(&mut cfg);
+    EngineManager::new(&cfg, Some(&data_dir()))
+}
+
+/// ⑥ 混输同口径：默认 `gith` 不补；`english_complete_min_length = 4` 时补；上限生效。
+#[test]
+fn mixed_complete_min_length_and_max_count() {
+    if !ready("wubi86_pinyin") {
+        return;
+    }
+    let r = mixed(|_| {}).convert("gith", 50);
+    assert!(has_chinese(&r), "前提：混输 gith 有中文候选");
+    assert!(english(&r).is_empty(), "默认不补：{:?}", english(&r));
+
+    let mgr = mixed(|c| c.schema.mix.english_complete_min_length = 4);
+    let en_r = mgr.convert("gith", 50);
+    let en = english(&en_r);
+    assert!(
+        en.iter().any(|c| c.text.eq_ignore_ascii_case("github")),
+        "gith 应补出 github，实际 {en:?}"
+    );
+    assert!(en.len() <= 2);
+
+    let one = mixed(|c| {
+        c.schema.mix.english_complete_min_length = 4;
+        c.schema.mix.english_max_count = 1;
+    });
+    assert_eq!(english(&one.convert("gith", 50)).len(), 1);
+}
+
+/// ⑥ 混输的英文守护同样按前缀否决：`abse`（absent 的前缀）满码不得把中文顶上屏。
+#[test]
+fn mixed_block_on_english_vetoes_prefix_at_full_code() {
+    if !ready("wubi86_pinyin") {
+        return;
+    }
+    let build = |block: bool| {
+        mixed(|c| {
+            c.schema.codetable.auto_commit_at_full = true;
+            c.schema.mix.auto_commit_block_on_english = block;
+        })
+    };
+    assert!(
+        build(false).convert("abse", 50).should_commit,
+        "前提：关掉英文守护时混输 abse 满码上屏，否则测不到否决"
+    );
+    assert!(
+        !build(true).convert("abse", 50).should_commit,
+        "混输开英文守护时 abse 满码上屏须被否决"
+    );
+}

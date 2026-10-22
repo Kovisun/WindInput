@@ -25,7 +25,7 @@ const PINYIN_CLAIM_PROBE_LIMIT: usize = 300;
 ///
 /// 两者都随调用路径变化，故不能从候选自身推出，必须由调用方按语境传入：
 /// - `codetable_exact`：主路径 = `input`，overflow = **前 N 码前缀**；
-/// - `english_exact`：恒为小写化的 `input`（与 [`MixedEngine::english_candidates`] 同口径）。
+/// - `english_exact`：恒为小写化的 `input`（与 `english_merge::lookup` 同口径）。
 #[derive(Clone, Copy)]
 struct TruncationCtx<'a> {
     codetable_exact: &'a str,
@@ -95,6 +95,10 @@ pub struct MixConfig {
     pub show_source_hint: bool,
     pub min_english_length: usize,
     pub auto_commit_block_on_english: bool,
+    /// 中文侧有候选时按长度补英文前缀的门槛（0 = 不补）。见 `english_merge::select`。
+    pub english_complete_min_length: usize,
+    /// 中文侧有候选时英文合计至多几条（0 = 默认 2），截断时为它们保底留座。
+    pub english_max_count: usize,
     pub block_commit_on_pinyin_word: bool,
     pub pinyin_word_min_weight: i32,
 }
@@ -114,8 +118,11 @@ impl Default for MixConfig {
             pinyin_only_overflow: true,
             top_code_override_pinyin: false,
             show_source_hint: false,
-            min_english_length: 2,
+            // 与 `manager::build_engine` 的回退值、`english_merge` 的 DEFAULT_MIN_LENGTH 同为 3。
+            min_english_length: 3,
             auto_commit_block_on_english: false,
+            english_complete_min_length: 0,
+            english_max_count: 2,
             block_commit_on_pinyin_word: true,
             pinyin_word_min_weight: 0,
         }
@@ -175,10 +182,11 @@ pub struct MixedEngine {
     /// 临英、快捷输入英文都用它）是**同一个实例**。英文引擎带一张按用户词库规模增长的
     /// 词组分词索引，靶机 18 万条时每份 12.7 MB，各建一份是纯浪费。
     english: Option<Arc<dyn Engine>>,
-    /// 英文最小触发长度：输入短于此值时不查英文（2 字符以内不匹配 → 默认 3）。
-    min_english_length: usize,
-    /// 满码自动上屏时若存在英文候选（含前缀）则否决（保护正在输入英文词的用户）。
-    auto_commit_block_on_english: bool,
+    /// 英文取用策略（最小长度 / 补全门槛 / 条数上限 / 上屏否决），与码表方案的
+    /// `english_merge` 折成同一形态，经 `english_merge::select` / `has_any` 共用一套口径。
+    /// `block_commit` 即 `auto_commit_block_on_english`：存在英文候选（含前缀）时否决满码 /
+    /// 顶码上屏。
+    english_policy: crate::english_merge::Effective,
     /// 拼音歧义拦截（词强度）：整串是强拼音词时否决五笔自动/顶码上屏，让拼音赢
     /// （wangba→网吧；aipu 无强词则放行落实）。默认开；独立于 auto_commit_block_on_pinyin。
     block_commit_on_pinyin_word: bool,
@@ -208,8 +216,14 @@ impl MixedEngine {
             max_code_len,
             show_source_hint: cfg.show_source_hint,
             english,
-            min_english_length: cfg.min_english_length,
-            auto_commit_block_on_english: cfg.auto_commit_block_on_english,
+            english_policy: crate::english_merge::Effective {
+                enable: true,
+                min_length: cfg.min_english_length,
+                block_commit: cfg.auto_commit_block_on_english,
+                prefix_complete: false,
+                complete_min_length: cfg.english_complete_min_length,
+                max_count: crate::english_merge::max_count_or_default(cfg.english_max_count),
+            },
             block_commit_on_pinyin_word: cfg.block_commit_on_pinyin_word,
             pinyin_word_min_weight: cfg.pinyin_word_min_weight,
         }
@@ -331,9 +345,9 @@ impl MixedEngine {
     /// 与 [`Self::pinyin_claims_overflow`] 对称 —— 超码长归属问的是「谁解释得了整串」。码表只
     /// 解释得了前 N 码（`gith`=不算），英文却吃得下整个 `github`，归属就不该判给码表。
     ///
-    /// ⚠️ 判据刻意用**精确整串**而非 `english_candidates` 的「有候选（含前缀）」：英文库 21918 条，
+    /// ⚠️ 判据刻意用**精确整串**而非 [`Self::english_vetoes`] 的「有词条（含前缀）」：英文库 21918 条，
     /// 前缀面极大，按前缀判会让一堆恰好撞上某英文词开头的五笔全码平白丢掉归属。也不走
-    /// `english_candidates` 取候选再比对 —— 那会被 `max_candidates` 截断，精确词未必在前几条。
+    /// 取候选再比对 —— 那会被取数上限截断，精确词未必在前几条。
     ///
     /// ⚠️ **不读 `auto_commit_block_on_english`**：那是**上屏否决**开关（出厂 `false`），本判据决定的
     /// 是**候选归属/排序**，两者正交。若受其支配，默认配置的用户照样会看到 `github` 首选是「不算」。
@@ -491,7 +505,30 @@ impl MixedEngine {
             deduped.push(c);
         }
         *cands = deduped;
-        Self::truncate_with_pinyin_quota(cands, max_candidates);
+        Self::truncate_with_english_seats(cands, max_candidates);
+    }
+
+    /// 截断时**英文全员保底**，其余候选走 [`Self::truncate_with_pinyin_quota`]。
+    ///
+    /// 进到这里的英文已由 `english_merge::select` 限好条数（中文侧有候选时至多
+    /// `english_max_count` 条；中文侧为空时列表里本就只有英文），故「全员保底」即「保底不超过
+    /// `english_max_count`」。不保底的话，码表前缀补全洪水下英文精确会被整片挤掉——码表在
+    /// 档 0 / 档 2、英文精确同在档 2 且排在码表之后（`english_survives_codetable_flood`）。
+    ///
+    /// 手法同码表方案的 `english_merge::merge`：先给英文腾座，再追加在尾部。尾部追加不影响
+    /// 显示序——协调器 `candidate_display_order` 会无条件重排全部候选。
+    fn truncate_with_english_seats(cands: &mut Vec<Candidate>, max_candidates: usize) {
+        let is_en = |c: &Candidate| c.source == CandidateSource::English;
+        if cands.len() <= max_candidates || !cands.iter().any(is_en) {
+            Self::truncate_with_pinyin_quota(cands, max_candidates);
+            return;
+        }
+        let (mut english, mut rest): (Vec<Candidate>, Vec<Candidate>) =
+            std::mem::take(cands).into_iter().partition(is_en);
+        english.truncate(max_candidates);
+        Self::truncate_with_pinyin_quota(&mut rest, max_candidates - english.len());
+        rest.extend(english);
+        *cands = rest;
     }
 
     /// 截断到 `max_candidates`，但**保证拼音候选至少留 `max/PINYIN_QUOTA_DIVISOR` 席**。
@@ -641,57 +678,45 @@ impl MixedEngine {
         }
     }
 
-    /// 英文候选（enable_english 开时）：查英文词库，供混入合并。
+    /// 进候选列表的英文（enable_english 开时）。`base_empty` = 码表与拼音都没给出候选。
     ///
-    /// `english` 为 None（关闭）时返回空。输入小写化以匹配英文词库（code 列已小写化）。
-    ///
-    /// 精确/前缀的分野现由 [`MixedEngine::truncation_tier`] 表达（档 2 / 档 3），不再改 weight
-    /// ——`weight` 从此只承载真实词频。
-    fn english_candidates(&self, input: &str, max_candidates: usize) -> Vec<Candidate> {
-        let Some(eng) = &self.english else {
-            return Vec::new();
-        };
-        // 英文最小长度：短输入（默认 2 字符以内）不查英文，避免短前缀刷屏（对齐拼音 min 思路）。
-        if input.chars().count() < self.min_english_length {
-            return Vec::new();
+    /// 取舍与码表方案的英文混入**同一个入口** [`crate::english_merge::select`]：中文侧有候选时
+    /// 只收完整单词（够 `english_complete_min_length` 再补前缀词），合计不超
+    /// `english_max_count`；中文侧为空时给一页前缀补全。前缀扩展为什么不随便进列表、为什么要
+    /// 清 `is_exact_code`，见该模块的 `lookup` 文档（实测混输打 `github` 曾混进 8 条 GitHub
+    /// 开头的长词组，打 `hen` 带出 Henderson / Hendrix）。
+    fn english_for_display(&self, input: &str, base_empty: bool) -> Vec<Candidate> {
+        match &self.english {
+            Some(eng) => {
+                crate::english_merge::select(eng.as_ref(), input, base_empty, &self.english_policy)
+            }
+            None => Vec::new(),
         }
-        let lower = input.to_lowercase();
-        let Ok(r) = eng.convert(&lower, max_candidates) else {
-            return Vec::new();
-        };
-        r.candidates
     }
 
-    /// 进候选列表的英文：**只取精确命中**（`code == 小写化输入`），并清掉码表域的
-    /// `is_exact_code`。
+    /// 英文守护（`auto_commit_block_on_english`）：英文按**前缀**可能出现时否决上屏。
     ///
-    /// ## 与 [`Self::english_candidates`] 的分工——**不要合并**
+    /// ## 与 [`Self::english_for_display`] 的分工——**不要合并**
     ///
-    /// 本函数管「显示哪些」，`english_candidates` 管「有没有」，后者服务于
-    /// `auto_commit_block_on_english` 的上屏否决，必须仍按**前缀**判：用户打到 `gith` 时
-    /// 精确命中还不存在，否决判据若也收窄成精确，满码就会在第 4 键把中文顶上屏，
-    /// `github` 永远敲不完。
-    ///
-    /// ## 为什么显示侧要收窄
-    ///
-    /// 实测混输打 `github` 混进 8 条（GitHub + GitHub Pages / Copilot / Copilot X /
-    /// Copilot CLI / Copilot chat / Flavored Markdown / Actions），把候选面整个占满；
-    /// 打 `hen` 时 Henderson、Hendrix 之流同样进列表。前缀扩展在中英混合输入里没有使用
-    /// 场景——想打某个英文词就继续敲完它。
-    ///
-    /// 清 `is_exact_code` 的理由同 [`crate::english_merge::lookup`]：那是码表域标志
-    /// （语义为「码 == 输入的完全匹配」，服务码表精确档），跨来源带进列表会让英文在协调器
-    /// 的 `cmp_exact_first`（位置在 `by_weight` 之前）无条件压过全部中文候选。
-    fn english_display_candidates(&self, input: &str, max_candidates: usize) -> Vec<Candidate> {
-        let lower = input.to_lowercase();
-        self.english_candidates(input, max_candidates)
-            .into_iter()
-            .filter(|c| c.code == lower)
-            .map(|mut c| {
-                c.is_exact_code = false;
-                c
+    /// 那个管「显示哪些」，本函数管「有没有」，必须仍按前缀判：用户打到 `gith` 时精确命中还
+    /// 不存在，否决判据若也收窄成精确，满码就会在第 4 键把中文顶上屏，`github` 永远敲不完。
+    /// 判据与门槛同码表方案（`english_merge::has_any` + `veto_min_length`），英文临时词不算。
+    fn english_vetoes(&self, input: &str) -> bool {
+        self.english_policy.block_commit
+            && self.english.as_ref().is_some_and(|eng| {
+                crate::english_merge::has_any(
+                    eng.as_ref(),
+                    input,
+                    self.english_policy.veto_min_length(),
+                )
             })
-            .collect()
+    }
+
+    /// 列表里已有英文，或英文按前缀可能出现——满码上屏 / 显示态复评共用的英文否决。
+    fn english_blocks_commit(&self, input: &str, shown: &[Candidate]) -> bool {
+        self.english_policy.block_commit
+            && (shown.iter().any(|c| c.source == CandidateSource::English)
+                || self.english_vetoes(input))
     }
 
     /// 超长输入（input_len > max_code_len）分支：按 pinyin_only_overflow 分流。
@@ -719,8 +744,6 @@ impl MixedEngine {
             let pinyin_preedit = Self::pinyin_preedit_of(&py);
             let pinyin_split = Self::pinyin_split_of(&py, input);
             let pinyin = py.candidates;
-            // 英文候选（enable_english 开时）：与拼音/码表统一混入（对齐 Go 各路径处理英文）。
-            let english = self.english_display_candidates(input, max_candidates);
             // 码表回捞（两条互补的口子，任一成立即把码表候选并回来；档位隔离由
             // `truncation_tier` 负责，不再靠给拼音 ÷100 来避免档位重叠）：
             // - 长码特例 `has_full_or_longer`：**整串**在码表有精确匹配/更长后继。只有码长可变
@@ -770,22 +793,27 @@ impl MixedEngine {
                     }
                     (pre, prefix)
                 };
+                // 英文候选（enable_english 开时）：与拼音/码表统一混入（对齐 Go 各路径处理英文）。
+                let english = self.english_for_display(input, ct.is_empty() && pinyin.is_empty());
                 ct.extend(english);
                 let ctx = TruncationCtx {
                     codetable_exact: &ct_exact,
                     english_exact: &english_exact,
                 };
                 Self::merge_sort_dedup(ct, pinyin, max_candidates, ctx)
-            } else if !english.is_empty() {
-                // 纯拼音 + 英文：英文精确进档 2、其余与拼音同档 3。
-                // 本分支无码表候选，`codetable_exact` 取什么都不影响档位。
-                let ctx = TruncationCtx {
-                    codetable_exact: input,
-                    english_exact: &english_exact,
-                };
-                Self::merge_sort_dedup(english, pinyin, max_candidates, ctx)
             } else {
-                pinyin
+                let english = self.english_for_display(input, pinyin.is_empty());
+                if english.is_empty() {
+                    pinyin
+                } else {
+                    // 纯拼音 + 英文：英文精确进档 2、其余与拼音同档 3。
+                    // 本分支无码表候选，`codetable_exact` 取什么都不影响档位。
+                    let ctx = TruncationCtx {
+                        codetable_exact: input,
+                        english_exact: &english_exact,
+                    };
+                    Self::merge_sort_dedup(english, pinyin, max_candidates, ctx)
+                }
             };
             if self.show_source_hint {
                 Self::add_source_hints(&mut merged);
@@ -820,8 +848,6 @@ impl MixedEngine {
             for c in &mut codetable {
                 c.is_exact_code = c.code == input;
             }
-            // 英文候选（enable_english 开时）：并入码表位，与拼音一同竞争。
-            codetable.extend(self.english_display_candidates(input, max_candidates));
             // 超码长走**另一个**开关（默认保留部分候选：这里已是纯拼音语境，长拼音的分步
             // 上屏要留着）。上方三处判据函数（`is_ambiguous_pinyin_word` /
             // `pinyin_claims_overflow` / `pinyin_has_any`）**刻意仍走 `convert`**：它们问的是
@@ -832,6 +858,10 @@ impl MixedEngine {
             let pinyin_preedit = Self::pinyin_preedit_of(&py);
             let pinyin_split = Self::pinyin_split_of(&py, input);
             let pinyin = py.candidates;
+            // 英文候选（enable_english 开时）：并入码表位，与拼音一同竞争。
+            let english =
+                self.english_for_display(input, codetable.is_empty() && pinyin.is_empty());
+            codetable.extend(english);
             // 本分支「视作精确全码」的是**前 N 码前缀**，不是 `input`（后者是 `is_exact_code`
             // 的口径，两者刻意不同，见上面那处 `is_exact_code` 归一的说明）。
             let ctx = TruncationCtx {
@@ -1028,9 +1058,10 @@ impl Engine for MixedEngine {
         // ⚠️ 拼接顺序即**组内次序**：`sort_dedup_truncate` 只按档位稳定排序，同档保持原有
         // 相对位置，故各段内部子引擎排好的序原样保留。改动此处的顺序会改变同档内的去留。
         let has_pinyin = !pinyin.is_empty();
+        let english = self.english_for_display(input, codetable.is_empty() && !has_pinyin);
         let mut merged = codetable;
         merged.extend(pinyin);
-        merged.extend(self.english_display_candidates(input, max_candidates));
+        merged.extend(english);
         // 排序 → 去重 → 带拼音保底配额截断（与 overflow 路径共用，见 `sort_dedup_truncate`）。
         // 判据串与上面那段内联加成逐字同源：码表看 `code == input`，英文看 `code == 小写 input`。
         let ctx = TruncationCtx {
@@ -1042,18 +1073,15 @@ impl Engine for MixedEngine {
             Self::add_source_hints(&mut merged);
         }
 
-        // 英文守护（对齐拼音守护）：满码上屏时若存在英文候选（含前缀），说明用户可能正在
-        // 输入更长的英文词，否决自动上屏留给用户选择。仅 auto_commit_block_on_english 开时生效。
-        let has_english = self.auto_commit_block_on_english
-            && merged.iter().any(|c| c.source == CandidateSource::English);
-
         // 全码自动上屏重评（对齐 Go recheckAutoCommit）：取主码表意向，但若英文守护命中、或
         // 拼音否决①②命中（`pinyin_vetoes_commit`，与顶码同一套）则否决（输入可能是拼音/英文，
         // 留给用户选）；并复核上屏目标在合并结果中仍存活。
-        // `pinyin_vetoes_commit` 经短路仅在码表确有满码上屏意向时求值（避免每键多跑一次转换）。
+        // 英文守护（`english_blocks_commit`）：列表里有英文、或英文按前缀可能出现（用户可能
+        // 正在输入更长的英文词，`gith` → github），否决自动上屏。仅 auto_commit_block_on_english
+        // 开时生效。两道否决经短路仅在码表确有满码上屏意向时求值（避免每键多跑一次转换）。
         let (should_commit, commit_text) = if ct_should_commit
             && !ct_commit_text.is_empty()
-            && !has_english
+            && !self.english_blocks_commit(input, &merged)
             && !self.pinyin_vetoes_commit(input, has_pinyin)
             && merged.iter().any(|c| c.text == ct_commit_text)
         {
@@ -1134,11 +1162,9 @@ impl Engine for MixedEngine {
         let has_pinyin = candidates
             .iter()
             .any(|c| c.source == CandidateSource::Pinyin);
-        let has_english = self.auto_commit_block_on_english
-            && candidates
-                .iter()
-                .any(|c| c.source == CandidateSource::English);
-        if has_english || self.pinyin_vetoes_commit(input, has_pinyin) {
+        if self.english_blocks_commit(input, candidates)
+            || self.pinyin_vetoes_commit(input, has_pinyin)
+        {
             return None;
         }
         let ct: Vec<Candidate> = candidates
@@ -1185,13 +1211,12 @@ impl Engine for MixedEngine {
             // 使用点，顶码一个都没有 —— 用户开了「有英文候选时否决上屏」，打 github 到第 5 键
             // 仍被顶出五笔词「不算」（`gith` 在主码表有词），与 ⓪ 同构的漏。
             //
-            // 自带防卡死，无需 ⓪ 那样的额外条件：判据要求「英文确有候选」，而它与
-            // `convert_overflow` 调的是同一个 `english_candidates`、同一个 `input` ——
-            // 拦下顶码后 overflow 必然交得出那批候选。
+            // 自带防卡死，无需 ⓪ 那样的额外条件：判据要求「英文按前缀确有词条」，拦下顶码后
+            // 中文侧若为空，overflow 的前缀补全必然交得出那批候选；用户继续敲完也必然露面。
             //
             // ⚠️ 刻意放在下方 `Some(sec)` 块**之外**：英文守护与拼音子引擎无关，
             // 纯码表 + 英文的混输（secondary=None）同样该生效。
-            if self.auto_commit_block_on_english && !self.english_candidates(input, 1).is_empty() {
+            if self.english_vetoes(input) {
                 return None;
             }
             if let Some(sec) = &self.secondary {
@@ -1582,22 +1607,14 @@ mod tests {
         );
     }
 
-    /// ⚠️ **英文没有任何保底席位**：码表洪水下被整片挤掉，与词频无关。
+    /// ★ **英文有保底席位**：码表洪水下英文精确照样活到最后（至多 `english_max_count` 条）。
     ///
-    /// 拼音有 `max/PINYIN_QUOTA_DIVISOR` 保底，**英文一点没有**。英文精确虽与码表前缀补全
-    /// 同档（档 2，历史包袱见 [`MixedEngine::truncation_tier`]），但档内按合并顺序，
-    /// 码表先入 ⇒ 英文恒排其后。
-    ///
-    /// ## ⚠️ 这是拆加成时**唯一一处刻意的行为变化**
-    ///
-    /// 拆之前，`ENGLISH_EXACT_BOOST` 与 `PARTIAL_MATCH_BOOST` 数值恰好相等，于是英文精确
-    /// 与码表前缀补全**拼真实词频**——词频高的英文词能赢。那是常数碰撞的产物：两者的词频
-    /// 根本不同量纲，比较本身没有意义，没有任何文档说过它们应当平起平坐。
-    ///
-    /// 影响面有限：**显示序**由协调器 `source_tier` 决定（英文与拼音其余同档），本档位只
-    /// 决定**截断存活**。英文该不该有保底席位，见 `mixed-source-tier-quota.md` §3.3。
+    /// 英文精确与码表前缀补全同档（档 2，历史包袱见 [`MixedEngine::truncation_tier`]），档内按
+    /// 合并顺序、码表先入，单靠档位英文会被整片挤掉——那正是此前记录的已知缺口。现由
+    /// `truncate_with_english_seats` 先腾座、后追加兑现保底，与码表方案的 `english_merge::merge`
+    /// 同一手法。显示序仍由协调器决定，本档位只决定截断存活。
     #[test]
-    fn english_has_no_quota_under_codetable_flood() {
+    fn english_survives_codetable_flood() {
         // 码表 20 条前缀补全（真实词频 9000 递减）。
         let entries: Vec<(String, String, i32)> = (0..20)
             .map(|i| (format!("hel{i}"), format!("码{i}"), 9000 - i))
@@ -1606,45 +1623,46 @@ mod tests {
             .iter()
             .map(|(c, t, w)| (c.as_str(), t.as_str(), *w))
             .collect();
-        let build = |ct: &[(&str, &str, i32)], english: Arc<dyn Engine>| {
+        let build = |ct: &[(&str, &str, i32)], english: Arc<dyn Engine>, max_count: usize| {
             MixedEngine::new(
                 ct_engine(ct, false),
                 None,
                 Some(english),
                 MixConfig {
                     auto_commit_block_on_pinyin: false,
+                    english_complete_min_length: 3,
+                    english_max_count: max_count,
                     ..Default::default()
                 },
             )
         };
-        let has_english = |r: &ConvertResult| {
+        let english_of = |r: &ConvertResult| {
             r.candidates
                 .iter()
-                .any(|c| c.source == CandidateSource::English)
+                .filter(|c| c.source == CandidateSource::English)
+                .map(|c| c.text.clone())
+                .collect::<Vec<_>>()
+        };
+        let words = || {
+            english_engine(&[
+                ("hel", "hel", 1),
+                ("hello", "hello", 9999),
+                ("help", "help", 50),
+            ])
         };
 
-        // ★ 正向对照必须先立：没有洪水时英文**在场**。
-        //   缺了它，下面三条「不在场」可能只是英文引擎压根没产出，测试变成空转。
-        let calm = build(&[("hel", "好", 100)], english_engine(&[("hel", "hel", 1)]));
-        assert!(
-            has_english(&calm.convert("hel", 5).unwrap()),
-            "无洪水时英文候选应当在场——否则下面的断言测不到东西"
+        // 洪水下：完整单词 + 补全合计 2 条全数活下来，总数不超上限。
+        let r = build(&refs, words(), 2).convert("hel", 5).unwrap();
+        assert_eq!(r.candidates.len(), 5, "腾座后总数不得超出 max_candidates");
+        assert_eq!(
+            english_of(&r),
+            vec!["hel", "hello"],
+            "完整单词优先，再补前缀词"
         );
 
-        // ① 英文精确、词频远低于码表 ⇒ 挤掉。
-        let low = build(&refs, english_engine(&[("hel", "hel", 1)]));
-        assert!(!has_english(&low.convert("hel", 5).unwrap()));
-
-        // ② 英文精确、词频**高于**码表 ⇒ 照样挤掉。档内按合并顺序，词频不参与。
-        let high = build(&refs, english_engine(&[("hel", "hel", 9999)]));
-        assert!(
-            !has_english(&high.convert("hel", 5).unwrap()),
-            "英文无保底：词频 9999 也拿不到席位（拆加成前这条会赢，见文档注释）"
-        );
-
-        // ③ 英文前缀落在档 3，更靠后。
-        let prefix = build(&refs, english_engine(&[("hello", "hello", 9999)]));
-        assert!(!has_english(&prefix.convert("hel", 5).unwrap()));
+        // 上限 1：只保完整单词那一条。
+        let r1 = build(&refs, words(), 1).convert("hel", 5).unwrap();
+        assert_eq!(english_of(&r1), vec!["hel"]);
     }
 
     /// 产出多条 `source=Pinyin` 候选的假拼音引擎（`FakePinyin` 只给一条，测不了配额）。
@@ -2385,12 +2403,14 @@ mod tests {
     #[test]
     fn mixed_mixes_english_when_enabled() {
         // enable_english（english=Some）：混输主路径应混入英文词库候选。
-        // ⚠️ 判据是**精确命中**——显示侧走 `english_display_candidates`，前缀扩展不入列
+        // ⚠️ 判据是**精确命中**——显示侧走 `english_for_display`，前缀扩展不入列
         // （见该函数文档）。此前本用例打 `hel` 期望出 `hello`，那是收窄前的行为。
         // ⚠️ 词必须 ≤ 4 字符：`ct_engine` 的 max_code_length=4，更长的输入走
         // `convert_overflow`，而该分支在 `secondary=None`（本用例无拼音子引擎）时直接
         // 早退只查码表，英文根本不参与——那样测的就不是本用例要测的东西了。
-        let primary = ct_engine(&[("hao", "好", 100)], false);
+        // 码表侧给 `help` / `hel` 都备好中文候选：中文侧为空时英文改给前缀补全（见
+        // `english_merge::select`），那是另一条路，不是本用例要测的。
+        let primary = ct_engine(&[("hao", "好", 100), ("help", "帮", 100)], false);
         let english = english_engine(&[("help", "help", 50), ("helpful", "helpful", 40)]);
         let e = MixedEngine::new(
             primary,
@@ -2462,7 +2482,8 @@ mod tests {
         // ★ 短词 `he` 在词库里是**精确命中**，却仍须被长度闸门挡掉——这样测的才是长度闸门
         // 本身。收窄前用的是「`he` 无精确命中、`hel` 前缀命中 hello」，长度闸门与精确性
         // 两个判据混在一起，闸门失效也测不出来。
-        let primary = ct_engine(&[("x", "叉", 100)], false);
+        // 码表侧 `he` / `hel` 都有中文候选：中文侧为空时长度门槛另按 2 放宽（前缀补全那条路）。
+        let primary = ct_engine(&[("x", "叉", 100), ("hela", "乐", 100)], false);
         let english = english_engine(&[("he", "he", 60), ("hel", "hel", 50)]);
         let e = MixedEngine::new(
             primary,
