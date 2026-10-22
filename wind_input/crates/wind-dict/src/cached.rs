@@ -138,6 +138,19 @@ pub fn prefix_entry_keep(
         && prefix_syllable_aligned(boundary, code_len, completed_len)
 }
 
+/// 最长的拼音音节（`zhuang`/`chuang`/`shuang`）的字节数。
+const MAX_SYLLABLE_BYTES: usize = 6;
+
+/// 词库层前缀查询的码长上限：不超过 `max_syllables` 个音节的码最长 6×N 字节。
+///
+/// 只给词库层两个后端用（引擎层闸门不管码长），作用是让 wdat 的分支限界能按深度剪枝：
+/// 裸声母 `sh` 的合格条目（单字）稀疏，而每棵子树里都有高权重的多音节词，按权重上界剪不动，
+/// 整棵子树被走一遍（约 30ms），按深度剪后约 1ms。带边界的条目本就满足；它只额外拦下
+/// `boundary == 0` 的超长条目，那些按任何切分都超过 N 个音节，引擎层闸门同样不会放行。
+pub(crate) fn prefix_code_len_cap(max_syllables: u32) -> usize {
+    (max_syllables as usize).saturating_mul(MAX_SYLLABLE_BYTES)
+}
+
 /// `foo/bar.dict.yaml` → `foo/bar.wdat`（剥掉整个 `.dict.yaml` 后缀）。
 ///
 /// **不能用 `Path::with_extension("wdat")`** —— 那只替换最后一级扩展名，会得到

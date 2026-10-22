@@ -3438,9 +3438,9 @@ impl Engine for PinyinEngine {
         //
         // ⚠️ **那个 0.9ms 已不成立**（2026-09-29 复测）：它量的是不带过滤的 `search_prefix`。
         // 本步现走 `..._syllable_capped`，过滤不参与剪枝（见 `WdatReader::search_prefix_inner`），
-        // 合格条目凑不满 `limit` 时分支限界退化成整棵子树遍历 —— 裸声母残码 `b` 实测仍约
-        // 30ms（看板 A3-14 方案 B，未做）。单音节整音节输入（`xi` 曾 38ms）结果注定只剩精确
-        // 匹配，已由下方 `prefix_completion_is_exact_only` 整段跳过（方案 A）。
+        // 合格条目凑不满 `limit` 时分支限界退化成整棵子树遍历 —— 裸声母 `b`/`sh` 曾约 30ms，
+        // 词库层按码长上限剪枝后约 1~3ms（`prefix_code_len_cap`）。单音节整音节输入（`xi` 曾
+        // 38ms）结果注定只剩精确匹配，已由下方 `prefix_completion_is_exact_only` 整段跳过。
         //
         // ⚠️ **上限不能去掉**，瓶颈已从词库层转移到本函数的 `push_unique`：它按
         // `cands.iter().any(|c| c.text == text)` 线性查重，整体是 O(n²)。实测 `b`：

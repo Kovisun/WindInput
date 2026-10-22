@@ -734,9 +734,13 @@ impl CodetableDict {
         completed_len: usize,
     ) -> Vec<crate::cached::DictHit> {
         let mut results: Vec<crate::cached::DictHit> = Vec::new();
+        let len_cap = crate::cached::prefix_code_len_cap(max_syllables);
         for (code, entries) in self.entries.range(prefix.to_string()..) {
             if !code.starts_with(prefix) {
                 break;
+            }
+            if code.len() > len_cap {
+                continue;
             }
             for e in entries {
                 if !crate::cached::prefix_entry_keep(
