@@ -359,3 +359,142 @@ fn grammar_sentence_report() {
         }
     }
 }
+
+/// 大样本整句评测：用例来自文件（`scripts/lm/sentence_eval_prep.py` 从 Tatoeba 生成，每行
+/// `类别<TAB>拼音<TAB>期望`），不再靠手写——192 条手写用例上结论曾随抽样翻转（设计文档 §8.1）。
+///
+/// ```text
+/// WIND_SENTENCE_EVAL=sentence_eval.tsv [WIND_GRAM_MODEL=… WIND_GRAM_WEIGHT=0.5] \
+///   [WIND_SENTENCE_EVAL_DUMP=misses.tsv] \
+///   cargo test --release -p wind-engine --test grammar_sentence_eval sentence_eval_file -- --ignored --nocapture
+/// ```
+///
+/// 只设文件时只量基线（`weight = 0`，不需要模型）；设了 `WIND_GRAM_MODEL` 就并排量接模型的。
+/// 按类别出：首选整句命中、宽松命中（他/她/它不分——光看拼音本就分不出）、前三含整句、
+/// 首选的字准确率（1 − 编辑距离 / 期望字数）、单次转换的平均与 p99 耗时。`DUMP` 写出任一边首选不对的条目，供逐条看错在哪。
+#[test]
+#[ignore = "整句评测：依赖 build_dev 真实词库与评测文件。用 --ignored 显式运行"]
+fn sentence_eval_file() {
+    let Ok(file) = std::env::var("WIND_SENTENCE_EVAL") else {
+        eprintln!("!!! 跳过：未设 WIND_SENTENCE_EVAL");
+        return;
+    };
+    let Some(dir) = data_dir() else {
+        eprintln!("!!! 跳过：build_dev 拼音词库不存在");
+        return;
+    };
+    let text = std::fs::read_to_string(&file).expect("读评测文件");
+    let cases: Vec<(&str, &str, &str)> = text
+        .lines()
+        .filter_map(|l| {
+            let mut it = l.split('\t');
+            Some((it.next()?, it.next()?, it.next()?))
+        })
+        .collect();
+
+    let mut runs = vec![("基线".to_string(), manager(&dir, 0.0))];
+    if std::env::var("WIND_GRAM_MODEL").is_ok() {
+        let weight = std::env::var("WIND_GRAM_WEIGHT")
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(0.5);
+        runs.push((format!("模型 w={weight}"), manager(&dir, weight)));
+    }
+
+    let mut classes: Vec<&str> = cases.iter().map(|c| c.0).collect();
+    classes.sort_unstable();
+    classes.dedup();
+
+    // 每条用例在每个 run 下的首选
+    let mut firsts: Vec<Vec<String>> = vec![Vec::new(); runs.len()];
+    println!("\n类别\t配置\t条数\t首选整句\t宽松\t前三含\t字准确率\t平均 ms\tp99 ms");
+    for (ri, (name, mgr)) in runs.iter().enumerate() {
+        for class in &classes {
+            let (mut n, mut top1, mut loose, mut top3) = (0, 0, 0, 0);
+            let (mut chars, mut char_ok) = (0usize, 0.0f64);
+            let mut times = Vec::new();
+            for &(_, input, expect) in cases.iter().filter(|c| c.0 == *class) {
+                let t = std::time::Instant::now();
+                let cands = mgr.convert_with("pinyin", input, TOP_N).candidates;
+                times.push(t.elapsed().as_secs_f64() * 1000.0);
+                let first = cands.first().map(|c| c.text.clone()).unwrap_or_default();
+                n += 1;
+                top1 += usize::from(first == expect);
+                loose += usize::from(loosen(&first) == loosen(expect));
+                top3 += usize::from(cands.iter().take(3).any(|c| c.text == expect));
+                let len = expect.chars().count();
+                chars += len;
+                char_ok += len.saturating_sub(edit_distance(&first, expect)) as f64;
+                firsts[ri].push(first);
+            }
+            times.sort_by(f64::total_cmp);
+            let pct = |k: usize| k as f64 * 100.0 / n.max(1) as f64;
+            println!(
+                "{class}\t{name}\t{n}\t{:.1}%\t{:.1}%\t{:.1}%\t{:.1}%\t{:.2}\t{:.2}",
+                pct(top1),
+                pct(loose),
+                pct(top3),
+                char_ok * 100.0 / chars.max(1) as f64,
+                times.iter().sum::<f64>() / n.max(1) as f64,
+                times[(times.len() * 99 / 100).min(times.len().saturating_sub(1))],
+            );
+        }
+    }
+
+    if let Ok(dump) = std::env::var("WIND_SENTENCE_EVAL_DUMP") {
+        // firsts 按「类别 × 用例」的顺序填的，这里按同一顺序对回用例
+        let ordered: Vec<&(&str, &str, &str)> = classes
+            .iter()
+            .flat_map(|cl| cases.iter().filter(move |c| c.0 == *cl))
+            .collect();
+        let mut out = String::from("类别\t拼音\t期望");
+        for (name, _) in &runs {
+            out.push('\t');
+            out.push_str(name);
+        }
+        out.push('\n');
+        for (i, (class, input, expect)) in ordered.iter().enumerate() {
+            if firsts.iter().all(|f| f[i] == *expect) {
+                continue;
+            }
+            out.push_str(&format!("{class}\t{input}\t{expect}"));
+            for f in &firsts {
+                out.push('\t');
+                out.push_str(&f[i]);
+            }
+            out.push('\n');
+        }
+        std::fs::write(&dump, out).expect("写 DUMP");
+        println!("未命中 → {dump}");
+    }
+}
+
+/// 宽松比较用：第三人称代词归一成「他」。
+fn loosen(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if matches!(c, '她' | '它' | '牠') {
+                '他'
+            } else {
+                c
+            }
+        })
+        .collect()
+}
+
+/// 按字的编辑距离（插入、删除、替换各算 1）。
+fn edit_distance(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.iter().enumerate() {
+        let mut cur = vec![i + 1; b.len() + 1];
+        for (j, cb) in b.iter().enumerate() {
+            cur[j + 1] = (prev[j] + usize::from(ca != cb))
+                .min(prev[j + 1] + 1)
+                .min(cur[j] + 1);
+        }
+        prev = cur;
+    }
+    prev[b.len()]
+}
