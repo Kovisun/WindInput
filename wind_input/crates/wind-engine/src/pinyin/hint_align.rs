@@ -4,7 +4,7 @@
 //! FuzzyPrefix 判类（先命中先得），取总代价最小的切法。只有 `Fuzzy` 段产出提示。
 
 use super::fuzzy::{FuzzyConfig, FuzzyMatcher};
-use wind_candidate::FuzzyHint;
+use wind_candidate::{HintKind, PinyinHint};
 
 /// 最长音节的字节数（`zhuang`、`chuang`、`shuang`）。
 const MAX_SYLLABLE_LEN: usize = 6;
@@ -64,7 +64,7 @@ pub(crate) fn align_hints(
     dict_syllables: &[&str],
     cfg: &FuzzyConfig,
     input_ends_here: bool,
-) -> Vec<FuzzyHint> {
+) -> Vec<PinyinHint> {
     if !cfg.hint.get() || dict_syllables.is_empty() || typed.is_empty() || !typed.is_ascii() {
         return Vec::new();
     }
@@ -110,9 +110,10 @@ pub(crate) fn align_hints(
     for i in (1..=n).rev() {
         let (prev, kind) = from[i][p].expect("best 非空则回溯链完整");
         if kind == Kind::Fuzzy {
-            hints.push(FuzzyHint {
+            hints.push(PinyinHint {
                 char_index: (i - 1) as u16,
                 correct: dict_syllables[i - 1].to_string(),
+                kind: HintKind::Fuzzy,
             });
         }
         p = prev;
@@ -136,10 +137,11 @@ mod tests {
         }
     }
 
-    fn h(i: u16, s: &str) -> FuzzyHint {
-        FuzzyHint {
+    fn h(i: u16, s: &str) -> PinyinHint {
+        PinyinHint {
             char_index: i,
             correct: s.into(),
+            kind: HintKind::Fuzzy,
         }
     }
 

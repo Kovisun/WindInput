@@ -13,9 +13,9 @@
 
 pub mod dag;
 pub mod fuzzy;
-pub(crate) mod fuzzy_hint;
 pub mod generate;
 pub mod grammar;
+pub(crate) mod hint_align;
 pub mod interp;
 pub mod lattice;
 pub mod mixed_abbrev;
@@ -2426,7 +2426,7 @@ impl PinyinEngine {
         out
     }
 
-    /// 给候选填模糊音提示（`meta.fuzzy_hints`），`hint` 关时调用方不进来。
+    /// 给候选填模糊音提示（`meta.pinyin_hints`），`hint` 关时调用方不进来。
     ///
     /// 在 `convert` 收尾对**最终**候选统一做一次，而不是散在各产出点：词库读音只认
     /// `learn_code`，各路径的同文合并（替换 / 继承 `learn_code`）都已落定，提示与
@@ -2442,7 +2442,7 @@ impl PinyinEngine {
     ///
     /// 词库读音取 `learn_code`；双拼对偶声母读出的候选没有它（转换后的全拼就是词典码），
     /// 用候选自身的码。只填提示、不动 `is_fuzzy`：`hint` 开关不得改变排序（D7）。
-    fn fill_fuzzy_hints(
+    fn fill_pinyin_hints(
         &self,
         cands: &mut [Candidate],
         query: &str,
@@ -2486,12 +2486,12 @@ impl PinyinEngine {
             if syllables.len() != c.text.chars().count() {
                 continue;
             }
-            let hints = fuzzy_hint::align_hints(&typed, &syllables, &self.fuzzy_config, ends_here);
+            let hints = hint_align::align_hints(&typed, &syllables, &self.fuzzy_config, ends_here);
             if hints.is_empty() {
                 continue;
             }
-            c.meta.fuzzy_hints = hints;
-            c.meta.fuzzy_syllables = syllables.iter().map(|s| s.to_string()).collect();
+            c.meta.pinyin_hints = hints;
+            c.meta.hint_syllables = syllables.iter().map(|s| s.to_string()).collect();
         }
     }
 }
@@ -2513,7 +2513,7 @@ fn literal_typed(sp: &shuangpin::SpConvertResult, query: &str, len: usize) -> St
     out
 }
 
-/// 全拼域的候选码规范成 [`fuzzy_hint::align_hints`] 要的形态：去 `'`、ü 归一化。
+/// 全拼域的候选码规范成 [`hint_align::align_hints`] 要的形态：去 `'`、ü 归一化。
 ///
 /// 防御性的：当前各路径交来的码已是这个形态（全拼主路径入口已归一、`completed` 与整句码
 /// 不含 `'`；降级支路的闸门遇 `'` 即拒，且词库用 `lve` 拼写时 `lue` 击键在支路里查不到词），
@@ -4889,8 +4889,8 @@ impl Engine for PinyinEngine {
         };
 
         if self.fuzzy_config.hint.get() {
-            self.fill_fuzzy_hints(&mut candidates, query, raw_input, sp_result.as_ref());
-            self.fill_fuzzy_hints(&mut sentence_pool, query, raw_input, sp_result.as_ref());
+            self.fill_pinyin_hints(&mut candidates, query, raw_input, sp_result.as_ref());
+            self.fill_pinyin_hints(&mut sentence_pool, query, raw_input, sp_result.as_ref());
         }
 
         Ok(ConvertResult {
@@ -8492,7 +8492,7 @@ s = ["ao"]
         }
     }
 
-    // ── 模糊音提示（`meta.fuzzy_hints`）：引擎各路径按 learn_code 与用户音节对齐填提示。──
+    // ── 模糊音提示（`meta.pinyin_hints`）：引擎各路径按 learn_code 与用户音节对齐填提示。──
 
     fn hint_cfg() -> FuzzyConfig {
         FuzzyConfig {
@@ -8517,20 +8517,21 @@ s = ["ao"]
         .with_fuzzy(fz)
     }
 
-    fn fh(i: u16, s: &str) -> wind_candidate::FuzzyHint {
-        wind_candidate::FuzzyHint {
+    fn fh(i: u16, s: &str) -> wind_candidate::PinyinHint {
+        wind_candidate::PinyinHint {
             char_index: i,
             correct: s.into(),
+            kind: wind_candidate::HintKind::Fuzzy,
         }
     }
 
-    fn hints_of<'a>(r: &'a ConvertResult, text: &str) -> &'a [wind_candidate::FuzzyHint] {
+    fn hints_of<'a>(r: &'a ConvertResult, text: &str) -> &'a [wind_candidate::PinyinHint] {
         &r.candidates
             .iter()
             .find(|c| c.text == text)
             .unwrap_or_else(|| panic!("应有候选「{text}」，实际: {:?}", texts(r)))
             .meta
-            .fuzzy_hints
+            .pinyin_hints
     }
 
     #[test]
@@ -8550,9 +8551,9 @@ s = ["ao"]
             Some(0),
             "前提：词条码无边界"
         );
-        assert_eq!(c.meta.fuzzy_syllables, ["ping", "guo"]);
+        assert_eq!(c.meta.hint_syllables, ["ping", "guo"]);
         let exact = r.candidates.iter().find(|c| c.text == "拼过").unwrap();
-        assert!(exact.meta.fuzzy_syllables.is_empty(), "无提示不填");
+        assert!(exact.meta.hint_syllables.is_empty(), "无提示不填");
     }
 
     /// 开关是共享的：同一引擎实例上翻转即生效，不必重建。
@@ -8563,7 +8564,7 @@ s = ["ao"]
         let eng = hint_engine(fz);
         switch.set(false);
         let r = eng.convert("pinguo", 20).unwrap();
-        assert!(r.candidates.iter().all(|c| c.meta.fuzzy_hints.is_empty()));
+        assert!(r.candidates.iter().all(|c| c.meta.pinyin_hints.is_empty()));
         switch.set(true);
         let r = eng.convert("pinguo", 20).unwrap();
         assert_eq!(hints_of(&r, "苹果"), &[fh(0, "ping")]);
@@ -8575,7 +8576,7 @@ s = ["ao"]
         fz.hint = fuzzy::HintSwitch::new(false);
         let r = hint_engine(fz).convert("pinguo", 20).unwrap();
         assert!(r.candidates.iter().any(|c| c.text == "苹果"));
-        assert!(r.candidates.iter().all(|c| c.meta.fuzzy_hints.is_empty()));
+        assert!(r.candidates.iter().all(|c| c.meta.pinyin_hints.is_empty()));
     }
 
     #[test]
@@ -8587,11 +8588,11 @@ s = ["ao"]
             texts(&r)
         );
         assert!(
-            r.candidates.iter().all(|c| c.meta.fuzzy_hints.is_empty()),
+            r.candidates.iter().all(|c| c.meta.pinyin_hints.is_empty()),
             "末音节可能没打完，不标: {:?}",
             r.candidates
                 .iter()
-                .map(|c| (&c.text, &c.meta.fuzzy_hints))
+                .map(|c| (&c.text, &c.meta.pinyin_hints))
                 .collect::<Vec<_>>()
         );
         // 对照：末音节是完整的另一读音（`lan` → 南）照标。
@@ -8627,7 +8628,7 @@ s = ["ao"]
             .iter()
             .find(|c| c.is_sentence && c.text == "苹果蓝")
             .unwrap_or_else(|| panic!("应组出整句「苹果蓝」: {:?}", texts(&r)));
-        assert_eq!(s.meta.fuzzy_hints, vec![fh(0, "ping")], "只标模糊段");
+        assert_eq!(s.meta.pinyin_hints, vec![fh(0, "ping")], "只标模糊段");
     }
 
     #[test]
@@ -8649,8 +8650,8 @@ s = ["ao"]
             engine_with_user_words_fuzzy("fz_hint_user_b0", &[("pingguo", "苹果", 0)], hint_cfg());
         let r = eng.convert("pinguo", 20).unwrap();
         let c = r.candidates.iter().find(|c| c.text == "苹果").unwrap();
-        assert_eq!(c.meta.fuzzy_hints, [fh(0, "ping")]);
-        assert_eq!(c.meta.fuzzy_syllables, ["ping", "guo"]);
+        assert_eq!(c.meta.pinyin_hints, [fh(0, "ping")]);
+        assert_eq!(c.meta.hint_syllables, ["ping", "guo"]);
     }
 
     fn sp_hint_engine(layout: &str, words: &[(&str, &str)], fz: FuzzyConfig) -> PinyinEngine {
@@ -8678,7 +8679,7 @@ s = ["ao"]
             .find(|c| c.text == "刷")
             .expect("sx 应出「刷」");
         assert!(!c.is_fuzzy, "只填提示，不改 is_fuzzy（排序不受 hint 影响）");
-        assert_eq!(c.meta.fuzzy_hints, vec![fh(0, "shua")]);
+        assert_eq!(c.meta.pinyin_hints, vec![fh(0, "shua")]);
         // 对照：按 sh 键打（`ux`）是正读，不标。
         let r = eng.convert("ux", 20).unwrap();
         assert!(hints_of(&r, "刷").is_empty());
@@ -8691,7 +8692,7 @@ s = ["ao"]
             .convert("sx", 20)
             .unwrap();
         let c = r.candidates.iter().find(|c| c.text == "刷").unwrap();
-        assert!(!c.is_fuzzy && c.meta.fuzzy_hints.is_empty());
+        assert!(!c.is_fuzzy && c.meta.pinyin_hints.is_empty());
     }
 
     /// hint 开关只影响显示：同一双拼对偶输入，开与关的候选顺序与模糊标记逐条一致。
@@ -8771,7 +8772,7 @@ s = ["ao"]
             .find(|c| c.text == "性情")
             .unwrap_or_else(|| panic!("{:?}", texts(&r)));
         assert!(c.is_fullpinyin_fallback, "前提：来自全拼降级支路");
-        assert_eq!(c.meta.fuzzy_hints, vec![fh(0, "xing")]);
+        assert_eq!(c.meta.pinyin_hints, vec![fh(0, "xing")]);
 
         let r = eng.convert("qingxin", 20).unwrap();
         let c = r
@@ -8780,7 +8781,10 @@ s = ["ao"]
             .find(|c| c.text == "情性")
             .unwrap_or_else(|| panic!("{:?}", texts(&r)));
         assert!(c.is_fullpinyin_fallback, "前提：来自全拼降级支路");
-        assert!(c.meta.fuzzy_hints.is_empty(), "末音节 xin 可能没打完，不标");
+        assert!(
+            c.meta.pinyin_hints.is_empty(),
+            "末音节 xin 可能没打完，不标"
+        );
     }
 
     /// 双拼同键音节（自定义布局 `q = ["iu", "ui"]`）不算打错，不标。

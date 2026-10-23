@@ -3221,7 +3221,7 @@ pub struct PinyinHintConfig {
     /// 提示范围：first = 只标第一个带提示的候选；all = 标全部。
     #[serde(deserialize_with = "crate::tolerant_de::tolerant")]
     pub scope: HintScope,
-    /// 提示带声调（「苹(píng)果」），内嵌提示与注释变量 `${fuzzy_pinyin}` 共用。
+    /// 提示带声调（「苹(píng)果」），内嵌提示与注释变量 `${correct_pinyin}` 共用。
     pub tone: bool,
 }
 

@@ -44,7 +44,7 @@ pub struct FuzzyConfig {
     pub un_ong: bool,
     /// `eng ↔ ong`（`deng`↔`dong`、`zheng`↔`zhong`）。
     pub eng_ong: bool,
-    /// 算不算模糊音提示（见 [`HintSwitch`]；管理器按 `enabled && (hint || 模板引用 ${fuzzy_pinyin})`
+    /// 算不算模糊音提示（见 [`HintSwitch`]；管理器按 `enabled && (hint || 模板引用 ${correct_pinyin})`
     /// 置值）。不影响展开/匹配，仅供上层消费。
     pub hint: HintSwitch,
     /// 双拼**同键韵母**推出的等价音节：音节 → 同一键对下其余的合法读音

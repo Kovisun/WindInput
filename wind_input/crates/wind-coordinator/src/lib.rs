@@ -30,7 +30,6 @@ pub(crate) mod english_candidates;
 pub(crate) mod english_learn;
 #[cfg(test)]
 mod freq_learn_tests;
-pub(crate) mod fuzzy_hint_text;
 pub mod handle_addword;
 pub mod handle_assoc;
 pub mod handle_aux_code;
@@ -59,6 +58,7 @@ pub mod handle_uielement;
 pub mod handle_unicode;
 mod handle_url;
 pub(crate) mod heap_trim;
+pub(crate) mod hint_text;
 pub mod host_services;
 pub mod hotkey_match;
 pub mod input_diag;

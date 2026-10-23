@@ -28,7 +28,7 @@ use wind_engine::EngineManager;
 /// `code_rev` 也算用户层：它取的 `hint_code` 在系统层该长度没有码时会回落用户码。
 const CODE_REV_VARS: &[&str] = &["code_rev", "code", "code_rev_all", "code_all"];
 /// 模糊音整词正确拼音的变量名。
-const FUZZY_PINYIN_VAR: &str = "fuzzy_pinyin";
+const CORRECT_PINYIN_VAR: &str = "correct_pinyin";
 /// 拆字表的变量名。
 const CHAIZI_VARS: &[&str] = &["chaizi", "chaizi_code", "chaizi_all", "chaizi_code_all"];
 
@@ -45,9 +45,9 @@ pub(crate) struct DataNeeds {
     pub(crate) s2t: bool,
     /// 繁入简出转换器（`input.t2s.enabled`，与 s2t 互斥时让位）。
     pub(crate) t2s: bool,
-    /// 任一层注释模板或启用的悬停段引用 `${fuzzy_pinyin}`：`hint` 关着也要让拼音引擎算模糊音
-    /// 提示（`EngineManager::set_fuzzy_pinyin_in_templates`）。
-    pub(crate) fuzzy_pinyin: bool,
+    /// 任一层注释模板或启用的悬停段引用 `${correct_pinyin}`：`hint` 关着也要让拼音引擎算模糊音
+    /// 提示（`EngineManager::set_correct_pinyin_in_templates`）。
+    pub(crate) correct_pinyin: bool,
 }
 
 /// 判定材料里要问 `EngineManager` 的那部分。
@@ -169,11 +169,11 @@ impl DataNeeds {
                 ((*in_temp && temp_rev) || (*in_main && main_rev)) && refs_any(t, CODE_REV_VARS)
             });
         let comment_chaizi = comment_on && layers.iter().any(|(t, _, _)| refs_any(t, CHAIZI_VARS));
-        let fuzzy_pinyin = (comment_on
+        let correct_pinyin = (comment_on
             && layers
                 .iter()
-                .any(|(t, _, _)| refs_any(t, &[FUZZY_PINYIN_VAR])))
-            || tip_any(&[FUZZY_PINYIN_VAR]);
+                .any(|(t, _, _)| refs_any(t, &[CORRECT_PINYIN_VAR])))
+            || tip_any(&[CORRECT_PINYIN_VAR]);
 
         let tip_code = tip_any(&["word_code", "code_source"]) || tip_any(CODE_REV_VARS);
         let mobile = crate::handle_assoc::use_mobile_overrides().then_some(&cfg.mobile.association);
@@ -191,7 +191,7 @@ impl DataNeeds {
             chaizi: comment_chaizi || tip_any(CHAIZI_VARS),
             s2t,
             t2s,
-            fuzzy_pinyin,
+            correct_pinyin,
         }
     }
 }
@@ -254,10 +254,10 @@ mod tests {
                 chaizi: false,
                 s2t: false,
                 t2s: false,
-                fuzzy_pinyin: false,
+                correct_pinyin: false,
             },
             "出厂：悬停[编码]开着 ⇒ 反查与用户层要；拆字段关着、注释不含拆字；简繁两向都关；\
-             模板不含 ${{fuzzy_pinyin}}"
+             模板不含 ${{correct_pinyin}}"
         );
         assert_eq!(derive(&Config::default()), n, "L1 与 L2 在这几项上应一致");
     }
@@ -414,13 +414,13 @@ mod tests {
         assert!(derive(&c).chaizi, "出厂拆字段打开 ⇒ 要");
     }
 
-    /// `${fuzzy_pinyin}`：注释模板的每一个模板位（全局横竖、方案级、模式级各家、overlay）与
+    /// `${correct_pinyin}`：注释模板的每一个模板位（全局横竖、方案级、模式级各家、overlay）与
     /// 悬停段（候选上下文回落 `eval_var`）都算；注释总开关关着时注释那些位不算。
     #[test]
-    fn fuzzy_pinyin_in_every_template_slot() {
-        const V: &str = "{(${fuzzy_pinyin})}";
+    fn correct_pinyin_in_every_template_slot() {
+        const V: &str = "{(${correct_pinyin})}";
         let base = factory();
-        assert!(!derive(&base).fuzzy_pinyin, "前置条件：出厂不引用");
+        assert!(!derive(&base).correct_pinyin, "前置条件：出厂不引用");
         type Edit = fn(&mut Config);
         let slots: [(&str, Edit); 16] = [
             ("全局竖", |c| {
@@ -470,13 +470,13 @@ mod tests {
                 c.ui.tooltip.sections[0].enabled = true;
             }),
             ("回退链里", |c| {
-                c.ui.candidate.comment_template_vertical = "${code_hint|fuzzy_pinyin}".into()
+                c.ui.candidate.comment_template_vertical = "${code_hint|correct_pinyin}".into()
             }),
         ];
         for (name, edit) in slots {
             let mut c = base.clone();
             edit(&mut c);
-            assert!(derive(&c).fuzzy_pinyin, "{name}");
+            assert!(derive(&c).correct_pinyin, "{name}");
         }
         for facts in [
             SchemaFacts {
@@ -488,11 +488,11 @@ mod tests {
                 ..Default::default()
             },
         ] {
-            assert!(DataNeeds::derive(&base, &facts).fuzzy_pinyin, "{facts:?}");
+            assert!(DataNeeds::derive(&base, &facts).correct_pinyin, "{facts:?}");
             let mut off = base.clone();
             off.ui.candidate.comment_enabled = false;
             assert!(
-                !DataNeeds::derive(&off, &facts).fuzzy_pinyin,
+                !DataNeeds::derive(&off, &facts).correct_pinyin,
                 "注释总开关关：{facts:?}"
             );
         }
@@ -1138,7 +1138,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    // ───────────────────── ${fuzzy_pinyin}：翻转不重建引擎 ─────────────────────
+    // ───────────────────── ${correct_pinyin}：翻转不重建引擎 ─────────────────────
 
     /// 自造拼音方案：「中国」一词，开 zh↔z，`hint` 关。
     fn fuzzy_fixture() -> (PathBuf, Config) {
@@ -1194,9 +1194,9 @@ mod tests {
         c.alt_commit_text(&st, &cand, wind_config::config::AltCommit::Comment)
     }
 
-    /// 热重载加上 / 去掉 `${fuzzy_pinyin}`：变量随之出现 / 消失，引擎不重建（只翻提示开关）。
+    /// 热重载加上 / 去掉 `${correct_pinyin}`：变量随之出现 / 消失，引擎不重建（只翻提示开关）。
     #[test]
-    fn fuzzy_pinyin_template_toggle_does_not_rebuild_engine() {
+    fn correct_pinyin_template_toggle_does_not_rebuild_engine() {
         let (dir, cfg) = fuzzy_fixture();
         let c = Coordinator::new_headless(cfg, Some(&dir));
         assert_eq!(zhongguo_comment(&c), "", "出厂模板不引用");
@@ -1209,11 +1209,11 @@ mod tests {
             });
             c.apply_data_needs();
         };
-        set_tpl("${fuzzy_pinyin}");
-        assert!(c.engine_mgr.fuzzy_hint_active());
+        set_tpl("${correct_pinyin}");
+        assert!(c.engine_mgr.pinyin_hint_active());
         assert_eq!(zhongguo_comment(&c), "zhong guo");
         set_tpl("");
-        assert!(!c.engine_mgr.fuzzy_hint_active());
+        assert!(!c.engine_mgr.pinyin_hint_active());
         assert_eq!(zhongguo_comment(&c), "");
         assert_eq!(c.engine_mgr.engines_generation(), built, "翻转不该重建引擎");
         drop(c);

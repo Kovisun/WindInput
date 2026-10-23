@@ -2186,9 +2186,9 @@ mod candidate_tooltip_tests {
 }
 
 /// 模糊音提示的分段透传：核心按 `hint.enabled` / `hint.scope` 给候选生成带提示正文，这里只验
-/// 「拉取窗口带出分段、提示段角色 `fuzzy_hint`、关掉即空」。哪些候选该标在协调器测试里验。
+/// 「拉取窗口带出分段、提示段角色 `pinyin_hint`、关掉即空」。哪些候选该标在协调器测试里验。
 #[cfg(test)]
-mod fuzzy_hint_tests {
+mod pinyin_hint_tests {
     use super::*;
     use wind_config::HintScope;
 
@@ -2267,7 +2267,7 @@ mod fuzzy_hint_tests {
             segs.iter()
                 .map(|s| (s.text.as_str(), s.role.as_deref()))
                 .collect::<Vec<_>>(),
-            vec![("苹", None), ("(ping)", Some("fuzzy_hint")), ("果", None)]
+            vec![("苹", None), ("(ping)", Some("pinyin_hint")), ("果", None)]
         );
         let later = w
             .items

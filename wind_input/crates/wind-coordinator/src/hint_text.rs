@@ -1,18 +1,20 @@
 //! 模糊音提示的显示正文（设计 `docs/design/fuzzy-pinyin-hint.md` §5.2）：把候选的
-//! `meta.fuzzy_hints`（引擎文字的字下标）换算到显示文字上，插成「苹(ping)果」。
+//! `meta.pinyin_hints`（引擎文字的字下标）换算到显示文字上，插成「苹(ping)果」。
 //!
 //! 宁漏不错：显示文字与引擎文字对不上（简繁转换改了字数、截断截掉了被标的字）就不标。
 
-use wind_candidate::{Candidate, FuzzyHint};
+#[cfg(test)]
+use wind_candidate::HintKind;
+use wind_candidate::{Candidate, PinyinHint};
 use wind_config::config::TRUNCATION_MARK;
 use wind_ui_types::{SpanStyle, StyledText};
 
-/// 在 `display` 第 `char_index` 个字后面插入 `(correct)`，整段 `(correct)` 角色 `fuzzy_hint`，
+/// 在 `display` 第 `char_index` 个字后面插入 `(correct)`，整段 `(correct)` 角色 `pinyin_hint`，
 /// 其余文字无角色。没有一条提示落在 `display` 里 ⇒ 空（= 按纯文字显示）。
-pub(crate) fn hint_styled_text(display: &str, hints: &[FuzzyHint]) -> StyledText {
+pub(crate) fn hint_styled_text(display: &str, hints: &[PinyinHint]) -> StyledText {
     let mut out = StyledText::new();
     let hint_style = SpanStyle {
-        role: wind_ui_types::static_role("fuzzy_hint"),
+        role: wind_ui_types::static_role("pinyin_hint"),
         ..Default::default()
     };
     let mut copied = 0;
@@ -48,17 +50,18 @@ pub(crate) fn hint_styled_text(display: &str, hints: &[FuzzyHint]) -> StyledText
 pub(crate) fn remap_hints(
     engine_text: &str,
     display: &str,
-    hints: &[FuzzyHint],
-) -> Option<Vec<FuzzyHint>> {
+    hints: &[PinyinHint],
+) -> Option<Vec<PinyinHint>> {
     let (engine_len, display_len) = (engine_text.chars().count(), display.chars().count());
     let front = engine_len.checked_sub(display_len)?;
     Some(
         hints
             .iter()
             .filter(|h| h.char_index as usize >= front)
-            .map(|h| FuzzyHint {
+            .map(|h| PinyinHint {
                 char_index: h.char_index - front as u16,
                 correct: h.correct.clone(),
+                kind: h.kind,
             })
             .collect(),
     )
@@ -70,7 +73,7 @@ pub(crate) fn styled_for_shown(
     full: &str,
     disp: &str,
     prefix: &str,
-    hints: &[FuzzyHint],
+    hints: &[PinyinHint],
 ) -> StyledText {
     let disp_len = disp.chars().count();
     let kept = if disp == full {
@@ -81,12 +84,13 @@ pub(crate) fn styled_for_shown(
         return StyledText::new();
     };
     let shift = prefix.chars().count();
-    let shifted: Vec<FuzzyHint> = hints
+    let shifted: Vec<PinyinHint> = hints
         .iter()
         .filter(|h| (h.char_index as usize) < kept)
-        .map(|h| FuzzyHint {
+        .map(|h| PinyinHint {
             char_index: h.char_index + shift as u16,
             correct: h.correct.clone(),
+            kind: h.kind,
         })
         .collect();
     if shifted.is_empty() {
@@ -105,30 +109,31 @@ fn toned_reading(reverse: &wind_reverse::ReverseLookup, ch: char, syl: &str) -> 
 /// `hint.tone`（§9.1）：提示里的正确音节换成带调读音。`hints` 是引擎文字 `text` 的字下标。
 pub(crate) fn toned_hints(
     text: &str,
-    hints: &[FuzzyHint],
+    hints: &[PinyinHint],
     reverse: &wind_reverse::ReverseLookup,
-) -> Vec<FuzzyHint> {
+) -> Vec<PinyinHint> {
     hints
         .iter()
-        .map(|h| FuzzyHint {
+        .map(|h| PinyinHint {
             char_index: h.char_index,
             correct: match text.chars().nth(h.char_index as usize) {
                 Some(ch) => toned_reading(reverse, ch, &h.correct),
                 None => h.correct.clone(),
             },
+            kind: h.kind,
         })
         .collect()
 }
 
-/// `${fuzzy_pinyin}`（§9.2）：带模糊音提示的候选的整词正确拼音，音节以空格分隔；`tone` 有值即
-/// 带调。音节取引擎随提示给出的 `meta.fuzzy_syllables`（与内嵌提示同一切法）；没有提示、或
+/// `${correct_pinyin}`（§9.2）：带模糊音提示的候选的整词正确拼音，音节以空格分隔；`tone` 有值即
+/// 带调。音节取引擎随提示给出的 `meta.hint_syllables`（与内嵌提示同一切法）；没有提示、或
 /// 音节数与字数对不上 ⇒ 空串。
-pub(crate) fn fuzzy_pinyin_text(
+pub(crate) fn correct_pinyin_text(
     c: &Candidate,
     tone: Option<&wind_reverse::ReverseLookup>,
 ) -> String {
-    let syls = &c.meta.fuzzy_syllables;
-    if c.meta.fuzzy_hints.is_empty() || syls.len() != c.text.chars().count() {
+    let syls = &c.meta.hint_syllables;
+    if c.meta.pinyin_hints.is_empty() || syls.len() != c.text.chars().count() {
         return String::new();
     }
     match tone {
@@ -147,10 +152,11 @@ pub(crate) fn fuzzy_pinyin_text(
 mod tests {
     use super::*;
 
-    fn fh(i: u16, s: &str) -> FuzzyHint {
-        FuzzyHint {
+    fn fh(i: u16, s: &str) -> PinyinHint {
+        PinyinHint {
             char_index: i,
             correct: s.into(),
+            kind: HintKind::Fuzzy,
         }
     }
 
@@ -172,24 +178,24 @@ mod tests {
         out
     }
 
-    /// `${fuzzy_pinyin}` 用引擎给的整词音节，不看候选码边界：`boundary == 0`（用户手输码）
+    /// `${correct_pinyin}` 用引擎给的整词音节，不看候选码边界：`boundary == 0`（用户手输码）
     /// 也出值；音节数对不上字数则空。
     #[test]
-    fn fuzzy_pinyin_text_uses_engine_syllables() {
+    fn correct_pinyin_text_uses_engine_syllables() {
         let mut c = Candidate {
             text: "中国".into(),
             code: "zongguo".into(),
             ..Default::default()
         };
         c.meta.learn_code = Some(("zhongguo".into(), 0));
-        c.meta.fuzzy_hints = vec![fh(0, "zhong")];
-        c.meta.fuzzy_syllables = vec!["zhong".into(), "guo".into()];
-        assert_eq!(fuzzy_pinyin_text(&c, None), "zhong guo");
-        c.meta.fuzzy_syllables.pop();
-        assert_eq!(fuzzy_pinyin_text(&c, None), "");
-        c.meta.fuzzy_hints.clear();
-        c.meta.fuzzy_syllables = vec!["zhong".into(), "guo".into()];
-        assert_eq!(fuzzy_pinyin_text(&c, None), "", "无提示即空");
+        c.meta.pinyin_hints = vec![fh(0, "zhong")];
+        c.meta.hint_syllables = vec!["zhong".into(), "guo".into()];
+        assert_eq!(correct_pinyin_text(&c, None), "zhong guo");
+        c.meta.hint_syllables.pop();
+        assert_eq!(correct_pinyin_text(&c, None), "");
+        c.meta.pinyin_hints.clear();
+        c.meta.hint_syllables = vec!["zhong".into(), "guo".into()];
+        assert_eq!(correct_pinyin_text(&c, None), "", "无提示即空");
     }
 
     #[test]
@@ -198,7 +204,7 @@ mod tests {
         assert_eq!(t.as_str(), "苹(ping)果");
         assert_eq!(
             segs(&t),
-            vec![("苹", None), ("(ping)", Some("fuzzy_hint")), ("果", None)]
+            vec![("苹", None), ("(ping)", Some("pinyin_hint")), ("果", None)]
         );
     }
 

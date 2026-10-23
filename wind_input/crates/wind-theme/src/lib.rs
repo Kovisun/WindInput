@@ -20,7 +20,7 @@ pub use resolve::{
 pub use rvnode::{DEFAULT_ACCENT_BAR_HEIGHT_RATIO, RvGradient, RvImage, RvNode, RvViews};
 pub use schema::Meta;
 pub use span::{
-    Atom, ColorRef, FUZZY_HINT_ROLE, InlineColor, TextState, body_color, fuzzy_hint_color,
+    Atom, ColorRef, InlineColor, PINYIN_HINT_ROLE, TextState, body_color, pinyin_hint_color,
     span_color,
 };
 pub use theme::{

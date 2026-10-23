@@ -127,7 +127,7 @@ color = "${text}"
 # 模糊音提示段（候选里的 (ping)）：与候选文字、注释色都区分开的橙，对白/深底 >= 3:1。
 # 选中态改了正文色的主题自动回落注释色；不配则整体回退注释色。
 [text.roles]
-fuzzy_hint = { light = "#C2410C", dark = "#FDBA74" }
+pinyin_hint = { light = "#C2410C", dark = "#FDBA74" }
 
 [comment]
 margin = { left = 6 }
@@ -137,10 +137,10 @@ font_size = -4
 # 要求）。想分色的主题自己写 [comment.roles]，用户也可在模板里写 $[颜色]{…}。
 # 角色名即变量名，另有结构角色 literal（模板字面文字）、title（段名）、separator（${chaizi_all:／}
 # 一类变量的分隔符；不配时随所在变量同色）。
-# 唯一例外是 ${fuzzy_pinyin}（模糊音的正确拼音，出厂模板不含它）：与上面的 fuzzy_hint 同色。
+# 唯一例外是 ${correct_pinyin}（模糊音的正确拼音，出厂模板不含它）：与上面的 pinyin_hint 同色。
 
 [comment.roles]
-fuzzy_pinyin = { light = "#C2410C", dark = "#FDBA74" }
+correct_pinyin = { light = "#C2410C", dark = "#FDBA74" }
 
 [footer_bar]
 font_size = -4

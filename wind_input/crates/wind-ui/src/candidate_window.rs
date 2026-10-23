@@ -242,10 +242,10 @@ fn cand_display(c: &CandidateItem) -> StyledText {
 }
 
 /// 去掉全部模糊音提示段（`(ping)`），其余段样式不变。
-fn without_fuzzy_hint(src: &StyledText) -> StyledText {
+fn without_pinyin_hint(src: &StyledText) -> StyledText {
     let mut out = StyledText::new();
     for (a, b, style) in styled_segments(src) {
-        if style.role != Some(wind_theme::FUZZY_HINT_ROLE) {
+        if style.role != Some(wind_theme::PINYIN_HINT_ROLE) {
             out.push(&src.as_str()[a..b], &style);
         }
     }
@@ -909,9 +909,9 @@ impl CandidateWindow {
         if src
             .spans()
             .iter()
-            .any(|s| s.role == Some(wind_theme::FUZZY_HINT_ROLE))
+            .any(|s| s.role == Some(wind_theme::PINYIN_HINT_ROLE))
         {
-            return self.truncate_candidate_styled(&without_fuzzy_hint(src), style, max_w);
+            return self.truncate_candidate_styled(&without_pinyin_hint(src), style, max_w);
         }
         src.cut_with_mark(shown.len() - '…'.len_utf8(), "…")
     }
@@ -4180,7 +4180,7 @@ impl CandidateWindow {
             // 模糊音提示段的颜色区间（无提示 = 空，叶子与改动前逐字段相同）；直立态逐格切时
             // 每格只拿自己那几段，同注释。
             let txt_state = text_state(is_sel, is_hover);
-            let text_runs = crate::span_runs::fuzzy_hint_runs(
+            let text_runs = crate::span_runs::pinyin_hint_runs(
                 &v.text,
                 &v.comment,
                 txt_state,

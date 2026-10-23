@@ -31,9 +31,18 @@ pub enum CandidateSource {
 /// 模糊音提示：候选**引擎文字**第 `char_index` 个字（0 起）对应的音节被读错，
 /// 正确音节为 `correct`。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FuzzyHint {
+pub struct PinyinHint {
     pub char_index: u16,
     pub correct: String,
+    pub kind: HintKind,
+}
+
+/// 提示来源：模糊音 / 读错的音 / 拼写纠错。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HintKind {
+    Fuzzy,
+    Misread,
+    Correction,
 }
 
 /// 候选词元数据
@@ -120,12 +129,12 @@ pub struct CandidateMeta {
     pub from_prefix_complete: bool,
     /// 模糊音提示（空 = 无提示）。仅在模糊音与 `hint` 都开启时由引擎填充。
     #[serde(skip)]
-    pub fuzzy_hints: Vec<FuzzyHint>,
-    /// 带提示候选的整词正确音节（一字一个，`["zhong", "guo"]`）；与 `fuzzy_hints` 同时由引擎
-    /// 填，`fuzzy_hints` 空时也空。切法与提示同源（词条码无边界时按音节图现切），协调器的
-    /// `${fuzzy_pinyin}` 直接用它，不另行切分。
+    pub pinyin_hints: Vec<PinyinHint>,
+    /// 带提示候选的整词正确音节（一字一个，`["zhong", "guo"]`）；与 `pinyin_hints` 同时由引擎
+    /// 填，`pinyin_hints` 空时也空。切法与提示同源（词条码无边界时按音节图现切），协调器的
+    /// `${correct_pinyin}` 直接用它，不另行切分。
     #[serde(skip)]
-    pub fuzzy_syllables: Vec<String>,
+    pub hint_syllables: Vec<String>,
 }
 
 /// 命令栏动作

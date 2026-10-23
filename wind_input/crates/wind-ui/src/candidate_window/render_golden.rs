@@ -400,13 +400,13 @@ fn column_item(dump: &str, i: usize) -> bool {
 
 // ══ 模糊音提示（设计 fuzzy-pinyin-hint.md）══
 //
-// 候选正文带分段（`text_styled`）：「苹(ping)果」里 `(ping)` 段角色 `fuzzy_hint`，按提示色画。
+// 候选正文带分段（`text_styled`）：「苹(ping)果」里 `(ping)` 段角色 `pinyin_hint`，按提示色画。
 // 首录于提示落地时（此前无此功能，参照即新代码产物，守的是之后的回归）。
 
-/// 协调器产出的提示正文：`pre` + `(hint)`（角色 `fuzzy_hint`）+ `post`。
+/// 协调器产出的提示正文：`pre` + `(hint)`（角色 `pinyin_hint`）+ `post`。
 fn hint_styled(pre: &str, hint: &str, post: &str) -> StyledText {
     let mut t = StyledText::from(pre);
-    piece(&mut t, &format!("({hint})"), "fuzzy_hint", false);
+    piece(&mut t, &format!("({hint})"), "pinyin_hint", false);
     t.push(post, &SpanStyle::default());
     t
 }
@@ -474,13 +474,13 @@ fn section<'a>(dump: &'a str, label: &str) -> &'a str {
         .unwrap()
 }
 
-/// `_base` 给 `fuzzy_hint` 的亮色档 `#C2410C`。
+/// `_base` 给 `pinyin_hint` 的亮色档 `#C2410C`。
 const HINT_LIGHT: [u8; 4] = [0xC2, 0x41, 0x0C, 255];
 
 #[test]
-fn golden_fuzzy_hint_matches_golden() {
+fn golden_pinyin_hint_matches_golden() {
     let got = render_fuzzy();
-    let file = golden_dir().join("fuzzy_hint-default-light.txt");
+    let file = golden_dir().join("pinyin_hint-default-light.txt");
     if std::env::var_os("WIND_UI_BLESS_GOLDEN").is_some() {
         std::fs::create_dir_all(golden_dir()).unwrap();
         std::fs::write(&file, &got).unwrap();
@@ -518,7 +518,7 @@ fn assert_plain_hint_run(sec: &str, label: &str) {
 }
 
 #[test]
-fn golden_fuzzy_hint_horizontal() {
+fn golden_pinyin_hint_horizontal() {
     let got = render_fuzzy();
     let sec = section(&got, "横排");
     assert_plain_hint_run(sec, "横排");
@@ -534,7 +534,7 @@ fn golden_fuzzy_hint_horizontal() {
 }
 
 #[test]
-fn golden_fuzzy_hint_vertical() {
+fn golden_pinyin_hint_vertical() {
     let got = render_fuzzy();
     assert_plain_hint_run(section(&got, "竖排"), "竖排");
     assert_plain_hint_run(section(&got, "旋转"), "旋转");
@@ -560,7 +560,7 @@ fn golden_fuzzy_hint_vertical() {
 }
 
 #[test]
-fn golden_fuzzy_hint_highlighted() {
+fn golden_pinyin_hint_highlighted() {
     let theme = wind_theme::load_resolved(&themes_dir(), "default", false).unwrap();
     let v = &theme.views;
     let got = render_fuzzy();
@@ -569,7 +569,7 @@ fn golden_fuzzy_hint_highlighted() {
         ("苹(ping)果", (3, 9), wind_theme::TextState::Selected),
         ("瓶(ping)子", (3, 9), wind_theme::TextState::Hover),
     ] {
-        let want = wind_theme::fuzzy_hint_color(
+        let want = wind_theme::pinyin_hint_color(
             &v.text,
             &v.comment,
             state,
@@ -607,7 +607,7 @@ fn golden_fuzzy_hint_highlighted() {
         "前提：default 选中态改了正文色"
     );
     let hint = |v: &wind_theme::RvViews| {
-        wind_theme::fuzzy_hint_color(
+        wind_theme::pinyin_hint_color(
             &v.text,
             &v.comment,
             sel,
@@ -629,7 +629,7 @@ fn golden_fuzzy_hint_highlighted() {
 
 /// 展开网格：格宽按含提示的实宽算，同一行的格子互不重叠、各行同列对齐。
 #[test]
-fn golden_fuzzy_hint_grid() {
+fn golden_pinyin_hint_grid() {
     let got = render_fuzzy();
     let sec = section(&got, "网格");
     assert!(
@@ -687,7 +687,7 @@ fn golden_fuzzy_hint_grid() {
 /// 窄窗：结果要么完整保留提示、要么整段去掉提示，绝不出现半截 `(pi…`；且存在一档宽度
 /// 恰好让「去掉提示后正文完整放下」。
 #[test]
-fn golden_fuzzy_hint_truncated() {
+fn golden_pinyin_hint_truncated() {
     let theme = wind_theme::load_resolved(&themes_dir(), "default", false).unwrap();
     let shown = |vmax: i32, cand: CandidateItem| -> String {
         let (tx, _rx) = std::sync::mpsc::channel();

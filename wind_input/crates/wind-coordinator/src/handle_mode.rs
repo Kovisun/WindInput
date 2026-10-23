@@ -1096,15 +1096,15 @@ impl Coordinator {
     /// （`hint.tone` 开）时提示换成带调读音。
     ///
     /// 逆切分次选只显示后段时，字数要与引擎的后段（`display_text`）相同才按后段扣前段——
-    /// [`crate::fuzzy_hint_text::remap_hints`] 单凭字数分不清这两种情形，在这里先判掉。
+    /// [`crate::hint_text::remap_hints`] 单凭字数分不清这两种情形，在这里先判掉。
     pub(crate) fn cand_display_hints(
         &self,
         state: &State,
         c: &Candidate,
         display: &str,
         tone: Option<&wind_reverse::ReverseLookup>,
-    ) -> Option<Vec<wind_candidate::FuzzyHint>> {
-        if c.meta.fuzzy_hints.is_empty() {
+    ) -> Option<Vec<wind_candidate::PinyinHint>> {
+        if c.meta.pinyin_hints.is_empty() {
             return None;
         }
         let engine_shown = if Self::split_back_only(state, c) {
@@ -1118,22 +1118,22 @@ impl Coordinator {
         let toned;
         let hints = match tone {
             Some(reverse) => {
-                toned = crate::fuzzy_hint_text::toned_hints(&c.text, &c.meta.fuzzy_hints, reverse);
+                toned = crate::hint_text::toned_hints(&c.text, &c.meta.pinyin_hints, reverse);
                 &toned
             }
-            None => &c.meta.fuzzy_hints,
+            None => &c.meta.pinyin_hints,
         };
-        crate::fuzzy_hint_text::remap_hints(&c.text, display, hints).filter(|h| !h.is_empty())
+        crate::hint_text::remap_hints(&c.text, display, hints).filter(|h| !h.is_empty())
     }
 
     /// `state.candidates[start..end]` 逐条的带提示正文（空 = 不标），按 `hint.scope` 定哪些
-    /// 候选标；`hint.enabled` 或 `hint.fuzzy` 关着一律不标（引擎可能因模板引用 `${fuzzy_pinyin}` 照样算了提示）。
+    /// 候选标；`hint.enabled` 或 `hint.fuzzy` 关着一律不标（引擎可能因模板引用 `${correct_pinyin}` 照样算了提示）。
     ///
     /// `styled(c)` 是该候选在**宿主自己的显示形态**（截断、前缀标注…）下的带提示正文——桌面候选窗
     /// 与移动端拉取窗口显示形态不同，各自传入，标哪条的规则只此一份。`first` 只标最终界面顺序里
     /// 第一个 `styled` 非空的候选（换算或截断丢光了提示的顺延给下一条）：在排好序的完整列表上找，
     /// 与翻页 / 窗口无关，之后的永不带提示；`all` 每个都标。
-    pub(crate) fn fuzzy_hint_texts(
+    pub(crate) fn pinyin_hint_texts(
         &self,
         state: &State,
         hint: &wind_config::PinyinHintConfig,
@@ -1145,7 +1145,7 @@ impl Coordinator {
             return vec![Default::default(); end.saturating_sub(start)];
         }
         let hinted = |c: &Candidate| {
-            if c.meta.fuzzy_hints.is_empty() {
+            if c.meta.pinyin_hints.is_empty() {
                 Default::default()
             } else {
                 styled(c)
