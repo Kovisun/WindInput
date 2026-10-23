@@ -7505,15 +7505,17 @@ impl Coordinator {
             (sel_start.saturating_sub(vis_start), sel_end - sel_start)
         });
         // 候选序号标签：
-        //  - 数字透镜：数字键正在录表达式 → 选词改用字母标签 a/b/c
+        //  - 数字透镜：数字键正在录表达式 → 选词改用字母标签 a/b/c（实例关了字母选词除外）
         //  - 其余（含自由输入）：正常序号
         //
         // ★ 自由输入（Free 透镜）下字母与数字**都是**字面输入，没有键能按序号选——曾经因此
         // 干脆不画序号。维护者 2026-10-07 改定为照常显示：与其它状态的候选窗外观一致，
         // 尤其快捷输入历史在这里置首、候选一多时，序号是用户辨认「第几条」的唯一参照。
-        // 选词仍靠空格（高亮）与方向键。
+        // 选词靠空格（高亮）、方向键与 `keys.quick_input_select`（出厂 Ctrl+序号）。
         let mix_lens = matches!(state.active, Some(ModeKind::Mix(_))).then(|| self.mix_lens(state));
-        let alpha = mix_lens == Some(MixLens::Numeric);
+        // 关掉 `numeric_letter_select` 的实例字母是字面输入，标签回到数字序号。
+        let alpha =
+            mix_lens == Some(MixLens::Numeric) && self.mix_numeric_letter_select(state.mix_id);
         // 悬停提示/候选微调配置（热重载快照）
         let rt = self.rt();
         let cand_cfg = &rt.config.ui.candidate;

@@ -5183,12 +5183,41 @@ impl Coordinator {
                 || (self.candidate_op_scope(&state).is_none()
                     && self.quick_history_at(&state, num - 1).is_none())
             {
-                return None;
+                // 快捷输入里没有可操作的落点也吃掉：落到 mix 处理器就是
+                // `overlay_ctrl_alt_guard`，会放弃整段输入。
+                return matches!(state.active, Some(ModeKind::Mix(_)))
+                    .then_some(KeyAction::Consumed);
             }
         }
         // 分发自行重新加锁并做页范围/来源分流校验。
         self.candidate_or_quick_format_op(op, num - 1);
         Some(KeyAction::Consumed)
+    }
+
+    /// 快捷输入专用选词上屏键（`keys.quick_input_select`，出厂 Ctrl+数字）：上屏当前页
+    /// 第 N 个候选，`0` 为第 10 个；展开态按序号顺延的范围选（同数字键，见 `mix_select`）。
+    ///
+    /// 须先于 [`Self::handle_candidate_action_hotkey`]：出厂与置顶同为 `ctrl+number`，
+    /// 快捷输入里归选词。
+    ///
+    /// ★ 快捷输入里命中即吃，**一条候选都没有也吃**（`mix_select` 越界回 Consumed）：本键
+    /// 落到 mix 处理器就是 `overlay_ctrl_alt_guard`，那会放弃整段输入。TSF 对会话中的
+    /// Ctrl/Alt 组合本就先吃下转发，回 Consumed 且组合仍在 ⇒ 键不交宿主。
+    pub(crate) fn try_quick_input_select(&self, data: &KeyEventData) -> Option<KeyAction> {
+        let num = Self::match_candidate_action_key(
+            &self.rt().config.keys.quick_input_select,
+            data.modifiers,
+            data.key_code,
+        );
+        if num == 0 {
+            return None;
+        }
+        let mut guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let state: &mut State = &mut guard;
+        if !matches!(state.active, Some(ModeKind::Mix(_))) {
+            return None;
+        }
+        Some(self.mix_select(state, num - 1))
     }
 
     /// 上屏注释 / 拼音（`input.alt_commit`，t138）：Alt+数字 N 上屏当前页第 N 个候选的
