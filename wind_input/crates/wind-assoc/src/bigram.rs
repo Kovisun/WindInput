@@ -167,6 +167,25 @@ mod tests {
             .unwrap()
     }
 
+    /// 随包的表整份常驻内存（文本 + 每行 4 字节偏移），PC 用户对内存敏感。重新蒸馏
+    /// （`scripts/lm/build_assoc.sh`）让它变大时在这里拦下——确要放宽，两处的上限一起改。
+    #[test]
+    fn shipped_table_parses_within_memory_budget() {
+        const MAX_BYTES: usize = 2560 * 1024;
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../data/assoc/assoc_bigram.txt"
+        );
+        let text = std::fs::read_to_string(path).expect("读随包的联想表");
+        let t = AssocBigram::parse(text).expect("随包的联想表能解析");
+        let resident = t.text.len() + t.lines.len() * std::mem::size_of::<u32>();
+        assert!(
+            resident <= MAX_BYTES,
+            "联想表常驻 {resident} 字节，超过 {MAX_BYTES}"
+        );
+        assert!(t.len() > 10_000, "联想表只有 {} 行，像是生成坏了", t.len());
+    }
+
     #[test]
     fn exact_and_suffix_lookup() {
         let t = table();

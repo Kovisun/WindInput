@@ -656,7 +656,12 @@ impl Coordinator {
             profile: self.engine_mgr.pinyin_freq_profile(),
             next_words: cfg.kind == AssocKind::Smart,
         });
-        let bigram_table = self.assoc_bigram();
+        // 这里只管**读不读表**，出不出场仍由 `associate` 判：表整份常驻约 2 MB，词语联想档
+        // （PC 用户常开的那档）用不上它，就不该因为调到这里而读进内存。
+        let bigram_table = cfg
+            .source_enabled(AssocSource::Bigram)
+            .then(|| self.assoc_bigram())
+            .flatten();
         let bigram = bigram_table.as_deref().map(|table| BigramWords { table });
         let mut providers: Vec<(AssocSource, &dyn AssocProvider)> =
             vec![(AssocSource::Prefix, &prefix), (AssocSource::Punct, &punct)];
@@ -1164,6 +1169,19 @@ mod tests {
         };
         assert_eq!(shown("吗"), ["的", "？", "！", "呢"]);
         assert_eq!(shown("好的"), ["我", "，", "谢谢"]);
+    }
+
+    /// 下一词表只在用得上的档位读进内存：词语联想档（PC 常开的那档）不碰它。
+    /// 看的是 `OnceLock` 有没有被初始化过——无数据文件时初始化成 `None` 也算碰过。
+    #[test]
+    fn bigram_table_loads_only_when_smart() {
+        let word = coord_with(|c| c.input.association.kind = "word".to_string());
+        word.assoc_hits(&word.assoc_config(), "", "中", false);
+        assert!(word.assoc_bigram.get().is_none(), "词语联想档读了下一词表");
+
+        let smart = coord_smart();
+        smart.assoc_hits(&smart.assoc_config(), "", "中", false);
+        assert!(smart.assoc_bigram.get().is_some());
     }
 
     #[test]

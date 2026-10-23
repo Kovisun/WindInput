@@ -351,7 +351,7 @@ impl AssocConfig {
     ///
     /// 档位是硬性的（词语联想里标点源根本没有语义），用户开关只在档位放行的源上生效。
     /// 两者顺序反过来会让「词语联想 + punct=true」出标点——那正是用户报的问题。
-    fn source_enabled(&self, s: AssocSource) -> bool {
+    pub fn source_enabled(&self, s: AssocSource) -> bool {
         if !self.kind.allows(s) {
             return false;
         }

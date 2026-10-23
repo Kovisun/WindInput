@@ -480,8 +480,14 @@ zh-hans-bgc / zh-hans-bgw / wanxiang-lts-zh-hans
 - ⚠️ **万象 `.gram` 不能用来蒸馏**：分值不随频次单调（「今天+三缺一」22.3 >「今天+是」16.0）。
 - **读端**：`wind_assoc::bigram::AssocBigram` 整份文本留在内存、只建行首偏移表二分查找；
   上文先整段查、查不到逐个缩到末尾 3/2/1 字（整句上屏「我们今天」→ 查「今天」）。
-  协调器首次用到才读（`Coordinator::assoc_bigram`，桌面联想默认关不占内存）。
+  协调器首次用到才读（`Coordinator::assoc_bigram`），且**只在智能联想档读**——桌面联想
+  默认关、PC 常开的词语联想档也用不上它，都不占内存（`bigram_table_loads_only_when_smart`）。
   数据文件走 `resolve_data_file`，用户目录放同名文件即可整体替换（自训数据）。
+- **重建**：`scripts/lm/build_assoc.sh` 一条龙——拉 bgw（按 sha256 钉版本）与当期中文维基、
+  抽正文、切词、计数、蒸馏、补标点、写回 `data/assoc/`；`eval` 子命令另拉 Tatoeba 跑评测。
+  2026-10-23 用新拉的 bgw 与同一份维基重跑，产物与入库的表逐行相同。
+- **体积上限 2.5 MB**：表整份常驻，PC 用户对内存敏感。脚本超限即失败，单测
+  `shipped_table_parses_within_memory_budget` 也按同一数字拦随包的表（现 2.0 MB）。
 - **句末记号 `$`**：换成「，」。它几乎是每个上文的头名，原样放首位会让每次上屏后
   首位都是逗号，故至少排第二（`SENTENCE_END_MIN_RANK`）。
 - **名额**：智能联想里 Bigram 最多 6 条（`SMART_BIGRAM_CAP`），前缀词 4 条、余下给标点。
