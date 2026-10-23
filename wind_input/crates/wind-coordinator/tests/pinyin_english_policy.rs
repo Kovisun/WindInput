@@ -101,9 +101,23 @@ fn rare_head_word_does_not_outrank_english() {
     if !ready("pinyin") {
         return;
     }
-    for input in ["test", "app", "old", "web", "big", "fun"] {
+    for (input, rare) in [
+        ("test", "托尔斯泰"),
+        ("app", "挨批评"),
+        ("old", "欧蓝德"),
+        ("web", "玩儿吧"),
+        ("big", "逼格"),
+        ("fun", "妇女"),
+    ] {
         let list = typed(config("pinyin", |_| {}), input, &format!("rare_{input}"));
         assert_eq!(list[0], input, "{input} 英文应第 1，实际 {:?}", &list[..4]);
+        // 前提：首选位让出来的确是那条冷僻整串词——词库变了它不在第 2，本例就测不到门槛。
+        assert_eq!(
+            list[1],
+            rare,
+            "前提：{input} 第 2 应是「{rare}」，实际 {:?}",
+            &list[..4]
+        );
     }
 }
 
@@ -152,6 +166,49 @@ fn english_selected_once_skips_yield() {
             &again[..4]
         );
     }
+}
+
+/// 选过即免只认与输入同码的英文完整单词：选过补全出来的 business，再打 bus 仍让「不是」。
+#[test]
+fn selected_completion_does_not_exempt() {
+    if !ready("pinyin") {
+        return;
+    }
+    let cfg = config("pinyin", |c| {
+        c.schema.pinyin.frequency.enabled = true;
+        c.schema.pinyin.english_merge.complete_min_length = 3;
+    });
+    let path = std::env::temp_dir().join("wind_py_en_policy_completion_used.redb");
+    let _ = std::fs::remove_file(&path);
+    let store = Arc::new(Store::open(&path).unwrap());
+    let coord = Coordinator::new_headless_with_store(cfg, Some(&data_dir()), store);
+    let type_in = |s: &str| {
+        for c in s.chars() {
+            coord.handle_key_event(&key(c.to_ascii_uppercase() as u32));
+        }
+    };
+    // 在 busines 下选中 business（中文侧为空，它在兜底补全页上）。
+    type_in("busines");
+    let page = coord.debug_page_texts();
+    let i = page
+        .iter()
+        .position(|t| t == "business")
+        .unwrap_or_else(|| panic!("前提：busines 首页应有 business，实际 {page:?}"));
+    coord.handle_key_event(&key(0x31 + i as u32));
+    assert!(coord.debug_input_buffer().is_empty(), "选词后缓冲应清空");
+    type_in("bus");
+    let again = coord.debug_all_candidate_texts();
+    assert!(
+        again.iter().any(|t| t == "business"),
+        "前提：business 仍在列表里（否则测不到它会不会被当成选过 bus），实际 {:?}",
+        &again[..6]
+    );
+    assert_eq!(
+        again[0],
+        "不是",
+        "选过补全不算选过 bus，实际 {:?}",
+        &again[..4]
+    );
 }
 
 /// 拼凑句不算开头段：hello / world 英文仍第 1；hen 的英文位次不受影响。
@@ -213,6 +270,10 @@ fn explicit_exact_position_applies_to_both() {
     let set3 = |c: &mut Config| c.schema.pinyin.english_merge.exact_position = 3;
     let sp = typed(config("shuangpin", set3), "the", "sp_the_3");
     assert_eq!(sp[2], "the", "双拼显式 3 时英文在第 3，实际 {:?}", &sp[..4]);
+    // 设 1 只去掉双拼那一位的下限：首选「他和」是够格的高频词，英文照样排它后面。
+    let set1 = |c: &mut Config| c.schema.pinyin.english_merge.exact_position = 1;
+    let sp1 = typed(config("shuangpin", set1), "the", "sp_the_1");
+    assert_eq!(&sp1[..2], ["他和", "the"], "实际 {:?}", &sp1[..4]);
     let qp = typed(config("pinyin", set3), "hello", "qp_hello_3");
     assert_eq!(
         qp[2],
