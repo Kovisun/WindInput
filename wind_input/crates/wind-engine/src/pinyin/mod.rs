@@ -194,6 +194,43 @@ const ABBREV_QUOTA_DIVISOR: usize = 10;
 /// 见那边 doc 记的已知缺口。
 ///
 /// 本函数的职责只是「让候选进得来」，不是「排好序」。
+/// 窗口里保底留给换位纠错候选的条数（对齐 librime 纠错候选上限 4）。
+const CORRECTION_QUOTA: usize = 4;
+
+/// 排好序的 `cands` 在前 `max_candidates` 条里不足 [`CORRECTION_QUOTA`] 条纠错候选时，把窗口外
+/// 分最高的几条纠错候选挪到窗口末尾（其余候选相对顺序不变，只被往后推，截断照常由调用方做）。
+fn reserve_correction_quota(
+    cands: &mut Vec<Candidate>,
+    max_candidates: usize,
+    is_corr: impl Fn(&Candidate) -> bool,
+) {
+    if cands.len() <= max_candidates {
+        return;
+    }
+    let quota = CORRECTION_QUOTA.min(max_candidates);
+    let kept = cands[..max_candidates]
+        .iter()
+        .filter(|c| is_corr(c))
+        .count();
+    if kept >= quota {
+        return;
+    }
+    let need = quota - kept;
+    let picked: Vec<usize> = (max_candidates..cands.len())
+        .filter(|&i| is_corr(&cands[i]))
+        .take(need)
+        .collect();
+    if picked.is_empty() {
+        return;
+    }
+    // 从后往前摘，下标不失效；摘出来的保持原序。
+    let mut extra: Vec<Candidate> = picked.iter().rev().map(|&i| cands.remove(i)).collect();
+    extra.reverse();
+    // 插到窗口末尾 `picked.len()` 格之前：被挤出窗口的是尾部的非纠错候选，次序不变。
+    let at = max_candidates - picked.len();
+    cands.splice(at..at, extra);
+}
+
 fn truncate_with_abbrev_quota(cands: &mut Vec<Candidate>, max_candidates: usize) {
     if cands.len() <= max_candidates {
         return;
@@ -4799,26 +4836,19 @@ impl Engine for PinyinEngine {
                 .then(b.weight.cmp(&a.weight))
                 .then(a.natural_order.cmp(&b.natural_order))
         };
-        // 换位纠错只能**加**候选：截断前先判出纠错候选（`is_corrected`）、去掉同文的纠错那条，
-        // 截断时纠错召回步新增的候选只占其余候选用剩的名额。否则 `yuo` 的数百个 `you` 字
-        // （整串、层级高于半截）把关纠错时的「与」「于」等 `yu` 子短语整批挤出截断窗口。
+        // 换位纠错：截断前先判出纠错候选（`is_corrected`）、去掉同文的纠错那条。纠错候选按
+        // 罚过的 weight（`0.5^correction_edits()`，与模糊同量纲）与其余候选同一比较器穿插；
+        // 窗口里保底留 [`CORRECTION_QUOTA`] 条（对齐 librime 纠错上限 4），挤出去的只是窗口尾部。
         let correction_on = !self.fuzzy_config.correction.is_empty();
         if correction_on {
             self.fill_pinyin_hints(&mut candidates, query, raw_input, sp_result.as_ref());
             wind_candidate::drop_corrected_duplicates(&mut candidates);
         }
         candidates.sort_by(engine_order);
-        if correction_on && candidates.len() > max_candidates {
-            let added = |c: &Candidate| c.is_corrected || correction_added.contains(&c.text);
-            let plain = candidates.iter().filter(|c| !added(c)).count();
-            let mut room = max_candidates.saturating_sub(plain);
-            candidates.retain(|c| {
-                if !added(c) {
-                    return true;
-                }
-                let keep = room > 0;
-                room = room.saturating_sub(1);
-                keep
+        if correction_on {
+            // 纠错召回步新增的也算：末尾半截（`zhon`）对齐判作前缀、不标纠错。
+            reserve_correction_quota(&mut candidates, max_candidates, |c| {
+                c.is_corrected || correction_added.contains(&c.text)
             });
         }
         if abbrev_quota {

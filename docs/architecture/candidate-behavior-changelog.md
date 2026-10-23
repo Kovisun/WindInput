@@ -33,9 +33,10 @@
 - 变化：
   - 打错字母顺序的输入出候选：`gogn` 前：干呕功能、干呕… → 后：*共、*供…*工；`gognping` → *公平。
     前缀 `*` 是纠错标记，上屏文字不带。
-  - 纠错只加候选：关纠错时有的候选开纠错后都还在（切分、整句、简拼不走纠错边）。截断时纠错
-    候选只占其余候选用剩的名额，故原有候选已占满窗口时不出纠错候选（`yuo`、`xign`、`dagnshi`
-    下 `yu`/`xi`/`da` 的子短语就有数百条）。
+  - `zhonguo` → *中国、`dagnshi` → *当时、`xign` → *型（「习惯」仍在）。
+  - 纠错不删候选、不改其余候选的相对次序（切分、整句、简拼不走纠错边）：纠错候选按罚过的
+    权重（与模糊同量纲）穿插其间，窗口内保底 4 条；原有候选可能因此被挤到窗口尾部之后
+    （`yuo` 下「与」等 `yu` 子短语排到数百个 *有、*又… 之后）。
   - 打对的输入不变（`gongping`、`zhongguo`）；打字途中的半截（`zhon`）不带标记。
   - 存在完整的非纠错候选（精确或模糊命中、吃满整串，简拼 / 前缀补全不算）时，纠错候选
     不占首选：把第一条这样的候选提到首位，其余次序不变。同一文字经纠错与非纠错都能得到时
@@ -43,7 +44,7 @@
   - 混输满码自动上屏不把纠错候选计入「有拼音候选」：五笔 `hagn`（甗）照旧满码上屏。
 - 触发条件：出厂即生效（`input.correction.enabled = true`，出厂开 `gn_ng` / `on_ong` / `vowel_swap`）。
 - 回退旧行为：`input.correction.enabled = false`；只去标记设 `input.correction.marker = ""`。
-- 钉住的测试：`wind-coordinator/tests/pinyin_correction.rs`、`wind-engine/tests/pinyin_correction_floor.rs`、
+- 钉住的测试：`wind-coordinator/tests/pinyin_correction.rs`、`wind-engine/tests/pinyin_correction_floor.rs`、`wind-coordinator/tests/pinyin_correction_visibility.rs`、
   `wind-candidate/src/candidate.rs::corrected_tests`、`wind-engine/src/pinyin/hint_align.rs`
 - 来源：内部（设计 `docs/design/pinyin-correction-and-hints.md`）
 
