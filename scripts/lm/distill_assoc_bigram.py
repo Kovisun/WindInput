@@ -182,7 +182,9 @@ def _logaddexp(a, b):
     return hi + math.log1p(math.exp(lo - hi))
 
 
-def _mix(ctx, found, total, han, words_sorted, max_succ_chars, cont_weight):
+def _mix(
+    ctx, found, total, han, words_sorted, max_succ_chars, cont_weight, blocklist=WEB_BOILERPLATE
+):
     """把「下一词」与「词内接续」放到同一把尺子上，返回按概率降序的 [(显示, 概率)]。
 
     打完 ctx 后用户接着要的东西有两类：
@@ -213,7 +215,7 @@ def _mix(ctx, found, total, han, words_sorted, max_succ_chars, cont_weight):
             probs[rest] = probs.get(rest, 0.0) + cont_weight * han[w] / d
     if total is not None and w_ctx > 0:
         for s, v in found:
-            if s in WEB_BOILERPLATE:
+            if s in blocklist:
                 continue
             p = w_ctx / d * math.exp(v / SCORE_SCALE - total)
             probs[s] = probs.get(s, 0.0) + p

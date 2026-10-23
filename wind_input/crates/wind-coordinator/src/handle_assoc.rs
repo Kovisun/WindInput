@@ -300,9 +300,10 @@ impl AssocProvider for PrefixWords<'_> {
 
 /// 智能联想的「下一词」源：离线蒸馏的上文 → 后继表（[`wind_assoc::bigram`]）。
 ///
-/// 表里的句末记号 `$` 换成「，」：模型说这里常断句，就把逗号给到候选条上。但它几乎是
-/// 每个上文的头名——原样放第一位，每次上屏后首位都是逗号，最可能的那个词反被挤到第二；
-/// 故至少放在第二位（[`SENTENCE_END_MIN_RANK`]），其余标点仍由标点源按规则补。
+/// 表里的句末记号 `$` 换成「，」：模型说这里常断句，就把逗号给到候选条上。自训的表直接
+/// 存了统计出的句读（「，」「？」），同样处理。标点几乎是每个上文的头名——原样放第一位，
+/// 每次上屏后首位都是逗号，最可能的那个词反被挤到第二；故头名总留给词，标点最早排第二，
+/// 表里没有的标点仍由标点源按规则补。
 struct BigramWords<'a> {
     table: &'a wind_assoc::bigram::AssocBigram,
 }
@@ -318,8 +319,10 @@ fn pop_chars(s: &mut String, count: usize) {
     }
 }
 
-/// 句末记号换成的逗号最早排在第几位（0 起）。
-const SENTENCE_END_MIN_RANK: usize = 1;
+/// 后继是标点：旧表的句末记号 `$`，或自训表里保留下来的句读（「，」「？」）。
+fn is_punct_successor(w: &str) -> bool {
+    w == wind_assoc::bigram::SENTENCE_END || !w.chars().any(char::is_alphanumeric)
+}
 
 impl AssocProvider for BigramWords<'_> {
     fn suggest(&self, ctx: &AssocContext<'_>, limit: usize) -> Vec<AssocHit> {
@@ -330,12 +333,17 @@ impl AssocProvider for BigramWords<'_> {
             return Vec::new();
         };
         let mut words: Vec<&str> = succ.into_iter().take(limit).collect();
-        if let Some(i) = words
-            .iter()
-            .position(|w| *w == wind_assoc::bigram::SENTENCE_END)
+        for w in &mut words {
+            if *w == wind_assoc::bigram::SENTENCE_END {
+                *w = "，";
+            }
+        }
+        // 头名是标点：把排在最前的那个词提到它前面
+        if let Some(i) = words.iter().position(|w| !is_punct_successor(w))
+            && i > 0
         {
-            words.remove(i);
-            words.insert(i.max(SENTENCE_END_MIN_RANK).min(words.len()), "，");
+            let w = words.remove(i);
+            words.insert(0, w);
         }
         let n = words.len() as i64;
         words
@@ -1136,6 +1144,26 @@ mod tests {
         cfg.input.association.punct = true;
         tweak(&mut cfg);
         Coordinator::new_headless(cfg, None)
+    }
+
+    /// 表里统计出的标点（与旧表的 `$`）不占头名：头名留给词，标点最早排第二。
+    #[test]
+    fn bigram_punct_successor_never_leads() {
+        let table =
+            wind_assoc::bigram::AssocBigram::parse("吗\t？ ！ 的 呢\n好的\t$ 我 谢谢\n".into())
+                .unwrap();
+        let src = BigramWords { table: &table };
+        let shown = |text: &str| -> Vec<String> {
+            let ctx = AssocContext {
+                text,
+                preceding: "",
+                char_wise: false,
+                boundary_broken: false,
+            };
+            src.suggest(&ctx, 9).into_iter().map(|h| h.text).collect()
+        };
+        assert_eq!(shown("吗"), ["的", "？", "！", "呢"]);
+        assert_eq!(shown("好的"), ["我", "，", "谢谢"]);
     }
 
     #[test]
