@@ -47,6 +47,19 @@
 - **许可证**: LGPL-3.0（上游）。本文件是其派生数据，同样适用 LGPL-3.0；其中的标点统计源自中文维基
   百科（CC BY-SA 4.0，作者为维基百科贡献者），该部分同时适用 CC BY-SA 4.0
 
+#### 拼音整句语法模型 (wanxiang-mini.gram)
+
+- **用途**: 拼音整句打分的上下文语言模型（移动端默认启用，桌面默认关）
+- **文件**: `data/schemas/pinyin/grammar/wanxiang-mini.gram`
+- **来源**: [rime-wanxiang-data](https://github.com/amzxyz/rime-wanxiang-data)（作者 amzxyz）`LTS` 发布的
+  `wanxiang-lts-zh-hans.gram`（sha256 `9eedac1d…`，见 `scripts/lm/build_grammar.sh`）
+- **加工方式**: `scripts/lm/build_grammar.sh` 只保留原模型里的部分条目（格式与条目的值不变）：
+  挑选依据是条目在下列语料的正确切分上是否被用到——[Tatoeba](https://tatoeba.org)（CC BY 2.0 FR）、
+  [KdConv](https://github.com/thu-coai/KdConv) / [CrossWOZ](https://github.com/thu-coai/CrossWOZ) /
+  [CPED](https://github.com/scutcyr/CPED) 训练划分（Apache-2.0）、中文维基百科（CC BY-SA 4.0）。
+  这些语料本身不进产物
+- **许可证**: CC-BY-4.0（上游）。本文件是其子集，同样适用 CC-BY-4.0
+
 ### 构建时下载的资源（不包含在本仓库中）
 
 以下资源在构建过程中由构建脚本从原始仓库下载（缓存于 `.cache/`，已被
