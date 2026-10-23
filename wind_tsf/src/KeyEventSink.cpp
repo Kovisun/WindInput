@@ -2392,7 +2392,7 @@ BOOL CKeyEventSink::_HandleServiceResponse()
         WIND_LOG_ERROR(L"Failed to receive response from service, performing local composition reset");
         if (_pTextService->HasActiveComposition())
         {
-            _pTextService->EndComposition();
+            _pTextService->EndComposition(nullptr, _inHotkeyDispatch);
         }
         _isComposing = FALSE;
         _hasCandidates = FALSE;
@@ -2438,7 +2438,7 @@ BOOL CKeyEventSink::_HandleServiceResponse()
     case ResponseType::PassThrough:
         // PassThrough means key was NOT handled, pass to system
         WIND_LOG_DEBUG(L"PassThrough: key not handled, passing to system\n");
-        _pTextService->FlushHoldCompositionIfActive();
+        _pTextService->FlushHoldCompositionIfActive(_inHotkeyDispatch);
         if (_pTextService->HasDeferredComposition())
             _pTextService->StartDeferredCompositionIfPending();
         return FALSE;
@@ -2552,8 +2552,9 @@ BOOL CKeyEventSink::_HandleServiceResponse()
         _isComposing = FALSE;
         _hasCandidates = FALSE;
         _pTextService->NotifyCandidatesVisibilityChanged(FALSE);
-        _pTextService->EndComposition();
-        _pendingReplayToHost = TRUE;
+        _pTextService->EndComposition(nullptr, _inHotkeyDispatch);
+        // 热键派发里没有可交还的按键：WM_HOTKEY 已被系统吃下，重放组合键只会再触发一次热键。
+        _pendingReplayToHost = _inHotkeyDispatch ? FALSE : TRUE;
         return TRUE;
 
     case ResponseType::StatusUpdate:
@@ -2642,6 +2643,9 @@ BOOL CKeyEventSink::_HandleServiceResponse()
             // （已知 Chromium/Qt 部分宿主的 TSFTextStore 会谎报替换成功，届时若仍需要
             // 兼容，走按宿主进程名特判，而不是默认全局改用合成按键——见
             // ReplacePrecedingChars 里 kTryTsfRangeReplace 的取舍说明）。
+            //
+            // 热键派发期间不另传非按键上下文：同步会话被拒时本就落到 SendInput，那条不要编辑锁，
+            // 也没有组合会残留（与 CommitText 的 Word 泄漏不同形）。
             WIND_LOG_DEBUG(L"Processing ReplaceBackward response (smart symbol)\n");
             _pTextService->ReplacePrecedingChars(response.replaceCount, response.text);
             _isComposing = FALSE;
