@@ -5207,10 +5207,15 @@ impl Coordinator {
     /// 小键盘数字同样认（`numpad_behavior = direct` 时键码仍是 0x60..0x69）：它不在热键表，
     /// TSF 走 cleanup 通路照样送到这里，不认就落进上面那道守卫清空整段。主输入路的置顶照旧
     /// （`direct` 下不认小键盘），不随本键改。
+    ///
+    /// ⚠️ 只在 NumLock 开、且模板不带 Shift 时到得了这里：NumLock 关时小键盘本就是导航键，
+    /// 带 Shift 时系统也把它临时变成导航键，到手的是 Ctrl+End / Ctrl+Shift+Home 这类组合，
+    /// 与真导航键分不出来，按宿主快捷键处理（清组合、交还宿主）。
     pub(crate) fn try_quick_input_select(&self, data: &KeyEventData) -> Option<KeyAction> {
-        let key_code = match data.key_code {
-            0x60..=0x69 => data.key_code - 0x60 + 0x30,
-            k => k,
+        // 只取小键盘数字：`numpad_to_main` 也改写运算符键，那些不是序号。
+        let key_code = match crate::key_convert::numpad_to_main(data.key_code) {
+            Some((vk, false)) if (keymap::VK_0..=keymap::VK_9).contains(&vk) => vk,
+            _ => data.key_code,
         };
         let num = Self::match_candidate_action_key(
             &self.rt().config.keys.quick_input_select,
