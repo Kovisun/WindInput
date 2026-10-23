@@ -4,14 +4,16 @@
 //   g++ -std=c++17 -Wall -Wextra -I../include -o ctrl_alt_cleanup_test ctrl_alt_cleanup_policy_test.cpp && ./ctrl_alt_cleanup_test
 //
 // 变异检验：去掉 committedByResponse 项 ⇒ TestCommitKeepsKey 红；去掉 isComposing 项
-// ⇒ TestCompositionKeepsKey 红。
+// ⇒ TestCompositionKeepsKey 红；ResponseCommitsText 漏列任一上屏类 ⇒ TestCommitResponses 红。
 
 #include "CtrlAltCleanupPolicy.h"
 
 #include <cstdio>
+#include <initializer_list>
 
 namespace
 {
+using wind::ctrlalt::ResponseCommitsText;
 using wind::ctrlalt::ShouldReturnToHost;
 
 int g_failures = 0;
@@ -44,6 +46,27 @@ void TestCommitKeepsKey()
     Expect(!ShouldReturnToHost(false, false, true), "上屏了候选时不交还");
 }
 
+// 写了文档的响应都算上屏：选词键上屏走 CommitText，其余三类同样会收掉组合。
+void TestCommitResponses()
+{
+    Expect(ResponseCommitsText(ResponseType::CommitText), "CommitText 算上屏");
+    Expect(ResponseCommitsText(ResponseType::InsertTextWithCursor), "InsertTextWithCursor 算上屏");
+    Expect(ResponseCommitsText(ResponseType::CommitThenDefer), "CommitThenDefer 算上屏");
+    Expect(ResponseCommitsText(ResponseType::ReplaceBackward), "ReplaceBackward 算上屏");
+}
+
+// 只清组合 / 只动候选的响应不算：Ctrl+S 的 ClearComposition 若被当成上屏，键就交不回宿主。
+void TestNonCommitResponses()
+{
+    for (ResponseType t : {ResponseType::Ack, ResponseType::PassThrough, ResponseType::UpdateComposition,
+                           ResponseType::ClearComposition, ResponseType::ClearCompositionThenPassThrough,
+                           ResponseType::StatusUpdate, ResponseType::Consumed, ResponseType::CommitAndHold,
+                           ResponseType::HoldComposition, ResponseType::Error})
+    {
+        Expect(!ResponseCommitsText(t), "非上屏类响应不算上屏");
+    }
+}
+
 } // namespace
 
 int main()
@@ -51,6 +74,8 @@ int main()
     TestCleanupReturnsKey();
     TestCompositionKeepsKey();
     TestCommitKeepsKey();
+    TestCommitResponses();
+    TestNonCommitResponses();
 
     if (g_failures == 0)
     {
