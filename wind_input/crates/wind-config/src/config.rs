@@ -3068,7 +3068,7 @@ impl Default for CodetableEnglishMerge {
 ///
 /// ⚠️ **刻意没有 `block_commit`**：那一项否决的是满码自动上屏 / 顶码上屏，而拼音方案
 /// 两者都没有。给它一个恒不生效的开关，等于教用户去配一件不成立的事。
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PinyinEnglishMerge {
     /// 在候选列表里混入英文词库候选（只收**精确命中**，前缀扩展不入列）。出厂关。
     #[serde(default)]
@@ -3076,16 +3076,44 @@ pub struct PinyinEnglishMerge {
     /// 最小触发长度（0=回退 3，即 2 字符以内不查英文）。
     #[serde(default)]
     pub min_length: usize,
-    /// 中文侧**有**候选时也补英文前缀（至多 2 条，不与精确命中重复）。出厂关。
+    /// 中文侧**有**候选时，输入达到几个字母起也补英文前缀（不与精确命中重复）。
+    /// 0 = 不补，只在中文侧为空时补（出厂值）；开时建议 5。口径同码表的同名项，另加一条拼音判据：
     ///
-    /// 只在「打的不是完整拼音」时补：输入至少 5 个字母，且整串**任何切法**都切不成完整的
-    /// 全拼音节序列（`templa` 补 template，`shang` / `chang` 不补）。判据见
+    /// 只在「打的不是完整拼音」时补：整串**任何切法**都切不成完整的全拼音节序列（`templa`
+    /// 补 template，`shang` / `chang` 不补）。判据见
     /// `wind_engine::english_merge::prefix_complete_applies`。
     ///
     /// ⚠️ 双拼方案下不生效：判据按全拼音节定义，双拼码两键一音节、几乎任何串都解得开，
     /// 套不上这条判据。
     #[serde(default)]
-    pub prefix_complete: bool,
+    pub complete_min_length: usize,
+    /// 完整单词英文最靠前排第几位（1 起）。0 = 按方案自动：全拼 1、双拼 2（出厂值）；
+    /// 写了非 0 值则全拼双拼都用它。仍先让过开头吃满整串的中文，只会更靠后。
+    ///
+    /// 双拼默认让一位：双拼两键一音节，`the` / `good` / `this` 这类常用英文词几乎都解得出
+    /// 中文，英文当首选会抢掉用户真正在打的那个字词。
+    #[serde(default)]
+    pub exact_position: usize,
+    /// 前缀补全英文最靠前排第几位（1 起；0 = 默认 2）。恒在完整单词英文之后。
+    #[serde(default = "default_english_complete_position")]
+    pub complete_position: usize,
+    /// 中文侧有候选时英文最多几条（完整单词 + 补全合计，完整单词优先；0 = 默认 2）。
+    /// 中文侧为空时不受本项约束（给一页前缀补全）。
+    #[serde(default = "default_english_max_count")]
+    pub max_count: usize,
+}
+
+impl Default for PinyinEnglishMerge {
+    fn default() -> Self {
+        Self {
+            enable: false,
+            min_length: 0,
+            complete_min_length: 0,
+            exact_position: 0,
+            complete_position: default_english_complete_position(),
+            max_count: default_english_max_count(),
+        }
+    }
 }
 
 /// 全局模糊音（[schema.pinyin.fuzzy]）。字段对齐引擎 FuzzyConfig。
