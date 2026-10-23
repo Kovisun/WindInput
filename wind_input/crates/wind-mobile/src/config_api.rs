@@ -421,6 +421,13 @@ pub fn set_tooltip_section_enabled(data_dir: &Path, label: &str, on: bool) -> Re
     // 读与写都在锁里：load 到 set_user_value 之间别处写进来的，会被这里整份写回冲掉
     let _w = write_guard();
     let mut cfg = Config::load(Some(data_dir)).map_err(|e| e.to_string())?;
+    // 整份段列表写回：降级时这份是出厂值，写回会抹掉用户原有的段设置
+    if cfg
+        .degradation
+        .blocks_write_back("ui.tooltip.sections", "移动端提示段开关")
+    {
+        return Err("配置文件有问题，本次未写入；修好配置文件后再试".to_string());
+    }
     let sec = cfg
         .ui
         .tooltip
