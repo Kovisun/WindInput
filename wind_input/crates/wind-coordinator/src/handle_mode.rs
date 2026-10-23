@@ -2723,6 +2723,12 @@ impl Coordinator {
                     &mut member_cands,
                     &state.mix_buffer,
                 );
+                // 纠错候选不占首选（D6）：同主路 helper，放在重排之后、shadow 之前。
+                wind_candidate::drop_corrected_duplicates(&mut member_cands);
+                wind_candidate::protect_top_from_corrected(
+                    &mut member_cands,
+                    state.mix_buffer.len(),
+                );
                 self.apply_shadow_in(mix_member_owner.as_deref(), &mut member_cands, &shadow_code);
                 // 配额在**重排与候选调整之后**截取——这个顺序就是本次修复本身：先截再排，
                 // 排的是同一个 50 条窗口，等于没改。⛔ 别把它挪到 `apply_*_in` 之前。

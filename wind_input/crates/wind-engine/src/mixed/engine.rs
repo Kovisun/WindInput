@@ -538,7 +538,7 @@ impl MixedEngine {
 
     /// 截断到 `max_candidates`，但**保证拼音候选至少留 `max/PINYIN_QUOTA_DIVISOR` 席**。
     ///
-    /// ⚠️ 与 `pinyin/mod.rs` 的 `truncate_with_abbrev_quota` **逐行同构**，只差谓词
+    /// ⚠️ 与 `pinyin/mod.rs` 的 `truncate_with_quotas` **逐行同构**，只差谓词
     /// （`source == Pinyin` vs `is_abbrev`）与分母。**刻意保持两份**：各自的 doc 记着
     /// 不同的事故现场与分母依据，合并会把它们稀释成一段泛泛的说明。代价是改一处要看
     /// 另一处 —— 改本函数的腾位/补位语义前，先确认那边是否要跟。
@@ -555,7 +555,7 @@ impl MixedEngine {
     /// ⚠️ **已知缺口：本配额救不回拼音侧的简拼候选。** `take(quota - kept)` 取的是被截段里
     /// **最前面**的拼音候选，而简拼候选在 `cmp_match_layers` 的第二键 `is_abbrev` 上恒沉在
     /// 拼音块的最尾。于是码表候选一多（本 doc 上面记的「52 个 2 码前缀条目数 > 300、最多
-    /// `kh` 663 条」），拼音子引擎那边刚由 `truncate_with_abbrev_quota` 救回来的简拼候选，
+    /// `kh` 663 条」），拼音子引擎那边刚由 `truncate_with_quotas` 救回来的简拼候选，
     /// 到这里会被**再截一次**。彻底的修法是让本函数的 extra 选取也给 `is_abbrev` 留一席。
     /// 自 `3934d5cc` 起 ②b **混合整句**也带 `is_abbrev`（与整串简拼词同层按权重竞争），同样
     /// 落在这个缺口里——只在开了 `enable_pinyin_abbrev`（出厂关）且码表候选超上限时可见。

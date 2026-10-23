@@ -602,7 +602,7 @@ fn stratified_sample(mut pool: Vec<Sample>, n: usize, seed: u64) -> Vec<Sample> 
 
 const TOP_N: usize = 10;
 
-/// 界面序那一路的取数上限：协调器给引擎传的就是它（见 `truncate_with_abbrev_quota` 的文档）。
+/// 界面序那一路的取数上限：协调器给引擎传的就是它（见 `truncate_with_quotas` 的文档）。
 /// 引擎先排序后截断，上限不同则活过截断的候选不同，故必须与协调器同值，不能沿用 [`TOP_N`]。
 const UI_LIMIT: usize = 300;
 

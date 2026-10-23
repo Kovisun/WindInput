@@ -164,7 +164,7 @@ fn corrected_never_takes_top_when_complete_exists() {
     let dir = std::env::temp_dir().join(format!("wind_corr_top_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    let store = Arc::new(wind_store::Store::open(&dir.join("u.redb")).unwrap());
+    let store = Arc::new(wind_store::Store::open(dir.join("u.redb")).unwrap());
     store
         .add_user_word("pinyin", "dian", "点", 1_000_000_000, 0)
         .unwrap();
@@ -253,6 +253,10 @@ fn assert_plain_order_kept(input: &str, on: &[CandidateItem], off: &[CandidateIt
 /// `xign` 只断言后一半：`gn_ng` 出厂开，`xign` 纠成 `xing` 的「型」按 D6 可以压过简拼
 /// （简拼不算完整候选，与 `gogn` 出「工」同一条规则），首选必然变——这正是设计 §5.2 给
 /// `gn_ng` 记的冲突示例，留给评测门禁（§9）决定该规则出厂开不开。
+///
+/// 且 `xign` 的首页全是 *型 一类纠错候选（`xing` 的整串字排在 `xi` 半截之前），首页上比
+/// 相对顺序会空过；故它改比**全部候选**，并先断言交集非空（「习惯」等仍在）。被纠错候选
+/// 挤出取数窗口尾部是允许的（Ruling 8），故不要求关纠错的候选全数在列。
 #[test]
 fn abbrev_inputs_unaffected_by_correction() {
     if !has_data() {
@@ -270,8 +274,26 @@ fn abbrev_inputs_unaffected_by_correction() {
                 texts(&off.items)
             );
         }
-        assert_plain_order_kept(input, &on.items, &off.items);
+        if input == "xign" {
+            let on_all = all_texts(config("pinyin"), input);
+            let mut c = config("pinyin");
+            c.input.correction.enabled = false;
+            let off_all = all_texts(c, input);
+            let kept: Vec<&String> = on_all.iter().filter(|t| off_all.contains(t)).collect();
+            let expect: Vec<&String> = off_all.iter().filter(|t| on_all.contains(t)).collect();
+            assert!(kept.iter().any(|t| *t == "习惯"), "{on_all:?}");
+            assert_eq!(kept, expect, "{input}: 非纠错候选相对顺序变了");
+        } else {
+            assert_plain_order_kept(input, &on.items, &off.items);
+        }
     }
+}
+
+/// 敲入 `input` 后的全部候选文字（界面序，不含标记）。
+fn all_texts(cfg: Config, input: &str) -> Vec<String> {
+    let (coord, _rx) = Coordinator::new_headless_with_ui(cfg, Some(&data_dir()));
+    type_str(&coord, input);
+    coord.debug_all_candidate_texts()
 }
 
 /// 混输满码唯一：五笔 `hagn` 只有「甗」一条，拼音侧多出的纠错候选（hagn→hang）不拦自动上屏。
@@ -281,10 +303,11 @@ fn corrected_candidate_skipped_by_auto_commit_count() {
         return;
     }
     // 前提：拼音侧确有纠错候选。
+    let pinyin_hagn = show("hagn");
     assert!(
-        marked(&show("hagn").items).len() > 0,
+        !marked(&pinyin_hagn.items).is_empty(),
         "{:?}",
-        texts(&show("hagn").items)
+        texts(&pinyin_hagn.items)
     );
     let mut c = config("wubi86_pinyin");
     c.schema.codetable.auto_commit_at_full = true;

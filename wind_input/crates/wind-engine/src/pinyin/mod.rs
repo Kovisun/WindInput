@@ -140,21 +140,43 @@ fn sentence_weight(log_prob: f64, word_count: usize) -> i32 {
 }
 
 /// 简拼候选的**保底配额分母**：截断时至少给 `is_abbrev` 留 `max_candidates / 此值` 席
-/// （生产 `max_candidates = 300` ⇒ 30 席）。见 [`truncate_with_abbrev_quota`]。
+/// （生产 `max_candidates = 300` ⇒ 30 席）。见 [`truncate_with_quotas`]。
 ///
 /// **为什么是 10 而不是混输 `PINYIN_QUOTA_DIVISOR` 的 5**：那边护的是「整个拼音块」，
 /// 五笔 2 码前缀动辄数百条、要抢的席位多；这边护的是简拼这一小类，而它的产出在**上游
 /// 就被限流**了 —— 纯简拼与混合共用 [`ABBREV_INDEX_LIMIT`] = 64，
 /// 再经音节数与逐段校验滤掉绝大多数。真机现场要的是 **1 席**（`shengrikl` 的「生日快乐」
 /// 是第 337 位那一条）。30 席是宽松上界且大概率打不满，`extra` 取多少就只挤多少
-/// （见 `truncate_with_abbrev_quota` 的「只补不挤空」），故放宽的代价有限。
+/// （见 `truncate_with_quotas` 的「只补不挤空」），故放宽的代价有限。
 ///
 /// ⚠️ `max_candidates < 10` 时 `quota == 0`，等价于不设配额 —— 混输子引擎的
 /// `sec.convert(input, 8)`、临拼的 limit=1、`apps/repl` 的 limit=9 都落在这一侧，
 /// 它们本就只取头几条，给配额没有意义。
 const ABBREV_QUOTA_DIVISOR: usize = 10;
 
-/// 截断到 `max_candidates`，但**保证简拼候选至少留 `max / ABBREV_QUOTA_DIVISOR` 席**。
+/// 换位纠错候选在窗口里保底的上限条数（对齐 librime 纠错候选上限 4）。
+const CORRECTION_QUOTA_MAX: usize = 4;
+
+/// 窗口 `max_candidates` 下纠错保底几席：与简拼同按 `max / ABBREV_QUOTA_DIVISOR` 缩放、
+/// 封顶 [`CORRECTION_QUOTA_MAX`]。小窗口（< 10，混输子引擎的 8 / 1、repl 的 9）为 0——
+/// 引擎层没有 D6，保底一席在 limit=1 时就是把原首选挤掉。
+fn correction_quota(max_candidates: usize) -> usize {
+    (max_candidates / ABBREV_QUOTA_DIVISOR).min(CORRECTION_QUOTA_MAX)
+}
+
+/// 截断到 `max_candidates`，按需给两类候选保底：
+///
+/// 1. **换位纠错**（`is_corr`，见 [`correction_quota`]）：窗口里不足时把窗口外分最高的几条
+///    挪进窗口末尾，被挤出的是尾部其余候选，相对次序不变；
+/// 2. **简拼**（`abbrev_quota` 为真时，见下文）：腾位时跳过
+///    纠错保底的那几席，两份保底互不抵消。
+///
+/// 纠错那步保持有序（挪进来的本就排在窗口之后），故 `abbrev_quota = false`（不重排的
+/// 调用方）也照做。
+///
+/// ## 简拼保底
+///
+/// 保证简拼候选至少留 `max / ABBREV_QUOTA_DIVISOR` 席。
 ///
 /// **为什么需要**：`is_abbrev` 是 [`wind_candidate::cmp_match_layers`] 的**第二**键
 /// （首键是 `fp_demoted`），简拼候选因此排在除「低置信全拼降级候选」之外的全部候选之后
@@ -194,52 +216,38 @@ const ABBREV_QUOTA_DIVISOR: usize = 10;
 /// 见那边 doc 记的已知缺口。
 ///
 /// 本函数的职责只是「让候选进得来」，不是「排好序」。
-/// 窗口里保底留给换位纠错候选的条数（对齐 librime 纠错候选上限 4）。
-const CORRECTION_QUOTA: usize = 4;
-
-/// 排好序的 `cands` 在前 `max_candidates` 条里不足 [`CORRECTION_QUOTA`] 条纠错候选时，把窗口外
-/// 分最高的几条纠错候选挪到窗口末尾（其余候选相对顺序不变，只被往后推，截断照常由调用方做）。
-fn reserve_correction_quota(
+fn truncate_with_quotas(
     cands: &mut Vec<Candidate>,
     max_candidates: usize,
-    is_corr: impl Fn(&Candidate) -> bool,
+    abbrev_quota: bool,
+    is_corr: &dyn Fn(&Candidate) -> bool,
 ) {
     if cands.len() <= max_candidates {
         return;
     }
-    let quota = CORRECTION_QUOTA.min(max_candidates);
-    let kept = cands[..max_candidates]
-        .iter()
-        .filter(|c| is_corr(c))
-        .count();
-    if kept >= quota {
-        return;
+    let corr_quota = correction_quota(max_candidates);
+    if corr_quota > 0 {
+        let kept = cands[..max_candidates]
+            .iter()
+            .filter(|c| is_corr(c))
+            .count();
+        if kept < corr_quota {
+            let picked: Vec<usize> = (max_candidates..cands.len())
+                .filter(|&i| is_corr(&cands[i]))
+                .take(corr_quota - kept)
+                .collect();
+            // 从后往前摘，下标不失效；摘出来的保持原序。
+            let mut extra: Vec<Candidate> = picked.iter().rev().map(|&i| cands.remove(i)).collect();
+            extra.reverse();
+            let at = max_candidates - extra.len();
+            cands.splice(at..at, extra);
+        }
     }
-    let need = quota - kept;
-    let picked: Vec<usize> = (max_candidates..cands.len())
-        .filter(|&i| is_corr(&cands[i]))
-        .take(need)
-        .collect();
-    if picked.is_empty() {
-        return;
-    }
-    // 从后往前摘，下标不失效；摘出来的保持原序。
-    let mut extra: Vec<Candidate> = picked.iter().rev().map(|&i| cands.remove(i)).collect();
-    extra.reverse();
-    // 插到窗口末尾 `picked.len()` 格之前：被挤出窗口的是尾部的非纠错候选，次序不变。
-    let at = max_candidates - picked.len();
-    cands.splice(at..at, extra);
-}
-
-fn truncate_with_abbrev_quota(cands: &mut Vec<Candidate>, max_candidates: usize) {
-    if cands.len() <= max_candidates {
-        return;
-    }
-    let quota = max_candidates / ABBREV_QUOTA_DIVISOR;
-    if quota == 0 {
-        cands.truncate(max_candidates);
-        return;
-    }
+    let quota = if abbrev_quota {
+        max_candidates / ABBREV_QUOTA_DIVISOR
+    } else {
+        0
+    };
     let kept = cands[..max_candidates]
         .iter()
         .filter(|c| c.is_abbrev)
@@ -249,14 +257,24 @@ fn truncate_with_abbrev_quota(cands: &mut Vec<Candidate>, max_candidates: usize)
         return;
     }
     // 被截掉的那段同样是排好序的，故前几条即权重最高的简拼候选。
-    let extra: Vec<Candidate> = cands[max_candidates..]
+    let mut extra: Vec<Candidate> = cands[max_candidates..]
         .iter()
         .filter(|c| c.is_abbrev)
         .take(quota - kept)
         .cloned()
         .collect();
     cands.truncate(max_candidates);
-    // 腾位：从尾部往前挤掉等量的非简拼候选（排序后尾部即层级最低的那些）。
+    // 纠错保底的那几席（窗口里前 `corr_quota` 条纠错候选）不让位。
+    let mut corr_seen = 0usize;
+    let protected: Vec<bool> = cands
+        .iter()
+        .map(|c| {
+            let p = !c.is_abbrev && is_corr(c) && corr_seen < corr_quota;
+            corr_seen += usize::from(p);
+            p
+        })
+        .collect();
+    // 腾位：从尾部往前挤掉等量的非简拼、非纠错保底候选（排序后尾部即层级最低的那些）。
     //
     // 排在简拼之后的只有 `fp_demoted`（双拼开「允许全拼输入」时的低置信降级候选），
     // 所以**优先被挤掉的正是它们** —— 而它们恰是 `cmp_match_layers` 的 `fp_demoted`
@@ -266,11 +284,13 @@ fn truncate_with_abbrev_quota(cands: &mut Vec<Candidate>, max_candidates: usize)
     let mut i = cands.len();
     while to_remove > 0 && i > 0 {
         i -= 1;
-        if !cands[i].is_abbrev {
+        if !cands[i].is_abbrev && !protected[i] {
             cands.remove(i);
             to_remove -= 1;
         }
     }
+    // 腾不满（理论上不会：两份保底合计不超过窗口的 1/5）时少补几条，长度不越界。
+    extra.truncate(extra.len() - to_remove);
     cands.extend(extra);
 }
 
@@ -1358,7 +1378,9 @@ impl PinyinEngine {
         }
         // 纠错召回的整串候选：主切分不走纠错边，`completed` 覆盖不到它（`gognping` → 空串），
         // 按所打码切分显示成 `gogn'ping`。
-        if boundary != 0 && c.code == raw_input && !c.is_abbrev && !c.is_sentence {
+        // 只认纠错候选：关纠错时这一支结构上不可达。
+        if c.is_corrected && boundary != 0 && c.code == raw_input && !c.is_abbrev && !c.is_sentence
+        {
             return Some(cache.get((3, boundary, raw_input.len()), || {
                 render_preedit(raw_input, boundary, "")
             }));
@@ -4826,7 +4848,7 @@ impl Engine for PinyinEngine {
         // 排序键只影响顺序；我们「一次性产生 N 条 + 截断」，排序键同时决定了去留。
         // ⇒ 引擎侧的匹配层级（含 `is_promoted_completion` 上浮）保证的是「高价值候选活过
         // 截断」，与协调器 P0 的「显示顺序」**不是同一件事，不可互相替代**。
-        // 保底配额现已有**一档**：`truncate_with_abbrev_quota`，判据是 `is_abbrev`。
+        // 保底配额现已有**一档**：`truncate_with_quotas`，判据是 `is_abbrev`。
         // 但下沉 P0 要的是按**消费长度**分档（参考混输 `PINYIN_QUOTA_DIVISOR`），那件仍未做
         // —— 单档只护住了简拼这一类，消费长度短的候选仍会被长候选整批挤出截断窗口。
         //
@@ -4838,25 +4860,19 @@ impl Engine for PinyinEngine {
         };
         // 换位纠错：截断前先判出纠错候选（`is_corrected`）、去掉同文的纠错那条。纠错候选按
         // 罚过的 weight（`0.5^correction_edits()`，与模糊同量纲）与其余候选同一比较器穿插；
-        // 窗口里保底留 [`CORRECTION_QUOTA`] 条（对齐 librime 纠错上限 4），挤出去的只是窗口尾部。
+        // 窗口里保底见 [`correction_quota`]（对齐 librime 纠错上限 4），挤出去的只是窗口尾部。
         let correction_on = !self.fuzzy_config.correction.is_empty();
         if correction_on {
             self.fill_pinyin_hints(&mut candidates, query, raw_input, sp_result.as_ref());
             wind_candidate::drop_corrected_duplicates(&mut candidates);
         }
         candidates.sort_by(engine_order);
-        if correction_on {
-            // 纠错召回步新增的也算：末尾半截（`zhon`）对齐判作前缀、不标纠错。
-            reserve_correction_quota(&mut candidates, max_candidates, |c| {
-                c.is_corrected || correction_added.contains(&c.text)
-            });
-        }
-        if abbrev_quota {
-            truncate_with_abbrev_quota(&mut candidates, max_candidates);
-        } else {
-            // 调用方声明了不重排（见 `ConvertOptions::no_abbrev_quota`）：补位在那边是净损失。
-            candidates.truncate(max_candidates);
-        }
+        // 纠错召回步新增的也算：末尾半截（`zhon`）对齐判作前缀、不标纠错。
+        let is_corr =
+            |c: &Candidate| correction_on && (c.is_corrected || correction_added.contains(&c.text));
+        // `abbrev_quota = false`：调用方声明了不重排（见 `ConvertOptions::no_abbrev_quota`），
+        // 简拼补位在那边是净损失；纠错保底保持有序，照做。
+        truncate_with_quotas(&mut candidates, max_candidates, abbrev_quota, &is_corr);
 
         // 零权重读音让位：精确单字的**这个读音**词库权重为 0（𤭢 cei、塞 sei、嫩 nun、这 zhei）
         // ⇒ 并入简拼层按 weight 竞争（`Candidate::is_zero_weight_reading`）。双拼两键 `cw`
@@ -4867,7 +4883,7 @@ impl Engine for PinyinEngine {
         // 用户选过的字由 `freq_rerank::rerank_pinyin_positional` 摘掉标记。
         //
         // ⚠️ **必须在截断之后置位、再稳定重排**：标记把字沉到简拼层末尾，截断前置位的话
-        // `truncate_with_abbrev_quota` 腾位时从尾部先挤掉的就是它们（小鹤 `jx` 的夾/挟/袷整条
+        // `truncate_with_quotas` 腾位时从尾部先挤掉的就是它们（小鹤 `jx` 的夾/挟/袷整条
         // 消失，8 个布局两键共 584 个输入掉字），而词频重排在截断之后、救不回来。
         // 截断按改动前的次序做 ⇒ 活过截断的集合与改前逐条一致，变的只有次序。
         // 位置也须在下方 preedit 读 `candidates.first()` 之前。
@@ -5358,6 +5374,68 @@ mod tests {
             r.preedit_display, "xu'yao",
             "编码栏显示归一化形态，音节边界照常"
         );
+    }
+
+    /// 合成候选：`p*` 普通、`a*` 简拼、`c*` 纠错，按给出的次序即已排好序。
+    fn quota_list(spec: &[(&str, usize)]) -> Vec<Candidate> {
+        spec.iter()
+            .flat_map(|&(kind, n)| (0..n).map(move |i| (kind, i)))
+            .map(|(kind, i)| Candidate {
+                text: format!("{kind}{i}"),
+                is_abbrev: kind == "a",
+                is_corrected: kind == "c",
+                ..Default::default()
+            })
+            .collect()
+    }
+
+    fn quota_texts(c: &[Candidate]) -> Vec<&str> {
+        c.iter().map(|c| c.text.as_str()).collect()
+    }
+
+    /// 两份保底同时不足：简拼腾位不吃纠错保底的那几席，两边都拿满。
+    #[test]
+    fn abbrev_and_correction_quotas_both_hold() {
+        // 窗口 50：简拼保底 5、纠错保底 4；窗口里全是普通候选。
+        let mut c = quota_list(&[("p", 60), ("c", 6), ("a", 8)]);
+        truncate_with_quotas(&mut c, 50, true, &|c| c.is_corrected);
+        assert_eq!(c.len(), 50);
+        let t = quota_texts(&c);
+        assert_eq!(t.iter().filter(|t| t.starts_with('c')).count(), 4, "{t:?}");
+        assert_eq!(t.iter().filter(|t| t.starts_with('a')).count(), 5, "{t:?}");
+        // 普通候选只被挤掉尾部、相对次序不变。
+        let plain: Vec<&str> = t.iter().copied().filter(|t| t.starts_with('p')).collect();
+        assert_eq!(plain, quota_texts(&quota_list(&[("p", 41)])));
+        // 纠错按分取最前的 4 条。
+        let corr: Vec<&str> = t.iter().copied().filter(|t| t.starts_with('c')).collect();
+        assert_eq!(corr, ["c0", "c1", "c2", "c3"]);
+    }
+
+    /// 小窗口不给纠错保底：limit=1 首选不被挤掉，limit=9 也一席不占。
+    #[test]
+    fn correction_quota_never_displaces_small_window() {
+        for max in [1, 8, 9] {
+            let mut c = quota_list(&[("p", 20), ("c", 6)]);
+            truncate_with_quotas(&mut c, max, false, &|c| c.is_corrected);
+            assert_eq!(
+                quota_texts(&c),
+                quota_texts(&quota_list(&[("p", max)])),
+                "{max}"
+            );
+        }
+        assert_eq!(correction_quota(10), 1);
+        assert_eq!(correction_quota(300), 4);
+    }
+
+    /// 关纠错（谓词恒假）时只有简拼保底：补 5 条简拼、挤掉尾部 5 条普通候选。
+    #[test]
+    fn quotas_without_correction_match_abbrev_only() {
+        let mut a = quota_list(&[("p", 60), ("c", 6), ("a", 8)]);
+        truncate_with_quotas(&mut a, 50, true, &|_| false);
+        let plain = quota_list(&[("p", 45)]);
+        let mut want = quota_texts(&plain);
+        want.extend(["a0", "a1", "a2", "a3", "a4"]);
+        assert_eq!(quota_texts(&a), want);
     }
 
     fn correction_fuzzy() -> FuzzyConfig {
