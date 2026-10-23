@@ -288,17 +288,35 @@ pub fn lookup_prefix_fallback(
         return Vec::new();
     }
     let lower = input.to_lowercase();
-    let Ok(r) = english.convert(&lower, PREFIX_FALLBACK_MAX) else {
+    // 多取一个精确扫描窗：英文引擎的前缀页按词频排，与输入相同的那个词可能落在页尾
+    // 之外（真机 `hi` → his / high / him / history / hi）。
+    let Ok(r) = english.convert(&lower, PREFIX_FALLBACK_MAX + EXACT_SCAN) else {
         return Vec::new();
     };
-    r.candidates
+    // 与输入相同（大小写不敏感）的词排最前，其余保持英文引擎的次序。
+    let (mut out, rest): (Vec<Candidate>, Vec<Candidate>) = r
+        .candidates
         .into_iter()
         .map(|mut c| {
             // 同 `lookup`：码表域标志不跨来源带，理由见该函数文档。
             c.is_exact_code = false;
             c
         })
-        .collect()
+        .partition(|c| c.text.to_lowercase() == lower);
+    out.extend(rest);
+    out.truncate(PREFIX_FALLBACK_MAX);
+    // ★ 次序要落到 weight：协调器按 weight 统一重排，只调顺序会被冲掉。精确词抬到页内
+    // 最高权重之上；没有精确词时不动。
+    let n_exact = out
+        .iter()
+        .take_while(|c| c.text.to_lowercase() == lower)
+        .count();
+    if let Some(top) = out[n_exact..].iter().map(|c| c.weight).max() {
+        for c in &mut out[..n_exact] {
+            c.weight = c.weight.max(top.saturating_add(1));
+        }
+    }
+    out
 }
 
 /// 拼音方案中文侧**有**候选时，这串输入可不可以补英文前缀（长度门槛
@@ -734,6 +752,26 @@ mod tests {
         let none = lookup(&eng, "hell", 0);
         assert!(none.is_empty());
         assert_eq!(lookup_prefix_complete(&eng, "hell", &none, 2).len(), 2);
+    }
+
+    /// 前缀兜底页：与输入相同（大小写不敏感）的词排最前，哪怕英文引擎把它排在页尾之外。
+    #[test]
+    fn prefix_fallback_puts_exact_word_first() {
+        let eng = FakeEnglish(vec![
+            ("his", "his"),
+            ("high", "high"),
+            ("him", "him"),
+            ("history", "history"),
+            ("hint", "hint"),
+            ("hill", "hill"),
+            ("hi", "Hi"),
+        ]);
+        let got = lookup_prefix_fallback(&eng, "hi", 0);
+        assert_eq!(texts_of(&got), vec!["Hi", "his", "high", "him", "history"]);
+        assert!(
+            got[1..].iter().all(|c| c.weight < got[0].weight),
+            "次序要落到 weight，否则协调器重排会冲掉"
+        );
     }
 
     /// 码表侧出厂口径（补全关、上限 2）。
