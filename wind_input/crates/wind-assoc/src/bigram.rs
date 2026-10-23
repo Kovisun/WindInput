@@ -168,7 +168,8 @@ mod tests {
     }
 
     /// 随包的表整份常驻内存（文本 + 每行 4 字节偏移），PC 用户对内存敏感。重新蒸馏
-    /// （`scripts/lm/build_assoc.sh`）让它变大时在这里拦下——确要放宽，两处的上限一起改。
+    /// （`scripts/lm/build_assoc.sh`）让它变大时在这里拦下。确要放宽：先把读端改成内存映射
+    /// （见 `docs/design/association.md` §4.3），再把两处的上限一起改。
     #[test]
     fn shipped_table_parses_within_memory_budget() {
         const MAX_BYTES: usize = 2560 * 1024;

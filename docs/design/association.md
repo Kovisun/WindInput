@@ -488,6 +488,10 @@ zh-hans-bgc / zh-hans-bgw / wanxiang-lts-zh-hans
   2026-10-23 用新拉的 bgw 与同一份维基重跑，产物与入库的表逐行相同。
 - **体积上限 2.5 MB**：表整份常驻，PC 用户对内存敏感。脚本超限即失败，单测
   `shipped_table_parses_within_memory_budget` 也按同一数字拦随包的表（现 2.0 MB）。
+  ⚠️ **要放宽上限，先把读端改成内存映射**，不要只调数字：现在是 `read_to_string` 整份进堆，
+  多 1 MB 表就多 1 MB 常驻。映射后只有查到的页驻留（整句模型 `GramDb` 就是这么做的，
+  420 MB 的万象只多约 130 MB 常驻，见 `language-model-integration.md` §8.3）。表是按行
+  二分的纯文本，偏移表照建，换的只是 `text` 的来源。
 - **句末记号 `$`**：换成「，」。它几乎是每个上文的头名，原样放首位会让每次上屏后
   首位都是逗号，故至少排第二（`SENTENCE_END_MIN_RANK`）。
 - **名额**：智能联想里 Bigram 最多 6 条（`SMART_BIGRAM_CAP`），前缀词 4 条、余下给标点。
