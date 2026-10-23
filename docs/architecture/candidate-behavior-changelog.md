@@ -1,0 +1,63 @@
+# 候选行为变更记录
+
+> 用户反馈「某个词以前排第 1、现在排第 2」「以前会自动上屏、现在不会」时，先查这里。
+> 每条记录一次**用户能感知到的**候选行为变化：哪些输入受影响、前后对比、由什么条件触发、
+> 用哪个配置能回到旧行为、哪个测试钉住了新行为。
+>
+> **什么时候要写**：改动影响候选的**有无、先后、条数、上屏时机**（自动上屏 / 顶码 / 满码清空），
+> 涉及引擎（`wind-engine`）、候选模型（`wind-candidate`）、协调器装配与排序
+> （`wind-coordinator/src/handle_candidate.rs` 等）、词频重排、英文 / 短语 / 联想混入。
+> 纯重构（输出逐条不变）、仅修崩溃、仅改日志不用写。
+>
+> **怎么写**：与改动同一分支提交；新条目加在最上面；提交 hash 写合入 main 的合并提交
+> （rebase 后会变，合入后再填）。排序口径本身仍以 [candidate-sorting-rules.md](candidate-sorting-rules.md)
+> 为准，本文件只记「哪次改了什么」。
+
+条目格式：
+
+```
+## 日期 · 标题（版本）
+- 合入：<合并提交>；范围：<方案类型 / 模式>
+- 变化：<输入> 前：… → 后：…（每类各举一两个真实输入）
+- 触发条件：<出厂即生效 / 需开某开关 / 某配置组合>
+- 回退旧行为：<配置键 = 值>，没有则写「无（设计变更）」
+- 钉住的测试：<测试文件::用例>
+- 来源：<论坛 tNNN / GH#NNN / 内部>
+```
+
+---
+
+## 2026-10-23 · 拼音英文候选：位次、条数、首选让位、双拼默认位次（0.128）
+
+- 合入：WindInput `676b4b70`；范围：拼音方案（全拼、双拼），空码补全页另含码表 / 混输
+- 变化：
+  - 全拼 `bus` 前：bus、不是 → 后：不是、bus；`rug` → 如果、rug；`but` → 不同、but。
+    `test` / `app` / `old` / `web` / `hello` / `world` 英文仍第 1。
+  - 小鹤双拼 `the` / `good` / `this` 前：英文第 1 → 后：中文第 1、英文第 2。
+  - 开补全时 `world` 前：world、worldwide、worlds 占前 3 → 后：英文合计至多 2 条。
+  - 空码补全页 `hi` 前：his、high、him、history、hi → 后：hi 第 1（码表 / 混输同样）。
+- 触发条件：需开 `schema.pinyin.english_merge.enable`（出厂关）。首选让位只在首选是吃满整串、
+  全为常用字、非拼凑句的拼音词，且（合并后 weight ≥ 3000 或为用户词）时发生；该英文完整单词
+  在拼音或英文词频里选过（count > 0）即不再让。
+- 回退旧行为：`exact_position = 1`（双拼回到英文可居首；首选让位无开关，选一次英文即免）；
+  `max_count` 调大放宽条数。`prefix_complete` 已改名 `complete_min_length`（未发布过，无兼容）。
+- 已知取舍：导入的大词库属用户词，不受 3000 门槛约束，其冷僻词同样会让英文排第 2。
+- 钉住的测试：`wind-coordinator/tests/pinyin_english_policy.rs`、
+  `wind-engine/tests/english_merge_pinyin_complete.rs`
+- 来源：内部（续码表线）；参照 GH#229
+
+## 2026-10-22 · 码表 / 混输英文候选：补全码长、位次、条数、两级否决上屏（0.128）
+
+- 合入：WindInput `d67c5441`；范围：码表方案、混输方案
+- 变化：
+  - 码表新增 `complete_min_length`：设 4 时五笔 `gith`（中文有候选）也出 github；出厂 0 = 现状。
+  - 码表开满码上屏时，英文词开头的 4 码（`abse` 荫棚 / absent）前：自动上屏 → 后：不上屏，
+    等第 5 码出补全（修复：否决原先只看显示出来的完整单词）。
+  - 混输开英文后：整串恰为英文单词（`good`）前：满码上屏 / 顶码 → 后：不上屏；
+    码表与拼音都无候选时前：只出完整单词 → 后：至多 5 条前缀补全；截断时英文有保底席位。
+- 触发条件：码表需开 `schema.codetable.english_merge.enable`；混输需开 `schema.mix.enable_english`（均出厂关）。
+- 回退旧行为：码表 `block_commit = false` 且 `block_commit_on_word = false`；
+  混输 `block_commit_on_english_word = false`；位次 `exact_position` / `complete_position`，条数 `max_count`。
+- 钉住的测试：`wind-engine/tests/english_merge_policy.rs`、
+  `wind-coordinator/tests/codetable_english_position.rs`、`wind-engine/tests/engine_manager.rs`（否决）
+- 来源：维护者实测（短码不出英文）、论坛 t355
