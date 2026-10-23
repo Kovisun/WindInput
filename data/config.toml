@@ -1204,6 +1204,10 @@ toggle_full_width = "shift+space"
 toggle_punct = "ctrl+."
 delete_candidate = "ctrl+shift+number"
 pin_candidate = "ctrl+number"
+# 快捷输入里的选词上屏键（ctrl+number = Ctrl+1..9 选第 1..9 个、Ctrl+0 选第 10 个）。
+# 只在快捷输入里生效，优先于上面的置顶/删除；可选 ctrl+number / ctrl+shift+number /
+# ctrl+alt+number，"none" = 不绑。
+quick_input_select = "ctrl+number"
 toggle_toolbar = 'ctrl+shift+\'
 open_settings = "ctrl+shift+]"
 # 打开词库管理页的快捷键。"none" = 不绑；填一个组合键即可用，如 "ctrl+shift+d"。

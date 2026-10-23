@@ -584,6 +584,7 @@ static REGISTRY: &[ConfigField] = &[
     f("keys.activate_ime", Str),
     f("keys.pin_candidate", Str),
     f("keys.delete_candidate", Str),
+    f("keys.quick_input_select", Str),
     f("keys.take_screenshot", Str),
     f("keys.softkeyboard", Str),
     f("keys.global_hotkeys", StrList),
