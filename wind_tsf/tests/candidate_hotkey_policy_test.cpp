@@ -6,7 +6,9 @@
 // 变异检验：去掉 chineseMode 那一项（= 修复前）→ TestEnglishModeDoesNotRegister 红；
 // OnModeReevaluate 不返回 Register（= H1 修复前）→ TestSwitchBackToChineseWithVisibleCandidatesRegisters 红；
 // OnHotkeyDispatched 恒 None（= 修复前）→ TestAssocGiveBackReplays 红；去掉 active 判断
-// → TestPassThroughWithHotkeysActiveUnregistersFirst 红；去掉 candidateSegment → TestAddWordSegmentNeverReplays 红。
+// → TestPassThroughWithHotkeysActiveUnregistersFirst 红；去掉 candidateSegment → TestAddWordSegmentNeverReplays 红；
+// GivesBackToHost 恒 false（= 修复前）→ TestGiveBackResponses 红；RequiredModifiersHeld 恒 true
+// → TestReleasedModifierBlocksReplay 红。
 
 #include "CandidateHotkeyPolicy.h"
 
@@ -89,6 +91,37 @@ void TestAddWordSegmentNeverReplays()
     Check(OnHotkeyDispatched(false, true, true) == GiveBack::None, "加词段不注销不重放");
 }
 
+/// 交还宿主类响应才注入；吃键 / 上屏类一律不注入。
+void TestGiveBackResponses()
+{
+    Check(GivesBackToHost(ResponseType::ClearCompositionThenPassThrough), "ClearCompositionThenPassThrough 交还");
+    Check(GivesBackToHost(ResponseType::PassThrough), "PassThrough 交还");
+    Check(!GivesBackToHost(ResponseType::ClearComposition), "ClearComposition 不交还");
+    Check(!GivesBackToHost(ResponseType::Consumed), "Consumed 不交还");
+    Check(!GivesBackToHost(ResponseType::CommitText), "CommitText 不交还");
+    Check(!GivesBackToHost(ResponseType::Error), "Error（接收失败）不交还");
+}
+
+void TestHeldModifiersAllowReplay()
+{
+    Check(RequiredModifiersHeld(kModCtrl, kModCtrl), "Ctrl 按着");
+    Check(RequiredModifiersHeld(kModCtrl | kModShift, kModCtrl | kModShift), "Ctrl+Shift 都按着");
+    Check(RequiredModifiersHeld(kModAlt, kModAlt), "Alt 按着");
+    Check(RequiredModifiersHeld(kModWin, kModWin), "Win 按着");
+    Check(RequiredModifiersHeld(kModCtrl, kModCtrl | 0x0040), "左右位不影响判定");
+    Check(RequiredModifiersHeld(0, 0), "不要求修饰键");
+}
+
+/// ★ 同步 IPC 期间松开了任一修饰键 → 不注入（否则 Ctrl+1 变成裸 1 打进文档）。
+void TestReleasedModifierBlocksReplay()
+{
+    Check(!RequiredModifiersHeld(kModCtrl, 0), "Ctrl 已松开");
+    Check(!RequiredModifiersHeld(kModCtrl | kModShift, kModCtrl), "Shift 已松开");
+    Check(!RequiredModifiersHeld(kModCtrl | kModShift, kModShift), "Ctrl 已松开、Shift 仍按着");
+    Check(!RequiredModifiersHeld(kModAlt, kModCtrl), "Alt 已松开");
+    Check(!RequiredModifiersHeld(kModWin, 0), "Win 已松开");
+}
+
 } // namespace
 
 int main()
@@ -103,6 +136,9 @@ int main()
     TestPassThroughWithHotkeysActiveUnregistersFirst();
     TestConsumedDoesNotReplay();
     TestAddWordSegmentNeverReplays();
+    TestGiveBackResponses();
+    TestHeldModifiersAllowReplay();
+    TestReleasedModifierBlocksReplay();
     if (g_failures != 0)
     {
         std::printf("candidate_hotkey_policy_test: %d failure(s)\n", g_failures);

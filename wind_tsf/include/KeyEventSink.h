@@ -592,7 +592,9 @@ private:
     // OnTestKeyDown 下方那段统一取消，不显式调用就会「按了热键还顺带切了中英文」。
     void _CancelPendingToggle(WPARAM wParam, const wchar_t* reason);
     BOOL _SendKeyToService(uint32_t keyCode, uint32_t modifiers, uint8_t eventType);
-    BOOL _HandleServiceResponse(); // Returns TRUE if key was handled, FALSE to pass through
+    // Returns TRUE if key was handled, FALSE to pass through.
+    // outType：收包成功时写入响应类型，失败时不动（热键派发据此判是否交还宿主）。
+    BOOL _HandleServiceResponse(ResponseType* outType = nullptr);
     // 正在处理其应答的 keydown 的 VK（仅 OnKeyDown 主路径置位，其余路径为 0）。
     // CommitThenDefer 用它登记延迟组合的触发键，见 DeferredCompositionPolicy.h。
     UINT _responseKeyVk = 0;
