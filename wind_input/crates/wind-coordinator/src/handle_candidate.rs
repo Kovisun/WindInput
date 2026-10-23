@@ -87,10 +87,10 @@ pub(crate) use wind_candidate::candidate_display_order;
 /// 拼音「英文前缀补全」补出来的英文（`meta.from_prefix_complete`）再往后让一段：让过紧随
 /// 其后、吃满整串的拼音真词（`xiaom` 的「小米」），理由见函数内注释。
 ///
-/// `pinyin_words_lead`（只在拼音方案为真）：开头段为空、而首选是**吃满整串、全为常用字的
-/// 拼音真词**时（简拼解出来的也算：`bus` 的「不是」、`rug` 的「如果」），开头段算上它这一条；
-/// 引擎合成的拼凑句仍不算。码表 / 混输传 `false`：码表的开头段语义是「码 == 输入」，混输的
-/// 跨来源档位另有仲裁。
+/// `pinyin_words_lead`（只在拼音方案、且这个英文词没被选过时为真）：开头段为空、而首选是
+/// **吃满整串的高频拼音词库词**时（简拼解出来的也算：`bus` 的「不是」、`rug` 的「如果」），
+/// 开头段算上它这一条；判据见 [`pinyin_head_word_outranks_english`]。码表 / 混输传 `false`：
+/// 码表的开头段语义是「码 == 输入」，混输的跨来源档位另有仲裁。
 ///
 /// ⚠️ **取开头的连续段，不是 `rposition`**。用「最后一条常用精确解」作锚会让英文被推到
 /// 列表深处——词频重排可能把某条常用词提到很靠后的位置之后，那条就成了锚。连续段是
@@ -98,11 +98,11 @@ pub(crate) use wind_candidate::candidate_display_order;
 ///
 /// ## `positions`：完整单词 / 前缀补全英文各自最靠前排第几位（1 起）
 ///
-/// 码表 / 混输方案的 `exact_position` / `complete_position`
+/// 各方案的 `exact_position` / `complete_position`
 /// （`EngineManager::active_english_positions`）。只会让英文更靠后、不会更靠前：
 /// 完整单词落在 max(下限, 让过开头完整匹配中文后的位置)；补全再取 max(自己的下限, 让过拼音
 /// 真词后的位置, 完整单词的位置)——同一列表里完整单词恒在补全之前。候选不够时落在末尾。
-/// `(1, 1)` = 不额外限制（拼音方案恒如此）。
+/// `(1, 1)` = 不额外限制（英文方案、混输分段续转如此）。
 pub(crate) fn place_english_after_common_exact(
     candidates: &mut Vec<Candidate>,
     input: &str,
@@ -159,8 +159,8 @@ pub(crate) fn place_english_after_common_exact(
         .iter()
         .take_while(|c| leads_as_exact(c) && !(english_exact && c.is_synthesized))
         .count();
-    // 拼音方案：首选是吃满整串的常用拼音真词（非引擎合成）时，英文让过它这一条。`bus` 的
-    // 「不是」、`rug` 的「如果」是简拼残码命中、不在精确档，却是词库里实打实的词。
+    // 拼音方案：首选是吃满整串的高频拼音词库词时，英文让过它这一条。`bus` 的「不是」、
+    // `rug` 的「如果」是简拼残码命中、不在精确档，却是用户打这串最可能要的词。
     //
     // ⚠️ 只让首选一条，不是整段：简拼下吃满整串的真词成片出现（`bus` 的 不是 / 不少 / 不算…
     // 全都吃满 3 码），按连续段让的话英文会被推出首页。
@@ -168,7 +168,7 @@ pub(crate) fn place_english_after_common_exact(
         && lead == 0
         && rest
             .first()
-            .is_some_and(|c| !c.is_synthesized && whole_pinyin(c))
+            .is_some_and(|c| whole_pinyin(c) && pinyin_head_word_outranks_english(c))
     {
         lead = 1;
     }
@@ -218,6 +218,31 @@ pub(crate) fn place_english_after_common_exact(
         rest.splice(pos..pos, others);
     }
     *candidates = rest;
+}
+
+/// 拼音首选让英文的词频门槛（拼音系统词库权重）。
+///
+/// 只在**同一个词库内**比：英文与拼音的权重是两套量纲，跨来源比没有意义（见
+/// [`place_english_after_common_exact`] 的「判据」一节）。取值由真实词库评测扫参定——
+/// 全拼出厂下首选词的权重，正例（该让）最低是 `get` 的「个体」5598，反例（英文该排第 1）
+/// 最高是 `big` 的「逼格」1462；3000 落在两者的几何中点附近，两侧各留约 2 倍余量。
+pub(crate) const PINYIN_HEAD_WORD_MIN_WEIGHT: i32 = 3000;
+
+/// 拼音首选这条够不够格让英文让位：非引擎合成，且是**用户词**或**系统词库权重够高**的词。
+///
+/// - 用户词（非临时词）不看权重：它的权重是用户手填或学来的，与系统词库的词频不同量纲，
+///   拿同一个门槛比没有意义；而用户自己加进词库的词，本身就是「我打这串要它」的表态。
+/// - 临时词（自动造词的暂存区）不算：误打一次就可能进去，不该凭它压过英文。
+/// - 其余按系统词库权重过 [`PINYIN_HEAD_WORD_MIN_WEIGHT`]：`test` 的「托尔斯泰」(860)、
+///   `old` 的「欧蓝德」(44) 是词库里的冷僻词，不该压过用户显然在打的英文。
+pub(crate) fn pinyin_head_word_outranks_english(c: &Candidate) -> bool {
+    if c.is_synthesized {
+        return false;
+    }
+    if c.meta.is_user_dict {
+        return true;
+    }
+    !c.meta.is_temp_dict && c.weight >= PINYIN_HEAD_WORD_MIN_WEIGHT
 }
 
 /// 整句 N-best 块：`show > 1` 时把 `sentence_rank > 0` 的候选**按名次连续摆到最前**。
@@ -633,6 +658,36 @@ impl Coordinator {
         if cand.source == CandidateSource::English && !self.engine_mgr.active_is_english() {
             self.record_freq_only(Some(ENGLISH_SCHEMA), code, cand.freq_text(), cand.source);
         }
+    }
+
+    /// 列表里的英文候选有没有被选用过（拼音首选让英文的「选过即免」）。
+    ///
+    /// 两个桶都看：选中混入的英文时，主方案的桶（拼音调频，出厂开）与英文桶（英文方案调频，
+    /// 出厂关）各记一份（见 [`Self::record_selection_cand`]）。只看英文桶的话，出厂配置下一条
+    /// 记录都没有，这条豁免等于不存在。
+    fn english_used_before(&self, candidates: &[Candidate]) -> bool {
+        let Some(store) = &self.store else {
+            return false;
+        };
+        let mut english = candidates
+            .iter()
+            .filter(|c| c.source == CandidateSource::English)
+            .peekable();
+        if english.peek().is_none() {
+            return false;
+        }
+        let active = self.engine_mgr.active_schema_id();
+        let buckets = [
+            self.engine_mgr
+                .write_data_schema_id(&active, CandidateSource::English),
+            Some(self.engine_mgr.data_schema_id(ENGLISH_SCHEMA)),
+        ];
+        english.any(|c| {
+            buckets
+                .iter()
+                .flatten()
+                .any(|b| matches!(store.get_freq(b, &c.code, c.freq_text()), Ok(Some(_))))
+        })
     }
 
     /// 同 [`Self::record_selection_cand`]，但可指定**归属方案**（overlay 用）。
@@ -1807,17 +1862,19 @@ impl Coordinator {
         // **必须在词频重排之后**——那是最后一道整体排序，放它之前会被位置提升搅乱
         // （真机现象：打 `hen` 英文第一、打 `shi` 英文不在第一，差别只是用户对哪个音节
         // 选得多）。放在 shadow 之前——shadow 是用户显式置顶，保留最终话语权。
-        // 位次下限按方案取（码表 / 混输的 `exact_position` / `complete_position`）；混输分段
-        // 续转走的是拼音方案，不受它约束。
+        // 位次下限按方案取（码表 / 混输 / 拼音各自的 `exact_position` / `complete_position`）；
+        // 混输分段续转走的是拼音方案，不受它约束。
         let english_positions = if via_mixed_pinyin {
             (1, 1)
         } else {
             self.engine_mgr.active_english_positions()
         };
-        // 吃满整串的拼音真词算进开头段只对拼音方案成立（混输分段续转也不算）。
+        // 首选拼音词库词让英文只对拼音方案成立（混输分段续转也不算）；这个英文词选过的话
+        // 免让——用户已经表过态，见 `english_used_before`。
         let pinyin_words_lead = !via_mixed_pinyin
             && self.engine_mgr.current_engine_type()
-                == Some(wind_engine::engine::EngineType::Pinyin);
+                == Some(wind_engine::engine::EngineType::Pinyin)
+            && !self.english_used_before(&candidates);
         place_english_after_common_exact(
             &mut candidates,
             &state.input_buffer,
@@ -7630,12 +7687,13 @@ mod english_placement_tests {
         }
     }
 
-    /// 拼音方案：首选是吃满整串的简拼真词（`bus` 的「不是」）时英文让到它后面；
+    /// 拼音方案：首选是吃满整串的高频简拼词（`bus` 的「不是」）时英文让到它后面；
     /// 拼凑句不算；码表 / 混输（`false`）不受影响。
     #[test]
     fn pinyin_whole_word_leads_only_for_pinyin_schema() {
         let abbrev = |t: &str| Candidate {
             is_abbrev: true,
+            weight: 103_977,
             ..zh(t, "bus", true, 3)
         };
         let fresh = || {
@@ -7664,6 +7722,38 @@ mod english_placement_tests {
         ];
         place_english_after_common_exact(&mut v, "hello", (1, 1), true);
         assert_eq!(texts(&v)[0], "hello", "拼凑句仍不算开头段");
+    }
+
+    /// 首选让英文的词频门槛：系统词按权重过门槛；用户词不看权重；临时词与拼凑句不算。
+    #[test]
+    fn pinyin_head_word_needs_weight_or_user_dict() {
+        let word = |w: i32| Candidate {
+            is_abbrev: true,
+            weight: w,
+            ..zh("托尔斯泰", "test", true, 4)
+        };
+        assert!(
+            !pinyin_head_word_outranks_english(&word(860)),
+            "冷僻词库词不让"
+        );
+        assert!(pinyin_head_word_outranks_english(&word(
+            PINYIN_HEAD_WORD_MIN_WEIGHT
+        )));
+        let mut user = word(0);
+        user.meta.is_user_dict = true;
+        assert!(pinyin_head_word_outranks_english(&user), "用户词不看权重");
+        let mut temp = word(1_000_000);
+        temp.meta.is_temp_dict = true;
+        assert!(!pinyin_head_word_outranks_english(&temp), "临时词不算");
+        let synth = Candidate {
+            is_synthesized: true,
+            ..word(1_000_000)
+        };
+        assert!(!pinyin_head_word_outranks_english(&synth));
+
+        let mut v = vec![word(860), en("test", "test")];
+        place_english_after_common_exact(&mut v, "test", (1, 1), true);
+        assert_eq!(texts(&v)[0], "test");
     }
 
     /// ★ 整串是英文词时，引擎拼凑出来的整句让位给英文。

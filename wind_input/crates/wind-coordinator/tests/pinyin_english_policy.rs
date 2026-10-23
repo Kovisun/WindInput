@@ -1,6 +1,7 @@
 //! 拼音方案英文候选的界面位次（`schema.pinyin.english_merge`），真实词库、协调器界面序：
 //!
-//! - 吃满整串的拼音真词（含简拼解出来的 bus→不是）算进英文让过的开头段；拼凑句不算；
+//! - 首选是吃满整串的高频拼音词库词（含简拼解出来的 bus→不是）时英文让到第 2；词库冷僻词
+//!   （test→托尔斯泰）、拼凑句不算；这个英文词选过一次就不再让；
 //! - `exact_position` 出厂按方案自动：全拼 1、双拼 2；
 //! - 中文侧为空的前缀兜底页里，与输入相同的词排最前。
 //!
@@ -90,6 +91,65 @@ fn abbrev_real_word_leads_english() {
             input,
             "{input} 英文应在第 2，实际 {:?}",
             &list[..4]
+        );
+    }
+}
+
+/// 首选只是词库冷僻词时英文仍第 1（test→托尔斯泰、app→挨批评、old→欧蓝德、web→玩儿吧）。
+#[test]
+fn rare_head_word_does_not_outrank_english() {
+    if !ready("pinyin") {
+        return;
+    }
+    for input in ["test", "app", "old", "web", "big", "fun"] {
+        let list = typed(config("pinyin", |_| {}), input, &format!("rare_{input}"));
+        assert_eq!(list[0], input, "{input} 英文应第 1，实际 {:?}", &list[..4]);
+    }
+}
+
+/// 选过即免：bus 首次英文第 2，选一次英文 bus 之后再打，英文第 1。
+///
+/// 两种出厂相关的记频口都要认：拼音调频开（`data/config.toml` 出厂开，`Config::default()`
+/// 是关的，故显式打开）记进拼音桶；只开英文调频时记进英文桶。
+#[test]
+fn english_selected_once_skips_yield() {
+    if !ready("pinyin") {
+        return;
+    }
+    let pinyin_bucket = |c: &mut Config| c.schema.pinyin.frequency.enabled = true;
+    let english_bucket = |c: &mut Config| c.schema.english.frequency.enabled = true;
+    for (tag, cfg) in [
+        ("py", config("pinyin", pinyin_bucket)),
+        ("en", config("pinyin", english_bucket)),
+    ] {
+        let path = std::env::temp_dir().join(format!("wind_py_en_policy_used_{tag}.redb"));
+        let _ = std::fs::remove_file(&path);
+        let store = Arc::new(Store::open(&path).unwrap());
+        let coord = Coordinator::new_headless_with_store(cfg, Some(&data_dir()), store);
+        let type_bus = || {
+            for c in "bus".chars() {
+                coord.handle_key_event(&key(c.to_ascii_uppercase() as u32));
+            }
+            coord.debug_all_candidate_texts()
+        };
+        let first = type_bus();
+        assert_eq!(
+            first[1],
+            "bus",
+            "[{tag}] 前提：首次英文第 2，实际 {:?}",
+            &first[..4]
+        );
+        coord.handle_key_event(&key(0x32)); // 数字键 2 选英文 bus
+        assert!(
+            coord.debug_input_buffer().is_empty(),
+            "[{tag}] 选词后缓冲应清空"
+        );
+        let again = type_bus();
+        assert_eq!(
+            again[0],
+            "bus",
+            "[{tag}] 选过之后英文应第 1，实际 {:?}",
+            &again[..4]
         );
     }
 }
