@@ -1172,13 +1172,20 @@ impl PinyinEngine {
 
     /// 从起始位置贪心切出连续完整音节（每步取最长匹配），返回 (音节序列, 结束字节位置)。
     /// 对齐 Go `ContiguousCompletedFromStart`：遇到无完整音节即停（残缺尾部不计入）。
+    ///
+    /// 换位纠错的错误拼写（`hagn`、`zhon`）**不算**音节：这几道闸门答的是「这串键像不像拼音」，
+    /// 纠错边只为切得动，不该让混输把五笔码 `hagn` 当成打到一半的拼音、拦下满码上屏。
     fn contiguous_completed_from_start(&self, prefix: &str) -> (Vec<String>, usize) {
+        let correction = &self.fuzzy_config.correction;
         let mut syllables = Vec::new();
         let mut pos = 0;
         while pos < prefix.len() {
             // match_at 返回该位置所有完整音节，最长优先；取最长贪心推进。
             let matches = self.trie.match_at(prefix, pos);
-            let Some(syl) = matches.into_iter().next() else {
+            let Some(syl) = matches
+                .into_iter()
+                .find(|s| correction.corrections_of(s).is_empty())
+            else {
                 break;
             };
             pos += syl.len();
@@ -2438,7 +2445,11 @@ impl PinyinEngine {
         out
     }
 
-    /// 给候选填模糊音提示（`meta.pinyin_hints`），`hint` 关时调用方不进来。
+    /// 给候选填模糊音提示（`meta.pinyin_hints`）并判 `is_corrected`；`hint` 关且无纠错规则时
+    /// 调用方不进来。
+    ///
+    /// `is_corrected` 判在最终候选上：同文合并后留下的那条若有非纠错来源（精确命中无
+    /// `learn_code`、或读音对齐得上），就不算经纠错。
     ///
     /// 在 `convert` 收尾对**最终**候选统一做一次，而不是散在各产出点：词库读音只认
     /// `learn_code`，各路径的同文合并（替换 / 继承 `learn_code`）都已落定，提示与
@@ -2498,11 +2509,12 @@ impl PinyinEngine {
             if syllables.len() != c.text.chars().count() {
                 continue;
             }
-            let hints = hint_align::align_hints(&typed, &syllables, &self.fuzzy_config, ends_here);
-            if hints.is_empty() {
+            let a = hint_align::align(&typed, &syllables, &self.fuzzy_config, ends_here);
+            c.is_corrected = a.corrected;
+            if a.hints.is_empty() {
                 continue;
             }
-            c.meta.pinyin_hints = hints;
+            c.meta.pinyin_hints = a.hints;
             c.meta.hint_syllables = syllables.iter().map(|s| s.to_string()).collect();
         }
     }
@@ -2525,7 +2537,7 @@ fn literal_typed(sp: &shuangpin::SpConvertResult, query: &str, len: usize) -> St
     out
 }
 
-/// 全拼域的候选码规范成 [`hint_align::align_hints`] 要的形态：去 `'`、ü 归一化。
+/// 全拼域的候选码规范成 [`hint_align::align`] 要的形态：去 `'`、ü 归一化。
 ///
 /// 防御性的：当前各路径交来的码已是这个形态（全拼主路径入口已归一、`completed` 与整句码
 /// 不含 `'`；降级支路的闸门遇 `'` 即拒，且词库用 `lve` 拼写时 `lue` 击键在支路里查不到词），
@@ -4900,9 +4912,11 @@ impl Engine for PinyinEngine {
             _ => String::new(),
         };
 
-        if self.fuzzy_config.hint.get() {
+        if self.fuzzy_config.hint.get() || !self.fuzzy_config.correction.is_empty() {
             self.fill_pinyin_hints(&mut candidates, query, raw_input, sp_result.as_ref());
             self.fill_pinyin_hints(&mut sentence_pool, query, raw_input, sp_result.as_ref());
+            wind_candidate::drop_corrected_duplicates(&mut candidates);
+            wind_candidate::drop_corrected_duplicates(&mut sentence_pool);
         }
 
         Ok(ConvertResult {

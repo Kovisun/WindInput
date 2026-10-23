@@ -434,6 +434,7 @@ impl Coordinator {
         // 供跨来源档位判「消费整串」与「码 == 输入」。缓冲恒 ASCII，字节长度与 `consumed_length` 同域。
         let input_str = state.temp_pinyin_buffer.clone();
         let mut candidates = result.candidates;
+        wind_candidate::drop_corrected_duplicates(&mut candidates);
         // mixed=false：临拼是纯拼音 overlay，不存在码表/拼音跨来源竞争。
         candidates.sort_by(|a, b| {
             crate::handle_candidate::candidate_display_order(a, b, ignore_weight, false, &input_str)
@@ -484,6 +485,8 @@ impl Coordinator {
             &mut candidates[..rerank_len],
             &state.temp_pinyin_buffer,
         );
+        // 纠错候选不占首选（D6），与主路径同位：重排之后、候选调整之前。
+        wind_candidate::protect_top_from_corrected(&mut candidates, input_str.len());
         // 候选调整（置顶 / 隐藏）：位置与主路径同序，在词频重排之后、简繁展开之前。
         //
         // ⚠️ 此前这一步**整段缺席**（不是归属取错）：规则写得进去、临拼永远读不出来，

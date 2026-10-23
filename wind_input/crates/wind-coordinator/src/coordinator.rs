@@ -7524,6 +7524,8 @@ impl Coordinator {
         let cmd_prefix = rt.config.input.cmdbar.candidate_prefix.as_str();
         // 检索范围放宽（自动补充）候选的前缀标注，见 docs/design/smart-filter-scope-relax.md
         let scope_prefix = rt.config.input.scope_relax.prefix.as_str();
+        // 换位纠错候选的标记（`input.correction.marker`，留空不加）。
+        let corrected_prefix = rt.config.input.correction.marker.as_str();
         // 编码提示(反查):对拼音来源候选,用主码表真实反查索引填 comment(实际填充见下方候选构造,
         // 受 source==Pinyin 守卫)。门控两类:
         //  - 普通拼音方案:跟随全局 schema.pinyin.code_hint_source(四档,见 CodeHintSource,出厂 off);
@@ -7568,6 +7570,8 @@ impl Coordinator {
                 cmd_prefix
             } else if c.is_scope_filtered {
                 scope_prefix
+            } else if c.is_corrected {
+                corrected_prefix
             } else {
                 ""
             }

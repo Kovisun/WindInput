@@ -265,6 +265,17 @@ pub struct Candidate {
     /// 前缀补全「思考」「似乎」）压到第 231 位，而生产候选上限是 50~300，模糊音
     /// 因此在三条路径（拼音 / 混输 / 临拼）上全部等价于未实现。
     pub is_fuzzy: bool,
+    /// 该候选**只有经字母换位纠错才得到**（`gogn` → 「工」）：同一文字另有非纠错来源时
+    /// 不标（那条非纠错候选留下）。整句里只要有一个音节经纠错就算。
+    ///
+    /// 与 [`Self::is_scope_filtered`] 同构，语义只是这个事实，不编码排序或显示决策：
+    /// - 排序：存在非纠错的完整候选时不占首选（[`protect_top_from_corrected`]）；
+    /// - 自动上屏：计数时跳过；
+    /// - UI：加 `input.correction.marker` 前缀（默认 `*`）。
+    ///
+    /// 纠错命中照旧带 `is_fuzzy`（它决定召回与罚分），本字段与之并列。
+    #[serde(default)]
+    pub is_corrected: bool,
     /// 是否为**简拼**（声母缩写）候选，如 `nh`→「你好」。排序时整体降到全拼候选之后。
     ///
     /// **为何不复用 `is_fuzzy`**：用户词简拼路径此前正是借它沉底（`mod.rs` step6 硬置
@@ -643,6 +654,7 @@ impl Default for Candidate {
             is_phrase: false,
             is_command: false,
             is_fuzzy: false,
+            is_corrected: false,
             is_abbrev: false,
             is_fullpinyin_fallback: false,
             is_zero_weight_reading: false,
@@ -737,6 +749,41 @@ pub fn effective_consumed(c: &Candidate, input_len: usize) -> usize {
         input_len
     } else {
         c.consumed_length
+    }
+}
+
+/// 同一文字既有经纠错（[`Candidate::is_corrected`]）又有非纠错的候选时，去掉纠错那条，
+/// 非纠错那条留在原位。
+pub fn drop_corrected_duplicates(cands: &mut Vec<Candidate>) {
+    if !cands.iter().any(|c| c.is_corrected) {
+        return;
+    }
+    let plain: std::collections::HashSet<String> = cands
+        .iter()
+        .filter(|c| !c.is_corrected)
+        .map(|c| c.text.clone())
+        .collect();
+    cands.retain(|c| !c.is_corrected || !plain.contains(&c.text));
+}
+
+/// 纠错候选不占首选（设计 D6）：首条经纠错、且列表里有**完整**的非纠错候选时，把第一条
+/// 这样的候选提到首位，其余相对顺序不变。
+///
+/// 「完整」= 消费整串、不是简拼 / 前缀补全 / 子短语。简拼不算：否则 `gogn` 切成 g+o+g+n
+/// 出的简拼整句会让「工」永远拿不到首选。
+pub fn protect_top_from_corrected(cands: &mut [Candidate], input_len: usize) {
+    if !cands.first().is_some_and(|c| c.is_corrected) {
+        return;
+    }
+    let complete = |c: &Candidate| {
+        !c.is_corrected
+            && effective_consumed(c, input_len) >= input_len
+            && !c.is_abbrev
+            && !c.is_prefix
+            && !c.is_partial
+    };
+    if let Some(i) = cands.iter().position(complete) {
+        cands[..=i].rotate_right(1);
     }
 }
 
@@ -1695,5 +1742,68 @@ mod freq_text_tests {
     fn template_source_wins_over_case_source() {
         let c = cand("2026年10月9日", Some("2026年10月9日"), Some("$Y年$M月$D日"));
         assert_eq!(c.freq_text(), "$Y年$M月$D日");
+    }
+}
+
+#[cfg(test)]
+mod corrected_tests {
+    use super::*;
+
+    fn c(text: &str, corrected: bool) -> Candidate {
+        Candidate {
+            text: text.into(),
+            is_corrected: corrected,
+            ..Default::default()
+        }
+    }
+
+    fn texts(cs: &[Candidate]) -> Vec<&str> {
+        cs.iter().map(|c| c.text.as_str()).collect()
+    }
+
+    #[test]
+    fn duplicate_keeps_uncorrected() {
+        let mut cs = vec![c("中", true), c("种", true), c("中", false), c("众", false)];
+        drop_corrected_duplicates(&mut cs);
+        assert_eq!(texts(&cs), ["种", "中", "众"]);
+        assert!(!cs[1].is_corrected);
+    }
+
+    #[test]
+    fn complete_uncorrected_takes_top() {
+        let mut abbrev = c("干呕", false);
+        abbrev.is_abbrev = true;
+        let mut partial = c("与", false);
+        partial.is_partial = true;
+        partial.consumed_length = 2;
+        let mut cs = vec![
+            c("有", true),
+            abbrev,
+            partial,
+            c("又", true),
+            c("与哦", false),
+        ];
+        protect_top_from_corrected(&mut cs, 3);
+        assert_eq!(texts(&cs), ["与哦", "有", "干呕", "与", "又"]);
+    }
+
+    #[test]
+    fn no_complete_keeps_corrected_top() {
+        let mut abbrev = c("干呕功能", false);
+        abbrev.is_abbrev = true;
+        let mut prefix = c("公平", false);
+        prefix.is_prefix = true;
+        let mut short = c("公", false);
+        short.consumed_length = 2;
+        let mut cs = vec![c("工", true), abbrev, prefix, short];
+        protect_top_from_corrected(&mut cs, 4);
+        assert_eq!(texts(&cs), ["工", "干呕功能", "公平", "公"]);
+    }
+
+    #[test]
+    fn uncorrected_top_untouched() {
+        let mut cs = vec![c("公平", false), c("工", true)];
+        protect_top_from_corrected(&mut cs, 8);
+        assert_eq!(texts(&cs), ["公平", "工"]);
     }
 }
