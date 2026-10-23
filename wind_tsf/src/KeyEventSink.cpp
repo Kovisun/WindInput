@@ -2553,7 +2553,8 @@ BOOL CKeyEventSink::_HandleServiceResponse()
         _hasCandidates = FALSE;
         _pTextService->NotifyCandidatesVisibilityChanged(FALSE);
         _pTextService->EndComposition(nullptr, _inHotkeyDispatch);
-        // 热键派发里没有可交还的按键：WM_HOTKEY 已被系统吃下，重放组合键只会再触发一次热键。
+        // 热键派发里没有原键可交还：WM_HOTKEY 已被系统吃下，不是经 OnKeyDown 到的。该位也只在
+        // OnKeyDown 里先清零再读，派发时置了从来不会被消费，不置只是让意图如实。
         _pendingReplayToHost = _inHotkeyDispatch ? FALSE : TRUE;
         return TRUE;
 
