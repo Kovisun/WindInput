@@ -1,5 +1,6 @@
 #include "KeyEventSink.h"
 #include "DeferredCompositionPolicy.h"
+#include "CtrlAltCleanupPolicy.h"
 #include "HoldReplayPolicy.h"
 #include "NumberKeyPolicy.h"
 #include "SpaceKeyPolicy.h"
@@ -1601,6 +1602,7 @@ STDAPI CKeyEventSink::OnKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM lPar
     // This is simpler and matches Weasel's architecture
     // 先清零重放标志：只有本次响应置的位才算数（见其声明处说明）。
     _pendingReplayToHost = FALSE;
+    _responseCommitted = FALSE;
     // 记下本次应答对应的按键：CommitThenDefer 据此只让**这个键**的 keyup 开延迟组合。
     _responseKeyVk = (UINT)wParam;
     *pfEaten = _HandleServiceResponse();
@@ -1694,9 +1696,11 @@ STDAPI CKeyEventSink::OnKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM lPar
     // If Go handled the key as a candidate operation (pin/delete) and the composition
     // is still active, respect Go's decision and eat the key. Only override to FALSE
     // when Go actually cleared the composition (e.g., Ctrl+S cleanup).
+    // 上屏了候选（快捷输入选词键）同样算服务端用掉了这一键，判据见 CtrlAltCleanupPolicy.h。
     if (isCtrlAltCleanup && *pfEaten)
     {
-        if (_hasCandidates || _isComposing)
+        if (!wind::ctrlalt::ShouldReturnToHost(_hasCandidates != FALSE, _isComposing != FALSE,
+                                               _responseCommitted != FALSE))
         {
             // Go handled it as a candidate action (e.g., Ctrl+number pin/delete),
             // composition still active — keep pfEaten=TRUE to prevent app from seeing the key.
@@ -2434,6 +2438,7 @@ BOOL CKeyEventSink::_HandleServiceResponse()
             QueryPerformanceCounter(&ctStart);
 
             WIND_LOG_DEBUG(L"Processing CommitText response\n");
+            _responseCommitted = TRUE;
 
             // Handle new composition if needed (top code / non-inline restart)
             // restartComposition=true: both inline (newComposition has text) and non-inline (newComposition empty, uses placeholder)
