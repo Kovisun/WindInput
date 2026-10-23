@@ -5215,10 +5215,10 @@ impl Coordinator {
                 || (self.candidate_op_scope(&state).is_none()
                     && self.quick_history_at(&state, num - 1).is_none())
             {
-                // 快捷输入里没有可操作的落点也吃掉：落到 mix 处理器就是
-                // `overlay_ctrl_alt_guard`，会放弃整段输入。
-                return matches!(state.active, Some(ModeKind::Mix(_)))
-                    .then_some(KeyAction::Consumed);
+                // overlay 里没有可操作的落点也吃掉：落到模式处理器就是
+                // `overlay_ctrl_alt_guard`，会放弃整段输入（临拼恒无落点，按一下就清空）。
+                // 主输入路照旧落到它自己的 Ctrl/Alt 兜底。
+                return state.active.is_some().then_some(KeyAction::Consumed);
             }
         }
         // 分发自行重新加锁并做页范围/来源分流校验。
