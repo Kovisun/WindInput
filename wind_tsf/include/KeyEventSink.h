@@ -238,7 +238,7 @@ private:
     // OnKeyDown 里、调用响应处理之前清零。
     BOOL _responseCommitted = FALSE;
     // 正在 DispatchHotkey（WM_HOTKEY 回调）里处理响应：不在按键上下文，上屏要按
-    // nonKeyContext 走异步会话。只在 DispatchHotkey 里置位、处理完即复位。
+    // nonKeyContext 走异步会话。只在 DispatchHotkey 里置位、处理完恢复原值。
     BOOL _inHotkeyDispatch = FALSE;
     BOOL _isComposing;
     BOOL _hasCandidates;         // True if there are candidates to select

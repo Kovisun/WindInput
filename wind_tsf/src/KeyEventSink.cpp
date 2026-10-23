@@ -2230,9 +2230,11 @@ BOOL CKeyEventSink::DispatchHotkey(uint32_t vk, uint32_t mods)
         WIND_LOG_ERROR_FMT(L"DispatchHotkey: _SendKeyToService failed vk=0x%02X mods=0x%04X\n", vk, mods);
         return FALSE;
     }
+    // 保存/恢复而非置 TRUE/FALSE：响应处理里若重入了别的热键派发，内层不能把外层复位。
+    const BOOL prevInHotkeyDispatch = _inHotkeyDispatch;
     _inHotkeyDispatch = TRUE;
     BOOL handled = _HandleServiceResponse();
-    _inHotkeyDispatch = FALSE;
+    _inHotkeyDispatch = prevInHotkeyDispatch;
     return handled;
 }
 
