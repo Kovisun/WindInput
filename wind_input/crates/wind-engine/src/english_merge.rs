@@ -48,7 +48,7 @@
 //!
 //! 本模块只管「查哪些、谁活下来」。英文候选**排第几**由协调器
 //! `place_english_after_common_exact` 在所有排序（含自动调频）跑完之后统一定位：
-//! 排在「中文常用精确解」之后、其余候选之前；码表 / 混输另有两项位次下限（完整单词 / 前缀补全）。放在这里做不到——引擎看不见协调器随后并入的
+//! 排在「中文常用精确解」之后、其余候选之前；码表 / 混输 / 拼音各有两项位次下限（完整单词 / 前缀补全）。放在这里做不到——引擎看不见协调器随后并入的
 //! 短语候选，也看不见调频的位置提升。
 
 use crate::engine::Engine;
@@ -288,12 +288,11 @@ pub fn lookup_prefix_fallback(
         return Vec::new();
     }
     let lower = input.to_lowercase();
-    // 多取一个精确扫描窗：英文引擎的前缀页按词频排，与输入相同的那个词可能落在页尾
-    // 之外（真机 `hi` → his / high / him / history / hi）。
-    let Ok(r) = english.convert(&lower, PREFIX_FALLBACK_MAX + EXACT_SCAN) else {
+    let Ok(r) = english.convert(&lower, PREFIX_FALLBACK_MAX) else {
         return Vec::new();
     };
-    // 与输入相同（大小写不敏感）的词排最前，其余保持英文引擎的次序。
+    // 与输入相同（大小写不敏感）的词排最前，其余保持英文引擎的次序。英文引擎本身已把精确
+    // 整串排在最前，这里只是不依赖它。
     let (mut out, rest): (Vec<Candidate>, Vec<Candidate>) = r
         .candidates
         .into_iter()
@@ -305,8 +304,11 @@ pub fn lookup_prefix_fallback(
         .partition(|c| c.text.to_lowercase() == lower);
     out.extend(rest);
     out.truncate(PREFIX_FALLBACK_MAX);
-    // ★ 次序要落到 weight：协调器按 weight 统一重排，只调顺序会被冲掉。精确词抬到页内
-    // 最高权重之上；没有精确词时不动。
+    // ★ 次序要落到 weight：上面清了 `is_exact_code`，协调器重排时精确词不再靠
+    // `cmp_exact_first` 领先，而是按 weight 与前缀词比——真机 `hi` 曾落到 his / high / him /
+    // history 之后。精确词抬到页内最高权重之上；没有精确词时不动。
+    // ⚠️ 码表「基础排序」为自然顺序（`base_sort = "natural"`）时协调器不看 weight，本抬权不起
+    // 作用，次序按英文引擎原序（它本身就把精确词排在最前）。
     let n_exact = out
         .iter()
         .take_while(|c| c.text.to_lowercase() == lower)
@@ -754,7 +756,7 @@ mod tests {
         assert_eq!(lookup_prefix_complete(&eng, "hell", &none, 2).len(), 2);
     }
 
-    /// 前缀兜底页：与输入相同（大小写不敏感）的词排最前，哪怕英文引擎把它排在页尾之外。
+    /// 前缀兜底页：与输入相同（大小写不敏感）的词排最前，且次序落到 weight。
     #[test]
     fn prefix_fallback_puts_exact_word_first() {
         let eng = FakeEnglish(vec![
@@ -762,8 +764,6 @@ mod tests {
             ("high", "high"),
             ("him", "him"),
             ("history", "history"),
-            ("hint", "hint"),
-            ("hill", "hill"),
             ("hi", "Hi"),
         ]);
         let got = lookup_prefix_fallback(&eng, "hi", 0);

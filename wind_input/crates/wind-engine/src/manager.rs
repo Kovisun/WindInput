@@ -4872,6 +4872,10 @@ impl EngineManager {
                     .unwrap_or_else(|e| e.into_inner())
                     .english_merge
                     .clone();
+                // 英文候选没开时列表里不会有英文，不必再问方案是不是双拼。
+                if !e.enable {
+                    return (1, 1);
+                }
                 // 双拼两键一音节，`the` / `good` 这类常用词几乎都解得出中文，英文不抢首选。
                 let auto = if self.pinyin_is_shuangpin_of(&self.active_schema_id()) {
                     2
