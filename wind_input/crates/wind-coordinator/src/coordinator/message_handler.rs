@@ -1322,6 +1322,10 @@ impl MessageHandler for Coordinator {
         // ── 候选词操作热键（Ctrl+数字 置顶/删除）──
         // 这两组在编译期仅注册转发（action 为空，上方匹配不触发），实际语义在此分派。
         // 须先于下方 Ctrl/Alt 组合「清空隐藏候选」分支，否则 Ctrl+数字 会被当作普通组合吞掉。
+        // 快捷输入的选词键排在置顶/删除前面：出厂同为 Ctrl+数字，快捷输入里归选词。
+        if let Some(act) = self.try_quick_input_select(data) {
+            return act;
+        }
         if let Some(act) = self.handle_candidate_action_hotkey(data) {
             return act;
         }

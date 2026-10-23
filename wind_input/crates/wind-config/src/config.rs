@@ -3499,6 +3499,12 @@ pub struct MixModeConfig {
     /// 触发的自由输入。
     #[serde(default = "default_true")]
     pub free_input_takes_select_keys: bool,
+    /// 数字透镜（首字符是数字/符号）下是否拿**小写字母**作选词键（a=首选）。默认开。
+    ///
+    /// 关掉后字母在数字透镜里是字面输入，`2fa`、`1.5x` 可以直接打进缓冲；序号标签随之
+    /// 改回数字，选词靠 `keys.quick_input_select`（出厂 Ctrl+数字）与空格。
+    #[serde(default = "default_true")]
+    pub numeric_letter_select: bool,
 }
 
 impl Default for MixModeConfig {
@@ -3515,6 +3521,7 @@ impl Default for MixModeConfig {
             free_input: FreeInputMode::default(),
             // 与 `#[serde(default = "default_true")]` 对齐，见结构体文档的 ⚠️。
             free_input_takes_select_keys: default_true(),
+            numeric_letter_select: default_true(),
         }
     }
 }
@@ -3574,6 +3581,7 @@ fn default_mix_modes() -> Vec<MixModeConfig> {
         // 夺取 `;`/`'` 作字面：它们选第 2/3 候选只是数字键的冗余别名，而 `rock'n'roll`
         // 这类内容里的 `'` 没有别的输入通路。
         free_input_takes_select_keys: true,
+        numeric_letter_select: true,
     }]
 }
 
@@ -5430,6 +5438,22 @@ pub struct KeysConfig {
     pub pin_candidate: String,
     #[serde(default = "default_delete_candidate")]
     pub delete_candidate: String,
+    /// 快捷输入（mix）专用选词上屏键，模板值域同 [`Self::pin_candidate`]
+    /// （见 `hotkey::number_template_mods`），`"none"` 不绑。
+    ///
+    /// 只在快捷输入里生效、且先于置顶/删除判定：快捷输入的候选没有词库落点，置顶本就
+    /// 无从谈起，而数字键常被算式/字面输入占着，候选一多就没有别的选词通路。
+    ///
+    /// ★ 本键自己不进 TSF 热键表，送达靠两条现成通路：
+    /// - 与置顶/删除**同模板**（出厂即是）：借它们的 SESSION 热键送达；候选可见时那批键被
+    ///   `RegisterHotKey` 抢成系统热键，走 WM_HOTKEY → `DispatchHotkey`（非按键上下文上屏）。
+    /// - 模板不同：快捷输入期间恒有组合，TSF 对会话中未登记的 Ctrl/Alt 组合一律先吃下转发
+    ///   （cleanup 通路），上屏后不再交还宿主。代价是不受 `RegisterHotKey` 保护，QQNT 一类
+    ///   Chromium 宿主可能对同一键再触发一次加速键。
+    ///
+    /// 不单独登记的理由：登记进 SESSION 表会让主输入路也吃掉它，而主输入路对它没有出口。
+    #[serde(default = "default_quick_input_select")]
+    pub quick_input_select: String,
     #[serde(default = "default_take_screenshot")]
     pub take_screenshot: String,
     /// 软键盘面板开关热键。
@@ -5595,6 +5619,9 @@ fn default_pin_candidate() -> String {
 }
 fn default_delete_candidate() -> String {
     "ctrl+shift+number".to_string()
+}
+fn default_quick_input_select() -> String {
+    "ctrl+number".to_string()
 }
 fn default_select_key_groups() -> Vec<String> {
     vec!["semicolon_quote".to_string()]
@@ -5777,6 +5804,7 @@ impl Default for KeysConfig {
             activate_ime: default_activate_ime(),
             pin_candidate: default_pin_candidate(),
             delete_candidate: default_delete_candidate(),
+            quick_input_select: default_quick_input_select(),
             take_screenshot: default_take_screenshot(),
             softkeyboard: default_softkeyboard(),
             global_hotkeys: Vec::new(),
@@ -11992,6 +12020,10 @@ y = 2
         assert!(
             MixModeConfig::default().free_input_takes_select_keys,
             "夺取二三候选键默认应为开"
+        );
+        assert!(
+            MixModeConfig::default().numeric_letter_select,
+            "数字透镜下字母选词默认应为开"
         );
     }
 

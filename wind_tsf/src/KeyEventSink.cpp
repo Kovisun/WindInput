@@ -1,5 +1,6 @@
 #include "KeyEventSink.h"
 #include "DeferredCompositionPolicy.h"
+#include "CtrlAltCleanupPolicy.h"
 #include "HoldReplayPolicy.h"
 #include "NumberKeyPolicy.h"
 #include "SpaceKeyPolicy.h"
@@ -1601,6 +1602,7 @@ STDAPI CKeyEventSink::OnKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM lPar
     // This is simpler and matches Weasel's architecture
     // 先清零重放标志：只有本次响应置的位才算数（见其声明处说明）。
     _pendingReplayToHost = FALSE;
+    _responseCommitted = FALSE;
     // 记下本次应答对应的按键：CommitThenDefer 据此只让**这个键**的 keyup 开延迟组合。
     _responseKeyVk = (UINT)wParam;
     *pfEaten = _HandleServiceResponse();
@@ -1694,9 +1696,11 @@ STDAPI CKeyEventSink::OnKeyDown(ITfContext* pContext, WPARAM wParam, LPARAM lPar
     // If Go handled the key as a candidate operation (pin/delete) and the composition
     // is still active, respect Go's decision and eat the key. Only override to FALSE
     // when Go actually cleared the composition (e.g., Ctrl+S cleanup).
+    // 上屏了候选（快捷输入选词键）同样算服务端用掉了这一键，判据见 CtrlAltCleanupPolicy.h。
     if (isCtrlAltCleanup && *pfEaten)
     {
-        if (_hasCandidates || _isComposing)
+        if (!wind::ctrlalt::ShouldReturnToHost(_hasCandidates != FALSE, _isComposing != FALSE,
+                                               _responseCommitted != FALSE))
         {
             // Go handled it as a candidate action (e.g., Ctrl+number pin/delete),
             // composition still active — keep pfEaten=TRUE to prevent app from seeing the key.
@@ -2217,12 +2221,21 @@ BOOL CKeyEventSink::DispatchHotkey(uint32_t vk, uint32_t mods)
     //   - AddWord（Ctrl+= 等）：中文+文本框时经全局拦截规避 Chromium 宿主双处理。
     //     composition 由 _HandleServiceResponse 处理 UpdateComposition 建立；caret 定位
     //     由 WM_HOTKEY 分发处先行 SendCaretPositionUpdate 补齐（见 TextService WndProc）。
+    //   - 快捷输入选词键（出厂与置顶同为 Ctrl+数字）/ Alt+数字上屏注释：响应是 CommitText。
+    //
+    // ★ 这里不在按键处理期间（裸 WM_HOTKEY 窗口消息回调），上屏须按 nonKeyContext 走异步
+    // 会话：Word 会拒发此时的 TF_ES_SYNC（见 CTextService::CommitText 的 nonKeyContext 分支）。
     if (!_SendKeyToService(vk, mods, KEY_EVENT_DOWN))
     {
         WIND_LOG_ERROR_FMT(L"DispatchHotkey: _SendKeyToService failed vk=0x%02X mods=0x%04X\n", vk, mods);
         return FALSE;
     }
-    return _HandleServiceResponse();
+    // 保存/恢复而非置 TRUE/FALSE：响应处理里若重入了别的热键派发，内层不能把外层复位。
+    const BOOL prevInHotkeyDispatch = _inHotkeyDispatch;
+    _inHotkeyDispatch = TRUE;
+    BOOL handled = _HandleServiceResponse();
+    _inHotkeyDispatch = prevInHotkeyDispatch;
+    return handled;
 }
 
 BOOL CKeyEventSink::_SendKeyToService(uint32_t keyCode, uint32_t modifiers, uint8_t eventType)
@@ -2408,6 +2421,8 @@ BOOL CKeyEventSink::_HandleServiceResponse()
     _needsCompositionResync = FALSE;
     _resyncDeadline = 0;
     _resyncFailStreak = 0;
+    // 上屏类响应记一笔，供 OnKeyDown 的 Ctrl/Alt cleanup 判定（见 CtrlAltCleanupPolicy.h）。
+    _responseCommitted = wind::ctrlalt::ResponseCommitsText(response.type) ? TRUE : FALSE;
 
     QueryPerformanceCounter(&midTime);
     int ipcMs = (int)((midTime.QuadPart - startTime.QuadPart) * 1000 / freq.QuadPart);
@@ -2455,7 +2470,8 @@ BOOL CKeyEventSink::_HandleServiceResponse()
                 // No new composition, commit text atomically (end composition + insert in one EditSession)
                 // replacingHeld：智能符号 press2 要覆盖 hold 预览态里的中文符号；其余提交
                 // 路径为 FALSE，held 符号并入前缀一起上屏（见 CTextService::CommitText）。
-                _pTextService->CommitText(response.text, FALSE, response.replacingHeld ? TRUE : FALSE);
+                _pTextService->CommitText(response.text, _inHotkeyDispatch,
+                                          response.replacingHeld ? TRUE : FALSE);
                 QueryPerformanceCounter(&ctMid1);
 
                 // 上屏文本末位即新的「光标前一字符」，据此维护输入序列记账（见 header 注释）。
@@ -2520,7 +2536,7 @@ BOOL CKeyEventSink::_HandleServiceResponse()
         _isComposing = FALSE;
         _hasCandidates = FALSE;
         _pTextService->NotifyCandidatesVisibilityChanged(FALSE);
-        _pTextService->EndComposition();
+        _pTextService->EndComposition(nullptr, _inHotkeyDispatch);
         return TRUE;
 
     case ResponseType::ClearCompositionThenPassThrough:
@@ -2576,7 +2592,7 @@ BOOL CKeyEventSink::_HandleServiceResponse()
     case ResponseType::InsertTextWithCursor:
         {
             WIND_LOG_DEBUG(L"Processing InsertTextWithCursor response\n");
-            _pTextService->CommitText(response.text);
+            _pTextService->CommitText(response.text, _inHotkeyDispatch);
             // 输入序列记账：cursorOffset==0 时末位就是光标前一字符；cursorOffset>0（配对
             // 插入后光标回退到中间）时光标前其实是左符号，末位取的是右符号——但两者都是
             // 配对符号、都不是数字，结论同为清零，故无须为配对单独分支。
@@ -2674,7 +2690,7 @@ BOOL CKeyEventSink::_HandleServiceResponse()
             WIND_LOG_DEBUG_FMT(L"Processing CommitThenDefer: commit=%ls defer=%ls timeoutMs=%u\n",
                                response.text.c_str(), response.newComposition.c_str(),
                                response.holdTimeoutMs);
-            _pTextService->CommitText(response.text);
+            _pTextService->CommitText(response.text, _inHotkeyDispatch);
             // 不记输入序列：余码组合随后就开，光标前是组合内容而非 response.text 末位
             // （同 restartComposition 分支的理由）。
             _isComposing = FALSE;

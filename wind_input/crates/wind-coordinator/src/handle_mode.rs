@@ -588,6 +588,18 @@ impl Coordinator {
             .unwrap_or(true)
     }
 
+    /// 本 mix 实例的数字透镜是否拿小写字母作选词键（`MixModeConfig::numeric_letter_select`，
+    /// 缺省 true）。①的字母臂与候选窗的字母序号标签都问这里。
+    pub(crate) fn mix_numeric_letter_select(&self, idx: u8) -> bool {
+        self.rt()
+            .config
+            .schema
+            .mix_modes
+            .get(idx as usize)
+            .map(|m| m.numeric_letter_select)
+            .unwrap_or(true)
+    }
+
     /// 二三候选键（`keys.select_key_groups`，默认 `;` `'`）在本实例上**是否仍作选词键**。
     ///
     /// 即「自由输入没开」或「开了但配置为不夺取」。
@@ -3241,6 +3253,14 @@ impl Coordinator {
                     // 透镜带进 Free，于是 `;12.5` 之后按 Shift+G 能续打成 `12.5GB`。
                     MixLens::Numeric if free_on && shift && is_letter => {
                         Some((b'A' + (data.key_code - keymap::VK_A) as u8) as char)
+                    }
+                    // 关掉「数字透镜下字母选词」：字母一律字面（保留 Shift 形态），`;2fa`、
+                    // `;1.5x` 直接进缓冲。选词改由 `keys.quick_input_select` 与空格承担。
+                    MixLens::Numeric
+                        if is_letter && !self.mix_numeric_letter_select(state.mix_id) =>
+                    {
+                        let base = (data.key_code - keymap::VK_A) as u8;
+                        Some(if shift { b'A' + base } else { b'a' + base } as char)
                     }
                     // 二三候选键（`;` `'`）在数字透镜下**必须让开**，交给第④步的选词判定。
                     //

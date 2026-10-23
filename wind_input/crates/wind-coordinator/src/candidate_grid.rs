@@ -1924,6 +1924,30 @@ mod tests {
         }
     }
 
+    /// 展开态下快捷输入选词键（出厂 Ctrl+数字）与数字键同一范围：Ctrl+9 选顺延到第二行的
+    /// 第 9 格，Ctrl+0 选第 10 格。
+    #[test]
+    fn mix_grid_quick_select_key_follows_index_span() {
+        let Some((c, _rx)) = mix_coord(wind_config::LayoutIntent::Horizontal, false) else {
+            return;
+        };
+        for (d, idx) in [(b'9', 8usize), (b'0', 9)] {
+            mix_type(&c, "SHI");
+            c.handle_key_event(&key(keymap::VK_NEXT));
+            assert!(
+                Coordinator::grid_active(&c.state.lock().unwrap()),
+                "前提：已展开"
+            );
+            let all = texts(&c);
+            let mut ev = key(u32::from(d));
+            ev.modifiers = wind_ipc::protocol::MOD_CTRL;
+            match c.handle_key_event(&ev) {
+                KeyAction::InsertText { text, .. } => assert_eq!(text, all[idx]),
+                other => panic!("Ctrl+{} 应上屏第 {} 格，实得 {other:?}", d as char, idx + 1),
+            }
+        }
+    }
+
     /// 编码栏跟随高亮：展开态里 → 移到「西安」得 `;xi'an`，移回单字「先」得 `;xian`。
     #[test]
     fn mix_grid_preedit_follows_highlight() {
