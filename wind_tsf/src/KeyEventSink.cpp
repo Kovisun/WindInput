@@ -2225,17 +2225,24 @@ BOOL CKeyEventSink::DispatchHotkey(uint32_t vk, uint32_t mods)
     //
     // ★ 这里不在按键处理期间（裸 WM_HOTKEY 窗口消息回调），上屏须按 nonKeyContext 走异步
     // 会话：Word 会拒发此时的 TF_ES_SYNC（见 CTextService::CommitText 的 nonKeyContext 分支）。
+    //
+    // 返回值是「这个键要不要交还宿主」：服务端没收到、回了 PassThrough，或回了
+    // ClearCompositionThenPassThrough。系统热键已把原键吃下，交还只能由调用方注入
+    // （见 TextService WndProc 与 CandidateHotkeyPolicy.h 的 OnHotkeyDispatched）。
     if (!_SendKeyToService(vk, mods, KEY_EVENT_DOWN))
     {
         WIND_LOG_ERROR_FMT(L"DispatchHotkey: _SendKeyToService failed vk=0x%02X mods=0x%04X\n", vk, mods);
-        return FALSE;
+        return TRUE;
     }
     // 保存/恢复而非置 TRUE/FALSE：响应处理里若重入了别的热键派发，内层不能把外层复位。
     const BOOL prevInHotkeyDispatch = _inHotkeyDispatch;
     _inHotkeyDispatch = TRUE;
-    BOOL handled = _HandleServiceResponse();
+    _pendingReplayToHost = FALSE;
+    BOOL eaten = _HandleServiceResponse();
+    const BOOL giveBack = _pendingReplayToHost || !eaten;
+    _pendingReplayToHost = FALSE;
     _inHotkeyDispatch = prevInHotkeyDispatch;
-    return handled;
+    return giveBack;
 }
 
 BOOL CKeyEventSink::_SendKeyToService(uint32_t keyCode, uint32_t modifiers, uint8_t eventType)
@@ -2553,9 +2560,9 @@ BOOL CKeyEventSink::_HandleServiceResponse()
         _hasCandidates = FALSE;
         _pTextService->NotifyCandidatesVisibilityChanged(FALSE);
         _pTextService->EndComposition(nullptr, _inHotkeyDispatch);
-        // 热键派发里没有原键可交还：WM_HOTKEY 已被系统吃下，不是经 OnKeyDown 到的。该位也只在
-        // OnKeyDown 里先清零再读，派发时置了从来不会被消费，不置只是让意图如实。
-        _pendingReplayToHost = _inHotkeyDispatch ? FALSE : TRUE;
+        // 两个按键入口消费它：OnKeyDown 重放原键；DispatchHotkey 把它报给 WndProc，由那里
+        // 注入（WM_HOTKEY 已被系统吃下，没有原键可交还）。
+        _pendingReplayToHost = TRUE;
         return TRUE;
 
     case ResponseType::StatusUpdate:

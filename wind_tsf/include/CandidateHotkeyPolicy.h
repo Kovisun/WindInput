@@ -42,5 +42,29 @@ inline Action OnModeReevaluate(bool chineseMode, bool candidatesVisible, bool ac
     return (candidatesVisible && !active) ? Action::Register : Action::None;
 }
 
+enum class GiveBack
+{
+    None,
+    Replay,
+    UnregisterThenReplay,
+};
+
+/// 经 `WM_HOTKEY` 派发的热键，服务端响应之后这个键该怎么交还宿主。
+///
+/// 系统热键一旦命中，原键就被系统吃下、宿主永远看不到；服务端回「交还宿主」类响应
+/// （`ClearCompositionThenPassThrough` / `PassThrough`，如联想态的 Ctrl+数字）时，只能
+/// 自己注入一次原键。
+///
+/// - `candidateSegment`：只管候选热键段。加词段（GLOBAL 热键）在候选消失后照旧注册着，
+///   注入的键会被自己再次拦下。
+/// - `active`：候选热键此刻还注册着就**必须先注销**再注入，否则注入的键同样被拦回来、
+///   派发再回 PassThrough，无限循环。`ClearCompositionThenPassThrough` 在响应处理里已收掉
+///   候选（随之注销）；`PassThrough` 不收候选，注销后靠下一次候选出现重新注册。
+inline GiveBack OnHotkeyDispatched(bool candidateSegment, bool giveBack, bool active)
+{
+    if (!candidateSegment || !giveBack) return GiveBack::None;
+    return active ? GiveBack::UnregisterThenReplay : GiveBack::Replay;
+}
+
 } // namespace candhotkey
 } // namespace wind
