@@ -298,6 +298,35 @@ fn temp_pinyin_pin_template_keeps_input() {
     let _ = std::fs::remove_file(&path);
 }
 
+/// 空缓冲的 overlay（直达热键进的临拼，不写引导符）同样吃键：结局恒为 Consumed，
+/// 不因「没有待输入」改回透传。
+#[test]
+fn empty_overlay_pin_template_is_consumed() {
+    skip_without_data!();
+    let mut cfg = config();
+    cfg.input.temp_pinyin.enabled = true;
+    cfg.input.temp_pinyin.hotkey = "ctrl+shift+p".into();
+    let coord = Coordinator::new_headless(cfg, Some(&data_dir()));
+    coord.handle_key_event(&key(u32::from(b'P'), MOD_CTRL | MOD_SHIFT));
+    assert_eq!(
+        coord.debug_active_mode(),
+        Some("temp_pinyin"),
+        "前提：直达热键进临拼"
+    );
+    assert!(
+        coord.debug_page_texts().is_empty(),
+        "前提：缓冲为空、无候选"
+    );
+    for mods in [MOD_CTRL, MOD_CTRL | MOD_SHIFT] {
+        let act = coord.handle_key_event(&key(u32::from(b'3'), mods));
+        assert!(
+            matches!(act, KeyAction::Consumed),
+            "mods=0x{mods:X} 应吃键，实得 {act:?}"
+        );
+        assert_eq!(coord.debug_active_mode(), Some("temp_pinyin"), "仍在临拼");
+    }
+}
+
 /// 小键盘 Ctrl+数字（`numpad_behavior = direct`，键码 0x60..0x69）在快捷输入里同样选词。
 #[test]
 fn ctrl_numpad_digit_commits_in_quick_input() {
