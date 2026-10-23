@@ -2185,16 +2185,16 @@ mod candidate_tooltip_tests {
     }
 }
 
-/// 模糊音提示的分段透传：核心按 `hint` / `hint_scope` 给候选生成带提示正文，这里只验
+/// 模糊音提示的分段透传：核心按 `hint.enabled` / `hint.scope` 给候选生成带提示正文，这里只验
 /// 「拉取窗口带出分段、提示段角色 `fuzzy_hint`、关掉即空」。哪些候选该标在协调器测试里验。
 #[cfg(test)]
 mod fuzzy_hint_tests {
     use super::*;
-    use wind_config::FuzzyHintScope;
+    use wind_config::HintScope;
 
     /// 自造夹具：`pinguo` 精确命中「拼过」，in/ing 模糊命中「苹果」「平过」。
     /// ⚠️ 目录名带 pid：多会话并行跑测试时固定名会互删夹具。
-    fn core(tag: &str, hint: bool, scope: FuzzyHintScope) -> (MobileCore, std::path::PathBuf) {
+    fn core(tag: &str, hint: bool, scope: HintScope) -> (MobileCore, std::path::PathBuf) {
         let dir = std::env::temp_dir().join(format!("wind_mobile_fh_{tag}_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let schemas = dir.join("data/schemas");
@@ -2220,8 +2220,9 @@ mod fuzzy_hint_tests {
         let fz = &mut cfg.schema.pinyin.fuzzy;
         fz.enabled = true;
         fz.in_ing = true;
-        fz.hint = hint;
-        fz.hint_scope = scope;
+        let h = &mut cfg.input.correction.hint;
+        h.enabled = hint;
+        h.scope = scope;
         let (coord, _rx) = Coordinator::new_headless_with_ui_at(
             cfg,
             Some(&dir.join("data")),
@@ -2235,7 +2236,7 @@ mod fuzzy_hint_tests {
         (core, dir)
     }
 
-    fn pinguo(tag: &str, hint: bool, scope: FuzzyHintScope) -> CandidateWindow {
+    fn pinguo(tag: &str, hint: bool, scope: HintScope) -> CandidateWindow {
         let (m, dir) = core(tag, hint, scope);
         for ch in "pinguo".chars() {
             dispatch_key(&m.coord, ch.to_ascii_uppercase() as u32, 0);
@@ -2251,7 +2252,7 @@ mod fuzzy_hint_tests {
 
     #[test]
     fn candidates_carry_hint_segments() {
-        let w = pinguo("on", true, FuzzyHintScope::First);
+        let w = pinguo("on", true, HintScope::First);
         assert_eq!(w.text_segments.len(), w.items.len(), "与 items 一一对应");
         assert_eq!(w.items[0], "拼过", "前提：首选是精确命中：{:?}", w.items);
         assert!(w.text_segments[0].is_empty(), "精确命中不分段");
@@ -2278,7 +2279,7 @@ mod fuzzy_hint_tests {
 
     #[test]
     fn candidates_hint_scope_all_segments_every_fuzzy() {
-        let w = pinguo("all", true, FuzzyHintScope::All);
+        let w = pinguo("all", true, HintScope::All);
         let at = w
             .items
             .iter()
@@ -2289,7 +2290,7 @@ mod fuzzy_hint_tests {
 
     #[test]
     fn candidates_hint_off_no_segments() {
-        let w = pinguo("off", false, FuzzyHintScope::All);
+        let w = pinguo("off", false, HintScope::All);
         assert!(w.items.iter().any(|t| t == "苹果"), "{:?}", w.items);
         assert!(w.text_segments.iter().all(Vec::is_empty));
     }

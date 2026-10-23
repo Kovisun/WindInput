@@ -102,7 +102,7 @@ fn toned_reading(reverse: &wind_reverse::ReverseLookup, ch: char, syl: &str) -> 
     if t.is_empty() { syl.to_string() } else { t }
 }
 
-/// `hint_tone`（§9.1）：提示里的正确音节换成带调读音。`hints` 是引擎文字 `text` 的字下标。
+/// `hint.tone`（§9.1）：提示里的正确音节换成带调读音。`hints` 是引擎文字 `text` 的字下标。
 pub(crate) fn toned_hints(
     text: &str,
     hints: &[FuzzyHint],

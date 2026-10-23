@@ -379,12 +379,6 @@ uan_uang = false
 # 韵母组（un/eng 与 ong）
 un_ong = false
 eng_ong = false
-# 显示正确拼音：模糊命中的候选正文内嵌正确全拼并着色（「苹(ping)果」）。仅模糊音 enabled 时生效。
-hint = false
-# 提示范围：first = 只标第一个带提示的候选；all = 标全部。
-hint_scope = "first"
-# 提示带声调（「苹(píng)果」）；注释变量 ${fuzzy_pinyin} 同样跟随。
-hint_tone = false
 
 # 拼音调频（衰减参数；三个数值 0 = 用词频 store 的内置默认）。
 [schema.pinyin.frequency]
@@ -782,6 +776,47 @@ password_force_english = true
 page_end_key = true
 # 放宽放出来的候选的前缀标注（空串=不标注），用于与正常候选区分。
 prefix = "·"
+
+# 拼音纠错与正确拼音提示。
+[input.correction]
+# 纠错总开关：打错的拼音（如 gn、on）按纠正后的拼写出候选。
+enabled = true
+# 纠错候选的标记，加在候选文字后；留空 = 不加。
+marker = "*"
+# 自定义纠错，每项 "错误=正确"，如 ["ogn=ong"]。
+custom = []
+
+[input.correction.rules]
+# ng 打成 gn（ogn → ong）。
+gn_ng = true
+# 漏打 g（on → ong）。
+on_ong = true
+# 韵母字母颠倒（ia ↔ ai、ie ↔ ei 等）。
+vowel_swap = true
+# 旧式拼写（uei / iou / uen → ui / iu / un）。
+legacy_spelling = false
+# h 错位（hz → zh、zih → zhi）。
+h_misplaced = false
+# ng 打成 mg。
+mg_ng = false
+# ng 打成 nag / neg / nig / nog。
+n_before_g = false
+# 简拼冲突类（qai → qia、nu → un 等）；容易误纠，默认关。
+ai_ia = false
+
+[input.correction.hint]
+# 显示正确拼音：命中的候选正文内嵌正确全拼并着色（「苹(ping)果」）。
+enabled = false
+# 模糊音命中时提示。
+fuzzy = true
+# 易读错的字提示。
+misread = true
+# 纠错命中时提示。
+correction = false
+# 提示范围：first = 只标第一个带提示的候选；all = 标全部。
+scope = "first"
+# 提示带声调（「苹(píng)果」）；注释变量 ${fuzzy_pinyin} 同样跟随。
+tone = false
 
 # 联想：上屏之后按**刚上屏的内容**给候选，而不是按编码。
 #
@@ -1463,7 +1498,7 @@ comment_enabled = true
 #                      双拼方案」回退，一个双拼方案都没装才恒空
 #   pinyin             带声调注音 nǐ hǎo（多音字按词典消歧：「行长」得 háng zhǎng 而非 xíng cháng）
 #   fuzzy_pinyin       模糊音命中的候选的整词正确拼音 zhong guo，其余候选为空；
-#                      带调随 schema.pinyin.fuzzy.hint_tone，不依赖 hint 开关
+#                      带调随 input.correction.hint.tone，不依赖 hint 开关
 #   chaizi             拆字字根串，仅单字候选（需方案配了 [engine.chaizi]）
 #   chaizi_code        该字在拆字库里的编码，仅单字候选
 #   chaizi_all[:分隔符] 拆字字根不限字数，默认空格连接；如 ${chaizi_all:／}（可能很长，慎用于横排）

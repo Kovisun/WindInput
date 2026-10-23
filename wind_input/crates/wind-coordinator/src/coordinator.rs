@@ -7583,7 +7583,7 @@ impl Coordinator {
             }
         };
         // 模糊音提示（「苹(ping)果」）：换算到显示文字、过了截断与前缀后的带提示正文。
-        let hint_tone = rt.config.schema.pinyin.fuzzy.hint_tone.then_some(&*reverse);
+        let hint_tone = rt.config.input.correction.hint.tone.then_some(&*reverse);
         let hint_styled = |c: &Candidate, full: &str, disp: &str| {
             self.cand_display_hints(state, c, full, hint_tone)
                 .map(|h| crate::fuzzy_hint_text::styled_for_shown(full, disp, prefix_of(c), &h))
@@ -7591,7 +7591,7 @@ impl Coordinator {
         };
         // 哪些候选标（`first` / `all`）见 `fuzzy_hint_texts`。
         let mut hint_texts =
-            self.fuzzy_hint_texts(state, &rt.config.schema.pinyin.fuzzy, start, end, |c| {
+            self.fuzzy_hint_texts(state, &rt.config.input.correction.hint, start, end, |c| {
                 let full = self.cand_display_text(state, c);
                 hint_styled(c, &full, &truncate(&full))
             });

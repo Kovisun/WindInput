@@ -1164,7 +1164,7 @@ mod tests {
         c.input.default.chinese_mode = true;
         c.schema.pinyin.fuzzy.enabled = true;
         c.schema.pinyin.fuzzy.zh_z = true;
-        c.schema.pinyin.fuzzy.hint = false;
+        c.input.correction.hint.enabled = false;
         (dir, c)
     }
 

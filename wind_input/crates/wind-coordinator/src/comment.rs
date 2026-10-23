@@ -1566,11 +1566,11 @@ impl crate::coordinator::Coordinator {
                 |t, syls| reverse.toned_pinyin_of(t, syls, SYLLABLE_SEP),
             ),
             // `fuzzy_pinyin` —— 模糊音救回来的候选的整词正确拼音（`zhong guo`），带调随
-            // `[schema.pinyin.fuzzy] hint_tone`。只在候选带模糊音提示时有值，不受 `hint_scope`
+            // `[input.correction.hint] tone`。只在候选带模糊音提示时有值，不受 `hint.scope`
             // 约束；引擎在模板引用它时即使 `hint` 关着也会算提示（`DataNeeds::fuzzy_pinyin`）。
             "fuzzy_pinyin" => {
-                let tone = !c.meta.fuzzy_hints.is_empty()
-                    && self.rt().config.schema.pinyin.fuzzy.hint_tone;
+                let tone =
+                    !c.meta.fuzzy_hints.is_empty() && self.rt().config.input.correction.hint.tone;
                 crate::fuzzy_hint_text::fuzzy_pinyin_text(c, tone.then_some(reverse))
             }
             "chaizi" if single => reverse.radicals_of(&c.text, ""),

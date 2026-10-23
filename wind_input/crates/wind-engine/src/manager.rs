@@ -620,6 +620,8 @@ pub struct EngineManager {
     single_char_used: std::sync::atomic::AtomicU64,
     /// 全局拼音配置（fuzzy/code_hint_source/...）。Mutex 以支持热重载。
     pinyin: Mutex<wind_config::config::PinyinGlobalConfig>,
+    /// 正确拼音提示配置（`[input.correction.hint]`），与 `pinyin` 一同决定 [`fuzzy_hint_on`]。
+    hint_cfg: Mutex<wind_config::PinyinHintConfig>,
     /// 有模板引用 `${fuzzy_pinyin}`（协调器按全部模板位判定后告知，见
     /// [`Self::set_fuzzy_pinyin_in_templates`]）：`hint` 关着也要让拼音引擎算模糊音提示。
     fuzzy_pinyin_in_templates: std::sync::atomic::AtomicBool,
@@ -1011,9 +1013,11 @@ impl EngineManager {
             single_char_codes: Mutex::new(None),
             single_char_used: std::sync::atomic::AtomicU64::new(0),
             pinyin: Mutex::new(config.schema.pinyin.clone()),
+            hint_cfg: Mutex::new(config.input.correction.hint.clone()),
             fuzzy_pinyin_in_templates: std::sync::atomic::AtomicBool::new(false),
             fuzzy_hint: crate::pinyin::fuzzy::HintSwitch::new(fuzzy_hint_on(
                 &config.schema.pinyin.fuzzy,
+                &config.input.correction.hint,
                 false,
             )),
             shuangpin_finals_cache: Mutex::new((String::new(), None)),
@@ -4524,6 +4528,8 @@ impl EngineManager {
             .unwrap_or_else(|e| e.into_inner()) = config.schema.primary_pinyin.clone();
         // 全局拼音配置变更：更新缓存，引擎缓存随下方 clear() 一起失效，下次按新配置重建。
         *self.pinyin.lock().unwrap_or_else(|e| e.into_inner()) = config.schema.pinyin.clone();
+        *self.hint_cfg.lock().unwrap_or_else(|e| e.into_inner()) =
+            config.input.correction.hint.clone();
         self.refresh_fuzzy_hint();
         // 丢弃缓存：引擎按新上屏策略/词典重建，名称/词频按新方案重读。
         {
@@ -5133,7 +5139,9 @@ impl EngineManager {
             .fuzzy_pinyin_in_templates
             .load(std::sync::atomic::Ordering::Relaxed);
         let pinyin = self.pinyin.lock().unwrap_or_else(|e| e.into_inner());
-        self.fuzzy_hint.set(fuzzy_hint_on(&pinyin.fuzzy, tpl));
+        let hint = self.hint_cfg.lock().unwrap_or_else(|e| e.into_inner());
+        self.fuzzy_hint
+            .set(fuzzy_hint_on(&pinyin.fuzzy, &hint, tpl));
     }
 
     /// 拼音引擎当前是否算模糊音提示（诊断 / 测试用）。
@@ -8746,10 +8754,14 @@ fn fuzzy_config_from_global(
     }
 }
 
-/// 引擎算不算模糊音提示：正文内嵌（`f.hint`）或模板引用 `${fuzzy_pinyin}`（`fuzzy_pinyin_tpl`）
-/// 任一要它就算，`enabled` 作总开关；内嵌与否由协调器只按 `f.hint` 判。
-fn fuzzy_hint_on(f: &wind_config::PinyinFuzzy, fuzzy_pinyin_tpl: bool) -> bool {
-    f.enabled && (f.hint || fuzzy_pinyin_tpl)
+/// 引擎算不算模糊音提示：正文内嵌（`hint.enabled`）或模板引用 `${fuzzy_pinyin}`（`fuzzy_pinyin_tpl`）
+/// 任一要它就算，模糊音 `enabled` 与 `hint.fuzzy` 作总开关；内嵌与否由协调器只按 `hint` 判。
+fn fuzzy_hint_on(
+    f: &wind_config::PinyinFuzzy,
+    hint: &wind_config::PinyinHintConfig,
+    fuzzy_pinyin_tpl: bool,
+) -> bool {
+    f.enabled && hint.fuzzy && (hint.enabled || fuzzy_pinyin_tpl)
 }
 
 #[cfg(test)]
@@ -8774,18 +8786,30 @@ mod tests {
         assert!(!reverse_index_keeps("old", "stroke", "wubi86", &pins));
     }
 
-    /// 引擎算提示的条件：`enabled && (hint || 模板引用 ${fuzzy_pinyin})`；总开关关时恒不算。
+    /// 引擎算提示的条件：`enabled && hint.fuzzy && (hint.enabled || 模板引用 ${fuzzy_pinyin})`；
+    /// 任一总开关关时恒不算。
     #[test]
     fn fuzzy_hint_on_truth_table() {
-        for hint in [false, true] {
-            for tpl in [false, true] {
-                let mut f = wind_config::PinyinFuzzy {
-                    hint,
-                    ..Default::default()
-                };
-                assert!(!fuzzy_hint_on(&f, tpl), "enabled 关：hint={hint} tpl={tpl}");
-                f.enabled = true;
-                assert_eq!(fuzzy_hint_on(&f, tpl), hint || tpl, "hint={hint} tpl={tpl}");
+        for enabled in [false, true] {
+            for hint_fuzzy in [false, true] {
+                for hint_on in [false, true] {
+                    for tpl in [false, true] {
+                        let f = wind_config::PinyinFuzzy {
+                            enabled,
+                            ..Default::default()
+                        };
+                        let h = wind_config::PinyinHintConfig {
+                            enabled: hint_on,
+                            fuzzy: hint_fuzzy,
+                            ..Default::default()
+                        };
+                        assert_eq!(
+                            fuzzy_hint_on(&f, &h, tpl),
+                            enabled && hint_fuzzy && (hint_on || tpl),
+                            "enabled={enabled} fuzzy={hint_fuzzy} hint={hint_on} tpl={tpl}"
+                        );
+                    }
+                }
             }
         }
     }
@@ -8805,7 +8829,7 @@ mod tests {
         assert_eq!(m.engines_generation(), built, "翻转不该清表重建");
 
         cfg.schema.pinyin.fuzzy.enabled = false;
-        cfg.schema.pinyin.fuzzy.hint = true;
+        cfg.input.correction.hint.enabled = true;
         m.reload_from_config(&cfg);
         m.set_fuzzy_pinyin_in_templates(true);
         assert!(!m.fuzzy_hint_active(), "总开关关：恒 false");

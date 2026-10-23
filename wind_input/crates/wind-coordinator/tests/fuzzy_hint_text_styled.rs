@@ -1,4 +1,4 @@
-//! 模糊音提示的显示正文：协调器按 `meta.fuzzy_hints` 与 `hint_scope` 生成
+//! 模糊音提示的显示正文：协调器按 `meta.fuzzy_hints` 与 `hint.scope` 生成
 //! `CandidateItem.text_styled`（「苹(ping)果」，`(ping)` 段角色 `fuzzy_hint`），上屏文字不变。
 //!
 //! 自造夹具，不依赖 `build_dev/data`：`pinguo` 精确命中「拼过」，in/ing 模糊命中「苹果」「平过」。
@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::Receiver;
 use wind_bridge::handler::{CaretData, KeyAction, KeyEventData, MessageHandler};
-use wind_config::{Config, FuzzyHintScope};
+use wind_config::{Config, HintScope};
 use wind_coordinator::Coordinator;
 use wind_ipc::protocol::{EVENT_KEY_DOWN, caret_source};
 use wind_ui_types::{CandidateItem, UiCommand};
@@ -48,14 +48,14 @@ fn fixture_with(tag: &str, dict: &str) -> Fixture {
     Fixture { dir }
 }
 
-fn open(f: &Fixture, hint: bool, scope: FuzzyHintScope) -> (Arc<Coordinator>, Receiver<UiCommand>) {
+fn open(f: &Fixture, hint: bool, scope: HintScope) -> (Arc<Coordinator>, Receiver<UiCommand>) {
     open_with(f, hint, scope, |_| {})
 }
 
 fn open_with(
     f: &Fixture,
     hint: bool,
-    scope: FuzzyHintScope,
+    scope: HintScope,
     edit: impl FnOnce(&mut Config),
 ) -> (Arc<Coordinator>, Receiver<UiCommand>) {
     let mut c = Config::default();
@@ -65,8 +65,9 @@ fn open_with(
     let fz = &mut c.schema.pinyin.fuzzy;
     fz.enabled = true;
     fz.in_ing = true;
-    fz.hint = hint;
-    fz.hint_scope = scope;
+    let h = &mut c.input.correction.hint;
+    h.enabled = hint;
+    h.scope = scope;
     edit(&mut c);
     Coordinator::new_headless_with_ui(c, Some(&f.dir))
 }
@@ -120,7 +121,7 @@ fn texts(items: &[CandidateItem]) -> Vec<&str> {
     items.iter().map(|c| c.text.as_str()).collect()
 }
 
-fn pinguo(tag: &str, hint: bool, scope: FuzzyHintScope) -> Vec<CandidateItem> {
+fn pinguo(tag: &str, hint: bool, scope: HintScope) -> Vec<CandidateItem> {
     let f = fixture(tag);
     let (coord, rx) = open(&f, hint, scope);
     type_str(&coord, "pinguo");
@@ -138,7 +139,7 @@ fn hint_span(c: &CandidateItem) -> Vec<(&str, Option<&str>)> {
 
 #[test]
 fn scope_first_marks_only_first_fuzzy() {
-    let items = pinguo("first", true, FuzzyHintScope::First);
+    let items = pinguo("first", true, HintScope::First);
     assert_eq!(
         items[0].text,
         "拼过",
@@ -159,7 +160,7 @@ fn scope_first_marks_only_first_fuzzy() {
 
 #[test]
 fn scope_all_marks_every_fuzzy() {
-    let items = pinguo("all", true, FuzzyHintScope::All);
+    let items = pinguo("all", true, HintScope::All);
     assert!(item(&items, "拼过").text_styled.is_empty());
     assert_eq!(item(&items, "苹果").text_styled.as_str(), "苹(ping)果");
     assert_eq!(item(&items, "平过").text_styled.as_str(), "平(ping)过");
@@ -167,7 +168,7 @@ fn scope_all_marks_every_fuzzy() {
 
 #[test]
 fn hint_off_text_styled_empty() {
-    let items = pinguo("off", false, FuzzyHintScope::All);
+    let items = pinguo("off", false, HintScope::All);
     assert!(
         items.iter().any(|c| c.text == "苹果"),
         "{:?}",
@@ -179,7 +180,7 @@ fn hint_off_text_styled_empty() {
 #[test]
 fn commit_text_unchanged() {
     let f = fixture("commit");
-    let (coord, rx) = open(&f, true, FuzzyHintScope::First);
+    let (coord, rx) = open(&f, true, HintScope::First);
     type_str(&coord, "pinguo");
     let items = shown(&coord, &rx);
     let pos = items
@@ -206,7 +207,7 @@ fn scope_first_skips_candidate_whose_hint_is_truncated_away() {
         "first_trunc",
         "平平\tping ping\t5000\n平品\tping pin\t3000\n品平\tpin ping\t100\n",
     );
-    let (coord, rx) = open_with(&f, true, FuzzyHintScope::First, |c| {
+    let (coord, rx) = open_with(&f, true, HintScope::First, |c| {
         c.ui.candidate.max_chars = 1;
     });
     type_str(&coord, "pingping");
@@ -221,7 +222,7 @@ fn scope_first_skips_candidate_whose_hint_is_truncated_away() {
 #[test]
 fn scope_first_later_pages_have_no_hint() {
     let f = fixture("first_pages");
-    let (coord, rx) = open_with(&f, true, FuzzyHintScope::First, |c| {
+    let (coord, rx) = open_with(&f, true, HintScope::First, |c| {
         c.ui.candidate.per_page = 2;
     });
     type_str(&coord, "pinguo");
@@ -257,13 +258,13 @@ fn write_pinyin_map(f: &Fixture) {
     .unwrap();
 }
 
-/// `hint_tone`（§9.1）：内嵌提示用词库音节筛读音表取调。
+/// `hint.tone`（§9.1）：内嵌提示用词库音节筛读音表取调。
 #[test]
 fn hint_tone_marks_toned_syllable() {
     let f = fixture("tone");
     write_pinyin_map(&f);
-    let (coord, rx) = open_with(&f, true, FuzzyHintScope::All, |c| {
-        c.schema.pinyin.fuzzy.hint_tone = true;
+    let (coord, rx) = open_with(&f, true, HintScope::All, |c| {
+        c.input.correction.hint.tone = true;
     });
     type_str(&coord, "pinguo");
     let items = shown(&coord, &rx);
@@ -276,8 +277,8 @@ fn hint_tone_marks_toned_syllable() {
 #[test]
 fn hint_tone_falls_back_to_plain_syllable_without_reading() {
     let f = fixture("tone_fb");
-    let (coord, rx) = open_with(&f, true, FuzzyHintScope::All, |c| {
-        c.schema.pinyin.fuzzy.hint_tone = true;
+    let (coord, rx) = open_with(&f, true, HintScope::All, |c| {
+        c.input.correction.hint.tone = true;
     });
     type_str(&coord, "pinguo");
     let items = shown(&coord, &rx);
@@ -290,9 +291,9 @@ const ZG: &str = "中国\tzhong guo\t3000\n宗\tzong\t100\n";
 fn zongguo(tag: &str, tone: bool) -> Vec<CandidateItem> {
     let f = fixture_with(tag, ZG);
     write_pinyin_map(&f);
-    let (coord, rx) = open_with(&f, false, FuzzyHintScope::First, |c| {
+    let (coord, rx) = open_with(&f, false, HintScope::First, |c| {
         c.schema.pinyin.fuzzy.zh_z = true;
-        c.schema.pinyin.fuzzy.hint_tone = tone;
+        c.input.correction.hint.tone = tone;
         c.ui.candidate.comment_template_vertical = "${fuzzy_pinyin}".into();
         c.ui.candidate.comment_template_horizontal = "${fuzzy_pinyin}".into();
     });
@@ -317,7 +318,7 @@ fn fuzzy_pinyin_var_fills_comment_without_inline_hint() {
     assert!(zg.text_styled.is_empty(), "hint 关：正文不内嵌");
 }
 
-/// 带调随 `hint_tone`。
+/// 带调随 `hint.tone`。
 #[test]
 fn fuzzy_pinyin_var_toned() {
     let items = zongguo("var_tone", true);
