@@ -53,7 +53,7 @@
 | eng ← en（仅 t/l） | 万象 | **冲突**：tena=te+na |
 | zh/ch/sh ← hz/hc/hs、zih/cih/sih | 雾凇、万象 | 简拼：h+zi |
 | ia ← ai（qai/xai） | 万象；雾凇注释掉 | 简拼：x'ai 喜爱 |
-| ai←ia（w/g/h/k）、ie←ei（w/f/g/h/k/z）、ei←ie（j/q/x）、ao←oa、ou←uo（y/p/f/m）、ui↔iu | 雾凇、万象 | 未发现 |
+| ai←ia（w/g/h/k）、ei←ie（w/f/g/h/k/z）、ie←ei（j/q/x）、ao←oa、ou←uo（y/p/f/m）、ui↔iu | 雾凇、万象 | 未发现 |
 | iao ← ioa/oia | 雾凇、万象 | 弱：xioa=xi+o+a |
 | un ← nu；an/en/in ← na/ne/ni | 万象启用 un←nu；雾凇全注释 | 简拼：dnu=d+nu |
 | ua/uai/uang/iang/ue 的各种换位 | 万象 | 未发现 |
@@ -156,7 +156,7 @@ tone = false
 |---|---|---|---|---|
 | `gn_ng` | ng 打成 gn（ogn→ong） | agn/egn/ign/ogn/iagn/uagn/iogn | 开 | 简拼下 xign 也可是 xi+g+n |
 | `on_ong` | 漏 g：on→ong | on→ong、ion→iong | 开 | lone 也可是 lo+ne |
-| `vowel_swap` | 韵母字母颠倒 | ai←ia（wghk）、ie←ei（wfghkz）、ei←ie（jqx）、ao←oa、ou←uo（ypfm）、ui↔iu、iao←ioa/oia、ua/uai/uang/iang/ue 的换位 | 开 | 无 |
+| `vowel_swap` | 韵母字母颠倒 | ai←ia（wghk）、ei←ie（wfghkz）、ie←ei（jqx）、ao←oa、ou←uo（ypfm）、ui↔iu、iao←ioa/oia、ua/uai/uang/iang/ue 的换位 | 开 | 无 |
 | `legacy_spelling` | 旧式拼写 uei/iou/uen | →ui/iu/un | 关 | liou 也可是 li+ou |
 | `h_misplaced` | h 错位（hz→zh、zih→zhi） | hz/hc/hs、zih/cih/sih | 关 | h+zi 是简拼 |
 | `mg_ng` | ng 打成 mg | mg→ng | 关 | m 是简拼首字母 |
