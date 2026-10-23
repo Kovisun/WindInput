@@ -8,6 +8,10 @@
 // ⚠️ 覆盖边界：这里只有判据。RegisterHotKey 本身与调用时机都在 TextService.cpp。
 #pragma once
 
+#include <cstdint>
+
+#include "ResponseType.h"
+
 namespace wind
 {
 namespace candhotkey
@@ -64,6 +68,29 @@ inline GiveBack OnHotkeyDispatched(bool candidateSegment, bool giveBack, bool ac
 {
     if (!candidateSegment || !giveBack) return GiveBack::None;
     return active ? GiveBack::UnregisterThenReplay : GiveBack::Replay;
+}
+
+/// 服务端这条响应是否要把当前键交还宿主。热键派发据此决定要不要注入原键。
+inline bool GivesBackToHost(ResponseType type)
+{
+    return type == ResponseType::PassThrough || type == ResponseType::ClearCompositionThenPassThrough;
+}
+
+// 通用修饰位，与 BinaryProtocol.h 的 KEYMOD_* 同值，TextService.cpp 里有 static_assert 钉住。
+inline constexpr std::uint32_t kModShift = 0x0001; // KEYMOD_SHIFT
+inline constexpr std::uint32_t kModCtrl = 0x0002;  // KEYMOD_CTRL
+inline constexpr std::uint32_t kModAlt = 0x0004;   // KEYMOD_ALT
+inline constexpr std::uint32_t kModWin = 0x0008;   // KEYMOD_WIN
+
+/// 注入原键前，热键要求的修饰键是否都还按着。
+///
+/// 注入只发主键，修饰键靠物理按着叠上去；同步 IPC 期间用户若已松开其中一个，注入出去的
+/// 就成了另一个键（Ctrl+1 变成裸 1 打进文档）。此时宁可丢键，也不补注修饰键——补注的
+/// Ctrl 会被当成一次 Ctrl 轻敲，误切中英。只看通用位，左右位不参与。
+inline bool RequiredModifiersHeld(std::uint32_t required, std::uint32_t held)
+{
+    const std::uint32_t need = required & (kModShift | kModCtrl | kModAlt | kModWin);
+    return (held & need) == need;
 }
 
 } // namespace candhotkey
