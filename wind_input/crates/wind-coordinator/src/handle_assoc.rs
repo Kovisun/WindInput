@@ -958,7 +958,7 @@ impl Coordinator {
     /// # 三道守卫
     ///
     /// - **只在 keydown**（守在调用点）：`ClearCompositionThenPassThrough` 的「交还按键」
-    ///   靠 C++ `_pendingReplayToHost`，而它只在 `OnKeyDown` 消费。理由同
+    ///   靠 C++ 在按键入口重放，只在 `OnKeyDown` / `DispatchHotkey` 消费。理由同
     ///   [`Self::adopt_orphaned_placeholder`]。
     /// - **纯修饰键与 CapsLock 除外**：按住 Shift 准备打 Shift+字母时，光按下修饰键不该
     ///   把联想窗收掉。Windows 侧这类 keydown 压根不转发（`OnTestKeyDown` 的

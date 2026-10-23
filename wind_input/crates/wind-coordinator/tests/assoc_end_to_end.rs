@@ -990,7 +990,10 @@ fn assoc_candidate_hotkeys_close_window_and_reach_host() {
         eprintln!("!!! 跳过：build_dev 词库不存在");
         return;
     }
-    let c = coord("word", "wubi86_pinyin");
+    let c = coord_tweak("word", "wubi86_pinyin", |cfg| {
+        cfg.keys.pin_candidate = "ctrl+number".into();
+        cfg.keys.delete_candidate = "ctrl+shift+number".into();
+    });
     for (mods, name) in [(MOD_CTRL, "Ctrl+1"), (MOD_CTRL | MOD_SHIFT, "Ctrl+Shift+1")] {
         enter_assoc(&c);
         match c.handle_key_event_policed(&key_event_mods(0x31, mods)) {
@@ -1012,14 +1015,17 @@ fn assoc_alt_digit_stays_with_alt_commit() {
     }
     let c = coord_tweak("word", "wubi86_pinyin", |cfg| {
         cfg.input.alt_commit = "pinyin".into();
+        cfg.keys.pin_candidate = "ctrl+number".into();
+        cfg.keys.delete_candidate = "ctrl+shift+number".into();
     });
     enter_assoc(&c);
     match c.handle_key_event_policed(&key_event_mods(0x31, MOD_ALT)) {
-        KeyAction::ClearCompositionThenPassThrough | KeyAction::PassThrough => {
-            panic!("联想态 Alt+1 应由 alt_commit 接走")
+        KeyAction::InsertText { text, .. } => {
+            assert!(!text.is_empty(), "联想态 Alt+1 应上屏该候选的拼音")
         }
-        _ => {}
+        other => panic!("联想态 Alt+1 应由 alt_commit 上屏，实得 {other:?}"),
     }
+    assert!(assoc_texts(&c).is_empty(), "Alt+1 上屏后联想窗该收起");
 }
 
 /// ★★★ **用户报障**：联想窗弹出时按 Shift+字母想打英文，字母却落进了中文码表缓冲。
