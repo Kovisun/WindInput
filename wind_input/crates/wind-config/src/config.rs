@@ -5360,9 +5360,14 @@ pub struct KeysConfig {
     /// 只在快捷输入里生效、且先于置顶/删除判定：快捷输入的候选没有词库落点，置顶本就
     /// 无从谈起，而数字键常被算式/字面输入占着，候选一多就没有别的选词通路。
     ///
-    /// ★ 不进 TSF 热键表：快捷输入期间恒有组合，TSF 对会话中的 Ctrl/Alt 组合一律先吃下
-    /// 转发（cleanup 通路），本键在那条路上即可送达；登记进 SESSION 表会让主输入路也吃掉它，
-    /// 而主输入路对它没有出口。
+    /// ★ 本键自己不进 TSF 热键表，送达靠两条现成通路：
+    /// - 与置顶/删除**同模板**（出厂即是）：借它们的 SESSION 热键送达；候选可见时那批键被
+    ///   `RegisterHotKey` 抢成系统热键，走 WM_HOTKEY → `DispatchHotkey`（非按键上下文上屏）。
+    /// - 模板不同：快捷输入期间恒有组合，TSF 对会话中未登记的 Ctrl/Alt 组合一律先吃下转发
+    ///   （cleanup 通路），上屏后不再交还宿主。代价是不受 `RegisterHotKey` 保护，QQNT 一类
+    ///   Chromium 宿主可能对同一键再触发一次加速键。
+    ///
+    /// 不单独登记的理由：登记进 SESSION 表会让主输入路也吃掉它，而主输入路对它没有出口。
     #[serde(default = "default_quick_input_select")]
     pub quick_input_select: String,
     #[serde(default = "default_take_screenshot")]
