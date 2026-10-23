@@ -87,6 +87,11 @@ pub(crate) use wind_candidate::candidate_display_order;
 /// 拼音「英文前缀补全」补出来的英文（`meta.from_prefix_complete`）再往后让一段：让过紧随
 /// 其后、吃满整串的拼音真词（`xiaom` 的「小米」），理由见函数内注释。
 ///
+/// `pinyin_words_lead`（只在拼音方案为真）：开头段为空、而首选是**吃满整串、全为常用字的
+/// 拼音真词**时（简拼解出来的也算：`bus` 的「不是」、`rug` 的「如果」），开头段算上它这一条；
+/// 引擎合成的拼凑句仍不算。码表 / 混输传 `false`：码表的开头段语义是「码 == 输入」，混输的
+/// 跨来源档位另有仲裁。
+///
 /// ⚠️ **取开头的连续段，不是 `rposition`**。用「最后一条常用精确解」作锚会让英文被推到
 /// 列表深处——词频重排可能把某条常用词提到很靠后的位置之后，那条就成了锚。连续段是
 /// 有界的，且与「用户第一屏看到什么」这个真实关切对齐。
@@ -102,6 +107,7 @@ pub(crate) fn place_english_after_common_exact(
     candidates: &mut Vec<Candidate>,
     input: &str,
     positions: (usize, usize),
+    pinyin_words_lead: bool,
 ) {
     if input.is_empty()
         || !candidates
@@ -140,18 +146,32 @@ pub(crate) fn place_english_after_common_exact(
     // 仍是吃满整串、全为常用字的一种完整解读，此前一直算在开头那段里——不补这一条，
     // `hell` 的英文前缀补全 `hello` 就会插到「哈额乐乐」前面（审查查出）。混输的跨来源
     // 档位刻意不跟着改：那里它就该在拼音非精确档，两件事只在本函数里分开。
+    let whole_pinyin = |c: &Candidate| {
+        c.source == CandidateSource::Pinyin
+            && c.is_common
+            && wind_candidate::effective_consumed(c, input.len()) >= input.len()
+    };
     let leads_as_exact = |c: &Candidate| {
         wind_candidate::source_tier(c, input) <= 1
-            || (c.is_sentence
-                && c.is_abbrev
-                && c.source == CandidateSource::Pinyin
-                && c.is_common
-                && wind_candidate::effective_consumed(c, input.len()) >= input.len())
+            || (c.is_sentence && c.is_abbrev && whole_pinyin(c))
     };
-    let lead = rest
+    let mut lead = rest
         .iter()
         .take_while(|c| leads_as_exact(c) && !(english_exact && c.is_synthesized))
         .count();
+    // 拼音方案：首选是吃满整串的常用拼音真词（非引擎合成）时，英文让过它这一条。`bus` 的
+    // 「不是」、`rug` 的「如果」是简拼残码命中、不在精确档，却是词库里实打实的词。
+    //
+    // ⚠️ 只让首选一条，不是整段：简拼下吃满整串的真词成片出现（`bus` 的 不是 / 不少 / 不算…
+    // 全都吃满 3 码），按连续段让的话英文会被推出首页。
+    if pinyin_words_lead
+        && lead == 0
+        && rest
+            .first()
+            .is_some_and(|c| !c.is_synthesized && whole_pinyin(c))
+    {
+        lead = 1;
+    }
     let floor = |p: usize| p.saturating_sub(1).min(rest.len());
     let pos = lead.max(floor(positions.0));
     // ★ 拼音「英文前缀补全」补出来的英文（`meta.from_prefix_complete`，只有
@@ -1794,7 +1814,16 @@ impl Coordinator {
         } else {
             self.engine_mgr.active_english_positions()
         };
-        place_english_after_common_exact(&mut candidates, &state.input_buffer, english_positions);
+        // 吃满整串的拼音真词算进开头段只对拼音方案成立（混输分段续转也不算）。
+        let pinyin_words_lead = !via_mixed_pinyin
+            && self.engine_mgr.current_engine_type()
+                == Some(wind_engine::engine::EngineType::Pinyin);
+        place_english_after_common_exact(
+            &mut candidates,
+            &state.input_buffer,
+            english_positions,
+            pinyin_words_lead,
+        );
         // 整句 N-best 块（仅 `sentence_count > 1`）：放在上面两道重排之后、shadow 之前，
         // 理由见 `place_sentence_block`。
         place_sentence_block(
@@ -7394,7 +7423,7 @@ mod english_placement_tests {
             zh("𬣳", "hen", false, 3),
             en("hen", "hen"),
         ];
-        place_english_after_common_exact(&mut v, "hen", (1, 1));
+        place_english_after_common_exact(&mut v, "hen", (1, 1), false);
         assert_eq!(
             texts(&v),
             vec!["很", "恨", "狠", "痕", "hen", "佷", "𬣳"],
@@ -7418,7 +7447,7 @@ mod english_placement_tests {
             zh("喝", "he", true, 2),
             en("hello", "hello"),
         ];
-        place_english_after_common_exact(&mut v, "hello", (1, 1));
+        place_english_after_common_exact(&mut v, "hello", (1, 1), false);
         assert_eq!(texts(&v), vec!["和理论哦", "hello", "和", "喝"]);
     }
 
@@ -7431,7 +7460,7 @@ mod english_placement_tests {
             zh("国", "gi", true, 2),
             en("git", "git"),
         ];
-        place_english_after_common_exact(&mut v, "git", (1, 2));
+        place_english_after_common_exact(&mut v, "git", (1, 2), false);
         assert_eq!(texts(&v), vec!["git", "工", "国"]);
     }
 
@@ -7449,15 +7478,15 @@ mod english_placement_tests {
         };
         // 出厂：完整单词第 1、补全第 2。
         let mut v = thin();
-        place_english_after_common_exact(&mut v, "hell", (1, 2));
+        place_english_after_common_exact(&mut v, "hell", (1, 2), false);
         assert_eq!(texts(&v), vec!["hell", "hello", "和", "喝", "贺"]);
         // 补全压到第 4。
         let mut v = thin();
-        place_english_after_common_exact(&mut v, "hell", (1, 4));
+        place_english_after_common_exact(&mut v, "hell", (1, 4), false);
         assert_eq!(texts(&v), vec!["hell", "和", "喝", "hello", "贺"]);
         // 完整单词下限比补全的还靠后：补全跟在完整单词之后，不越过它。
         let mut v = thin();
-        place_english_after_common_exact(&mut v, "hell", (3, 1));
+        place_english_after_common_exact(&mut v, "hell", (3, 1), false);
         assert_eq!(texts(&v), vec!["和", "喝", "hell", "hello", "贺"]);
 
         // 开头 4 条完整匹配常用字：让过它们后已在第 5 位，下限 2 不把它往前拉。
@@ -7472,16 +7501,16 @@ mod english_placement_tests {
             ]
         };
         let mut v = common();
-        place_english_after_common_exact(&mut v, "hen", (2, 2));
+        place_english_after_common_exact(&mut v, "hen", (2, 2), false);
         assert_eq!(texts(&v), vec!["很", "恨", "狠", "痕", "hen", "佷"]);
         // 下限超过中文条数：落在末尾。
         let mut v = common();
-        place_english_after_common_exact(&mut v, "hen", (9, 9));
+        place_english_after_common_exact(&mut v, "hen", (9, 9), false);
         assert_eq!(texts(&v), vec!["很", "恨", "狠", "痕", "佷", "hen"]);
 
         // 中文侧为空：无处可让，英文照旧居首。
         let mut v = vec![en("GitHub", "github")];
-        place_english_after_common_exact(&mut v, "github", (2, 2));
+        place_english_after_common_exact(&mut v, "github", (2, 2), false);
         assert_eq!(texts(&v), vec!["GitHub"]);
     }
 
@@ -7494,7 +7523,7 @@ mod english_placement_tests {
             zh("贺", "he", true, 2),
             completion("hello", "hello"),
         ];
-        place_english_after_common_exact(&mut v, "hell", (5, 2));
+        place_english_after_common_exact(&mut v, "hell", (5, 2), false);
         assert_eq!(texts(&v), vec!["和", "hello", "喝", "贺"]);
     }
 
@@ -7509,7 +7538,7 @@ mod english_placement_tests {
             en("xiaom", "xiaom"),
             completion("Xiaomi", "xiaomi"),
         ];
-        place_english_after_common_exact(&mut v, "xiaom", (2, 1));
+        place_english_after_common_exact(&mut v, "xiaom", (2, 1), false);
         assert_eq!(
             texts(&v),
             vec!["小", "xiaom", "小米", "消灭", "Xiaomi", "晓"]
@@ -7526,7 +7555,7 @@ mod english_placement_tests {
             en("hen", "hen"),
             completion("henry", "henry"),
         ];
-        place_english_after_common_exact(&mut v, "hen", (1, 2));
+        place_english_after_common_exact(&mut v, "hen", (1, 2), false);
         assert_eq!(texts(&v), vec!["很", "恨", "hen", "henry", "和"]);
     }
 
@@ -7540,7 +7569,7 @@ mod english_placement_tests {
             en("Hell", "hell"),
             completion("hello", "hello"),
         ];
-        place_english_after_common_exact(&mut v, "hell", (1, 2));
+        place_english_after_common_exact(&mut v, "hell", (1, 2), false);
         assert_eq!(texts(&v), vec!["hell", "Hell", "hello", "和", "喝"]);
     }
 
@@ -7548,7 +7577,7 @@ mod english_placement_tests {
     #[test]
     fn english_first_when_no_chinese() {
         let mut v = vec![en("GitHub", "github")];
-        place_english_after_common_exact(&mut v, "github", (1, 1));
+        place_english_after_common_exact(&mut v, "github", (1, 1), false);
         assert_eq!(texts(&v), vec!["GitHub"]);
     }
 
@@ -7568,7 +7597,7 @@ mod english_placement_tests {
         ];
         let mut v = base.clone();
         v.push(en("hen", "hen"));
-        place_english_after_common_exact(&mut v, "hen", (1, 1));
+        place_english_after_common_exact(&mut v, "hen", (1, 1), false);
 
         let non_en: Vec<&str> = v
             .iter()
@@ -7601,6 +7630,42 @@ mod english_placement_tests {
         }
     }
 
+    /// 拼音方案：首选是吃满整串的简拼真词（`bus` 的「不是」）时英文让到它后面；
+    /// 拼凑句不算；码表 / 混输（`false`）不受影响。
+    #[test]
+    fn pinyin_whole_word_leads_only_for_pinyin_schema() {
+        let abbrev = |t: &str| Candidate {
+            is_abbrev: true,
+            ..zh(t, "bus", true, 3)
+        };
+        let fresh = || {
+            vec![
+                abbrev("不是"),
+                abbrev("不少"),
+                zh("不", "bu", true, 2),
+                en("bus", "bus"),
+            ]
+        };
+        let mut v = fresh();
+        place_english_after_common_exact(&mut v, "bus", (1, 1), true);
+        assert_eq!(
+            texts(&v),
+            vec!["不是", "bus", "不少", "不"],
+            "只让首选那一条：吃满整串的简拼词成片出现，整段让会把英文推出首页"
+        );
+        let mut v = fresh();
+        place_english_after_common_exact(&mut v, "bus", (1, 1), false);
+        assert_eq!(texts(&v)[0], "bus", "码表 / 混输口径不变");
+
+        let mut v = vec![
+            mixed_sentence("和理论哦", "hello", 5),
+            zh("和", "he", true, 2),
+            en("hello", "hello"),
+        ];
+        place_english_after_common_exact(&mut v, "hello", (1, 1), true);
+        assert_eq!(texts(&v)[0], "hello", "拼凑句仍不算开头段");
+    }
+
     /// ★ 整串是英文词时，引擎拼凑出来的整句让位给英文。
     ///
     /// 真机现场：开简拼后打 `hello` 出「和理论哦」、`book` 出「波哦看」、`work` 出
@@ -7613,7 +7678,7 @@ mod english_placement_tests {
             zh("喝", "he", true, 2),
             en("hello", "hello"),
         ];
-        place_english_after_common_exact(&mut v, "hello", (1, 1));
+        place_english_after_common_exact(&mut v, "hello", (1, 1), false);
         assert_eq!(
             texts(&v),
             vec!["hello", "和理论哦", "和", "喝"],
@@ -7636,7 +7701,7 @@ mod english_placement_tests {
             zh("大", "da", true, 2),
             en("data", "data"),
         ];
-        place_english_after_common_exact(&mut v, "data", (1, 1));
+        place_english_after_common_exact(&mut v, "data", (1, 1), false);
         assert_eq!(
             texts(&v),
             vec!["打他", "data", "大"],
@@ -7659,7 +7724,7 @@ mod english_placement_tests {
             // 英文候选的 code 比输入长 ⇒ 前缀命中，不是整串精确。
             en("hello", "hello"),
         ];
-        place_english_after_common_exact(&mut v, "hell", (1, 1));
+        place_english_after_common_exact(&mut v, "hell", (1, 1), false);
         assert_eq!(
             texts(&v),
             vec!["哈额乐乐", "hello"],
@@ -7683,7 +7748,7 @@ mod english_placement_tests {
             zh("小", "xiao", false, 4),
             completion("Xiaomi", "xiaomi"),
         ];
-        place_english_after_common_exact(&mut v, "xiaom", (1, 1));
+        place_english_after_common_exact(&mut v, "xiaom", (1, 1), false);
         assert_eq!(texts(&v), vec!["小米", "消灭", "Xiaomi", "小"]);
 
         // 中文侧只有残缺解读时，英文整块上前，块内保持原序。
@@ -7692,7 +7757,7 @@ mod english_placement_tests {
             en("table", "table"),
             completion("tables", "tables"),
         ];
-        place_english_after_common_exact(&mut v, "table", (1, 1));
+        place_english_after_common_exact(&mut v, "table", (1, 1), false);
         assert_eq!(texts(&v), vec!["table", "tables", "他"]);
     }
 
@@ -7709,7 +7774,7 @@ mod english_placement_tests {
             ..Default::default()
         };
         let mut v = vec![phrase.clone(), en("da", "da"), en("data", "data")];
-        place_english_after_common_exact(&mut v, "da", (1, 1));
+        place_english_after_common_exact(&mut v, "da", (1, 1), false);
         assert_eq!(
             texts(&v),
             vec!["da", "data", "大家好"],
@@ -7718,7 +7783,7 @@ mod english_placement_tests {
 
         // 带标记也只让拼音，不让短语。
         let mut v = vec![phrase, en("da", "da"), completion("data", "data")];
-        place_english_after_common_exact(&mut v, "da", (1, 1));
+        place_english_after_common_exact(&mut v, "da", (1, 1), false);
         assert_eq!(texts(&v), vec!["da", "data", "大家好"]);
     }
 
@@ -7727,7 +7792,7 @@ mod english_placement_tests {
     #[test]
     fn english_only_list_keeps_its_order() {
         let mut v = vec![en("hello", "hello"), en("hell", "hell")];
-        place_english_after_common_exact(&mut v, "hell", (1, 1));
+        place_english_after_common_exact(&mut v, "hell", (1, 1), false);
         assert_eq!(texts(&v), vec!["hello", "hell"]);
     }
 
@@ -7737,13 +7802,13 @@ mod english_placement_tests {
         let base = vec![zh("很", "hen", true, 3), zh("恨", "hen", true, 3)];
 
         let mut v = base.clone();
-        place_english_after_common_exact(&mut v, "hen", (1, 1));
+        place_english_after_common_exact(&mut v, "hen", (1, 1), false);
         assert_eq!(texts(&v), texts(&base), "无英文候选时不得改动列表");
 
         let mut v2 = base.clone();
         v2.push(en("hen", "hen"));
         let before = texts(&v2).iter().map(|s| s.to_string()).collect::<Vec<_>>();
-        place_english_after_common_exact(&mut v2, "", (1, 1));
+        place_english_after_common_exact(&mut v2, "", (1, 1), false);
         assert_eq!(texts(&v2), before, "空输入时早退，不得改动列表");
     }
 }
