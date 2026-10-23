@@ -186,8 +186,9 @@ tone = false
 - 候选新增事实字段 `is_corrected: bool`（语义只表达「经换位纠错命中」，**不编码排序或显示决策**，
   同 `is_scope_filtered` 的约定，见 `wind-candidate/src/candidate.rs:200`）。
 - 消费者：
-  - UI：按 `input.correction.marker` 加前缀（同「放宽候选标记」`input.scope_relax.prefix` 的实现方式），
-    颜色取角色 `pinyin_hint`，主题未配回退注释色；
+  - UI：按 `input.correction.marker` 加前缀，与命令前缀、「放宽候选标记」走同一个 `prefix_of`
+    （`coordinator.rs` 候选组装处），**与它们一样按正文色画、不单独着色**（本设计的判断：现有前缀都是纯文本，
+    单为它做分段着色不划算）。移动端拉取窗口目前不显示任何前缀标注（`candidate_pull.rs`），本轮同样不加，记为后续项；
   - 排序：D6；
   - 自动上屏：计数时跳过（防满码唯一自动上屏被纠错候选打断，同 `is_scope_filtered`）；
   - 学习/调频：正常（用户选了就是要这个词），写入 `learn_code`。
