@@ -7,7 +7,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock};
 
-use super::correction::{CorrectionRules, correction_edits};
+use super::correction::{CORRECTION_EDITS, CorrectionRules};
 
 /// 「算不算模糊音提示」的运行时开关：克隆共享同一份值，`EngineManager` 持有一份并注入各引擎，
 /// 翻转即时生效、无需重建引擎。提示只是 `convert` 收尾的后处理，不影响候选集合与排序。
@@ -60,7 +60,7 @@ pub struct FuzzyConfig {
     /// 竞争，不是「打错了」。与用户开的模糊组叠加时，后者照旧计处数。
     pub shared_key: HashMap<String, Vec<String>>,
     /// 字母换位纠错规则（[`CorrectionRules`]）。错误拼写并入 [`fuzzy_spellings`]，
-    /// [`FuzzyMatcher::fuzzy_variants_scored`] 对其追加正确音节、计 `correction_edits()` 处。
+    /// [`FuzzyMatcher::fuzzy_variants_scored`] 对其追加正确音节、计 [`CORRECTION_EDITS`] 处。
     /// 双拼方案恒空。
     pub correction: Arc<CorrectionRules>,
 }
@@ -513,7 +513,7 @@ impl FuzzyMatcher {
     /// 模糊组得到的变体照常计处数；同一变体多条来源取处数最小者。
     ///
     /// 换位纠错（[`FuzzyConfig::correction`]）也并在这里：`input` 是错误拼写时追加其正确音节，
-    /// 计 `correction_edits()` 处；纠错得到的音节**不再**做模糊组展开（一个音节最多一处编辑来源）。
+    /// 计 [`CORRECTION_EDITS`] 处；纠错得到的音节**不再**做模糊组展开（一个音节最多一处编辑来源）。
     pub fn fuzzy_variants_scored(input: &str, config: &FuzzyConfig) -> Vec<(String, usize)> {
         let mut variants = Self::group_variants_scored(input, config);
         let mut add = |variant: String, edits: usize| {
@@ -534,7 +534,7 @@ impl FuzzyMatcher {
             }
         }
         for correct in config.correction.corrections_of(input) {
-            add(correct.clone(), correction_edits());
+            add(correct.clone(), CORRECTION_EDITS);
         }
         variants
     }
@@ -618,7 +618,6 @@ impl FuzzyMatcher {
 
 #[cfg(test)]
 mod tests {
-    use super::super::correction::CORRECTION_EDITS;
     use super::*;
 
     fn cfg(f: impl FnOnce(&mut FuzzyConfig)) -> FuzzyConfig {
@@ -681,10 +680,11 @@ mod tests {
     // ---------------------------------------------------------------- correction
 
     fn with_correction(on: bool) -> FuzzyConfig {
-        let c = wind_config::CorrectionConfig {
+        let mut c = wind_config::CorrectionConfig {
             enabled: on,
             ..Default::default()
         };
+        c.rules.gn_ng = true; // 出厂关；用例是 gogn / zogn
         cfg(|f| f.correction = Arc::new(CorrectionRules::from_config(&c)))
     }
 

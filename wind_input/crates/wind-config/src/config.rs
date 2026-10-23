@@ -3194,7 +3194,7 @@ pub struct CorrectionRuleToggles {
 impl Default for CorrectionRuleToggles {
     fn default() -> Self {
         Self {
-            gn_ng: true,
+            gn_ng: false,
             on_ong: true,
             vowel_swap: true,
             legacy_spelling: false,
@@ -14004,9 +14004,10 @@ scripts = { latin = 42 }
         let c = Config::default().input.correction;
         assert!(c.enabled);
         assert_eq!(c.marker, "*");
-        assert!(c.rules.gn_ng && c.rules.on_ong && c.rules.vowel_swap);
+        assert!(c.rules.on_ong && c.rules.vowel_swap);
         assert!(
-            !c.rules.legacy_spelling
+            !c.rules.gn_ng
+                && !c.rules.legacy_spelling
                 && !c.rules.h_misplaced
                 && !c.rules.mg_ng
                 && !c.rules.n_before_g

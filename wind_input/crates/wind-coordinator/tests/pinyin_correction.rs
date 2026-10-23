@@ -29,6 +29,7 @@ fn config(schema: &str) -> Config {
     c.schema.available = vec![schema.into()];
     c.schema.active = schema.into();
     c.input.default.chinese_mode = true;
+    c.input.correction.rules.gn_ng = true; // 出厂关；用例是 gognping / hagn
     c
 }
 

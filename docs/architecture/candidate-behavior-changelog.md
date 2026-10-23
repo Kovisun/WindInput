@@ -31,7 +31,7 @@
 
 - 合入：（待合入）；范围：全拼方案、混输的拼音侧、临时拼音；双拼不启用
 - 变化：
-  - 打错字母顺序的输入出候选：`gogn` 前：干呕功能、干呕… → 后：*共、*供…*工；`gognping` → *公平。
+  - 打错字母顺序的输入出候选（`gn` 类需开 `gn_ng`）：`gogn` 前：干呕功能、干呕… → 后：*共、*供…*工；`gognping` → *公平。
     前缀 `*` 是纠错标记，上屏文字不带。
   - `zhonguo` → *中国、`dagnshi` → *当时、`xign` → *型（「习惯」仍在）。
   - 纠错不删候选、不改其余候选的相对次序（切分、整句、简拼不走纠错边）：纠错候选按罚过的
@@ -42,7 +42,8 @@
     不占首选：把第一条这样的候选提到首位，其余次序不变。同一文字经纠错与非纠错都能得到时
     只留非纠错那条。
   - 混输满码自动上屏不把纠错候选计入「有拼音候选」：五笔 `hagn`（甗）照旧满码上屏。
-- 触发条件：出厂即生效（`input.correction.enabled = true`，出厂开 `gn_ng` / `on_ong` / `vowel_swap`）。
+- 触发条件：出厂即生效（`input.correction.enabled = true`，出厂开 `on_ong` / `vowel_swap`；
+  `gn_ng` 出厂关——开它时 `xign` 这类简拼的首页会被 *型、*性… 占满）。
 - 回退旧行为：`input.correction.enabled = false`；只去标记设 `input.correction.marker = ""`。
 - 钉住的测试：`wind-coordinator/tests/pinyin_correction.rs`、`wind-engine/tests/pinyin_correction_floor.rs`、`wind-coordinator/tests/pinyin_correction_visibility.rs`、
   `wind-candidate/src/candidate.rs::corrected_tests`、`wind-engine/src/pinyin/hint_align.rs`

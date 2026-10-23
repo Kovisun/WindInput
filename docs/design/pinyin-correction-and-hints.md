@@ -154,7 +154,7 @@ tone = false
 
 | id | 设置端文案（草案） | 覆盖 | 出厂 | 冲突示例（写进 hint） |
 |---|---|---|---|---|
-| `gn_ng` | ng 打成 gn（ogn→ong） | agn/egn/ign/ogn/iagn/uagn/iogn | 开 | 简拼下 xign 也可是 xi+g+n |
+| `gn_ng` | ng 打成 gn（ogn→ong） | agn/egn/ign/ogn/iagn/uagn/iogn | 关（未过 §9 门禁：F 类简拼首选/首页下降） | 简拼下 xign 也可是 xi+g+n |
 | `on_ong` | 漏 g：on→ong | on→ong、ion→iong | 开 | lone 也可是 lo+ne |
 | `vowel_swap` | 韵母字母颠倒 | ai←ia（wghk）、ei←ie（wfghkz）、ie←ei（jqx）、ao←oa、ou←uo（ypfm）、ui↔iu、iao←ioa/oia、ua/uai/uang/iang/ue 的换位 | 开 | 无 |
 | `legacy_spelling` | 旧式拼写 uei/iou/uen | →ui/iu/un | 关 | liou 也可是 li+ou |

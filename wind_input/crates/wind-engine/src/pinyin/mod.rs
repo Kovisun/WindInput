@@ -4859,7 +4859,7 @@ impl Engine for PinyinEngine {
                 .then(a.natural_order.cmp(&b.natural_order))
         };
         // 换位纠错：截断前先判出纠错候选（`is_corrected`）、去掉同文的纠错那条。纠错候选按
-        // 罚过的 weight（`0.5^correction_edits()`，与模糊同量纲）与其余候选同一比较器穿插；
+        // 罚过的 weight（`0.5^CORRECTION_EDITS`，与模糊同量纲）与其余候选同一比较器穿插；
         // 窗口里保底见 [`correction_quota`]（对齐 librime 纠错上限 4），挤出去的只是窗口尾部。
         let correction_on = !self.fuzzy_config.correction.is_empty();
         if correction_on {
@@ -5439,10 +5439,10 @@ mod tests {
     }
 
     fn correction_fuzzy() -> FuzzyConfig {
+        let mut c = wind_config::CorrectionConfig::default();
+        c.rules.gn_ng = true; // 出厂关；用例是 gogn
         FuzzyConfig {
-            correction: Arc::new(correction::CorrectionRules::from_config(
-                &wind_config::CorrectionConfig::default(),
-            )),
+            correction: Arc::new(correction::CorrectionRules::from_config(&c)),
             ..Default::default()
         }
     }

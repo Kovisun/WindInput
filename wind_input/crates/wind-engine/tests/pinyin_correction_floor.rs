@@ -21,6 +21,7 @@ fn texts(dir: &std::path::Path, correction: bool, input: &str, limit: usize) -> 
     cfg.schema.available = vec!["pinyin".to_string()];
     cfg.schema.active = "pinyin".to_string();
     cfg.input.correction.enabled = correction;
+    cfg.input.correction.rules.gn_ng = true; // 出厂关；用例含 gogn / xign
     let mgr = EngineManager::new(&cfg, Some(dir));
     mgr.convert_with("pinyin", input, limit)
         .candidates

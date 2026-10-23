@@ -172,10 +172,10 @@ mod tests {
 
     /// 出厂纠错规则 + `cfg()` 的模糊组。
     fn corr_cfg() -> FuzzyConfig {
+        let mut c = wind_config::CorrectionConfig::default();
+        c.rules.gn_ng = true; // 出厂关；用例是 gognping
         FuzzyConfig {
-            correction: Arc::new(CorrectionRules::from_config(
-                &wind_config::CorrectionConfig::default(),
-            )),
+            correction: Arc::new(CorrectionRules::from_config(&c)),
             ..cfg()
         }
     }

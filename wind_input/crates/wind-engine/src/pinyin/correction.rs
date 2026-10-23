@@ -9,10 +9,9 @@
 //!
 //! 接线：[`super::fuzzy::FuzzyConfig::correction`] 持一份；错误拼写并入
 //! [`super::fuzzy::fuzzy_spellings`] 进切分层，[`super::fuzzy::FuzzyMatcher::fuzzy_variants_scored`]
-//! 对错误拼写追加 `(正确音节, correction_edits())`。双拼不启用（规则是全拼字母层的）。
+//! 对错误拼写追加 `(正确音节, CORRECTION_EDITS)`。双拼不启用（规则是全拼字母层的）。
 
 use std::collections::BTreeMap;
-use std::sync::LazyLock;
 
 use super::fuzzy::VALID_SYLLABLES;
 use super::syllable::STANDARD_SYLLABLES;
@@ -38,22 +37,19 @@ pub enum CorrectionRule {
     AiIa,
 }
 
-/// 罚分以「处数」表达，与模糊音共用 0.5^处数：7 处 ≈ ×0.008（对齐 librime 纠错 ×0.01）。
-/// 实验期从环境变量 WIND_CORRECTION_EDITS 读（Task 5 扫参后固化并删掉环境变量）。
-pub const CORRECTION_EDITS: usize = 7;
-
-static CORRECTION_EDITS_RESOLVED: LazyLock<usize> = LazyLock::new(|| {
-    std::env::var("WIND_CORRECTION_EDITS")
-        .ok()
-        .and_then(|v| v.trim().parse().ok())
-        .unwrap_or(CORRECTION_EDITS)
-});
-
-/// 纠错音节计几处改动：环境变量 `WIND_CORRECTION_EDITS`（只读一次），缺省或解析失败取
-/// [`CORRECTION_EDITS`]。
-pub(crate) fn correction_edits() -> usize {
-    *CORRECTION_EDITS_RESOLVED
-}
+/// 纠错音节计几处改动，与模糊音共用 0.5^处数：5 处 = ×0.031，明显重于模糊音的每处 ×0.5。
+///
+/// `pinyin_eval` 扫参（出厂规则 on_ong + vowel_swap，界面序，G 类按规则各 300 条）：
+///
+/// | 处数 | A–F 与关纠错 | G 首选 | G 首页 | G 引擎序首选 |
+/// |---|---|---|---|---|
+/// | 3  | 逐位相同 | 21.75% | 35.50% | 14.83% |
+/// | 5  | 逐位相同 | 21.75% | 35.50% | 14.38% |
+/// | 7  | 逐位相同 | 21.71% | 35.50% | 14.17% |
+/// | 10 | 逐位相同 | 21.71% | 35.50% | 14.04% |
+///
+/// 界面序几乎不随处数变（纠错候选落在精确层，层级先于权重），取 G 不再变好的拐点 5。
+pub const CORRECTION_EDITS: usize = 5;
 
 /// 片段在音节里的匹配方式。
 #[derive(Clone, Copy)]
@@ -328,11 +324,17 @@ mod tests {
 
     #[test]
     fn gn_ng_fixes_ogn() {
-        assert_eq!(rules(|_| {}).corrections_of("gogn"), ["gong"]);
+        assert_eq!(
+            rules(|c| c.rules.gn_ng = true).corrections_of("gogn"),
+            ["gong"]
+        );
     }
     #[test]
     fn gn_ng_fixes_ign() {
-        assert_eq!(rules(|_| {}).corrections_of("dign"), ["ding"]);
+        assert_eq!(
+            rules(|c| c.rules.gn_ng = true).corrections_of("dign"),
+            ["ding"]
+        );
     }
     #[test]
     fn on_ong_fixes_on() {

@@ -787,8 +787,8 @@ marker = "*"
 custom = []
 
 [input.correction.rules]
-# ng 打成 gn（ogn → ong）。
-gn_ng = true
+# ng 打成 gn（ogn → ong）。出厂关：xign 这类简拼会被纠成 xing 占满首页。
+gn_ng = false
 # 漏打 g（on → ong）。
 on_ong = true
 # 韵母字母颠倒（ia ↔ ai、ie ↔ ei 等）。

@@ -24,6 +24,7 @@ fn all_texts(input: &str) -> Vec<String> {
     c.schema.available = vec!["pinyin".into()];
     c.schema.active = "pinyin".into();
     c.input.default.chinese_mode = true;
+    c.input.correction.rules.gn_ng = true; // 出厂关；用例是 dagnshi / gognping / xign
     let coord = Coordinator::new_headless(c, Some(&data_dir()));
     for ch in input.chars() {
         coord.handle_key_event(&KeyEventData {
