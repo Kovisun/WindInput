@@ -11,6 +11,7 @@
 //!
 //! 注意：运行时词频 boost 由上层（协调器）应用，本引擎只产出基础权重候选。
 
+pub mod correction;
 pub mod dag;
 pub mod fuzzy;
 pub mod generate;
@@ -1097,7 +1098,12 @@ impl PinyinEngine {
     ///
     /// 双拼同键音节（[`FuzzyConfig::shared_key`]）属于布局、由 [`Self::with_shuangpin`] 注入，
     /// 用户模糊配置里没有这项：传入的为空时沿用已注入的那份，两个 builder 谁先调都不丢。
+    ///
+    /// 双拼方案不启用换位纠错：已注入双拼转换器时丢掉 [`FuzzyConfig::correction`]。
     pub fn with_fuzzy(mut self, mut fuzzy: FuzzyConfig) -> Self {
+        if self.shuangpin.is_some() {
+            fuzzy.correction = Default::default();
+        }
         self.trie
             .load_fuzzy_spellings(&fuzzy::fuzzy_spellings(&fuzzy));
         if fuzzy.shared_key.is_empty() {
@@ -1126,6 +1132,12 @@ impl PinyinEngine {
     pub fn with_shuangpin(mut self, conv: ShuangpinConverter) -> Self {
         self.input_chars = conv.layout().code_char_set();
         self.fuzzy_config.shared_key = conv.shared_key_syllables();
+        // 双拼不启用换位纠错（规则是全拼字母层的）；先注入的纠错拼写要从切分层摘掉。
+        if !self.fuzzy_config.correction.is_empty() {
+            self.fuzzy_config.correction = Default::default();
+            self.trie
+                .load_fuzzy_spellings(&fuzzy::fuzzy_spellings(&self.fuzzy_config));
+        }
         self.shuangpin = Some(conv);
         self
     }
@@ -5210,6 +5222,44 @@ mod tests {
             r.preedit_display, "xu'yao",
             "编码栏显示归一化形态，音节边界照常"
         );
+    }
+
+    fn correction_fuzzy() -> FuzzyConfig {
+        FuzzyConfig {
+            correction: Arc::new(correction::CorrectionRules::from_config(
+                &wind_config::CorrectionConfig::default(),
+            )),
+            ..Default::default()
+        }
+    }
+
+    /// 换位纠错拼写成为可切的边：`gogn` 出「工」。
+    #[test]
+    fn correction_spelling_is_cuttable() {
+        let mut raw = CodetableDict::empty();
+        raw.merge_single("gong".to_string(), "工".to_string(), 100, 0);
+        let eng = PinyinEngine::new(Config::default(), CachedDict::Memory(raw))
+            .with_fuzzy(correction_fuzzy());
+        let r = eng.convert("gogn", 10).unwrap();
+        assert!(r.candidates.iter().any(|c| c.text == "工"), "{r:?}");
+    }
+
+    /// 双拼不启用换位纠错：两个 builder 谁先调都把纠错置空。
+    #[test]
+    fn shuangpin_drops_correction() {
+        let schema_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../data/schemas/shuangpin");
+        let layout =
+            || Layout::from_toml(&schema_dir.join("xiaohe.toml")).expect("加载小鹤布局失败");
+        let dict = || CachedDict::Memory(CodetableDict::empty());
+        let a = PinyinEngine::new(Config::default(), dict())
+            .with_fuzzy(correction_fuzzy())
+            .with_shuangpin(ShuangpinConverter::new(layout()));
+        assert!(a.fuzzy_config.correction.is_empty());
+        let b = PinyinEngine::new(Config::default(), dict())
+            .with_shuangpin(ShuangpinConverter::new(layout()))
+            .with_fuzzy(correction_fuzzy());
+        assert!(b.fuzzy_config.correction.is_empty());
     }
 
     /// ⚠️ 双拼下 `v` 是**布局键**（小鹤 `v` = zh 声母），归一化绝不能触及。

@@ -7,6 +7,8 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock};
 
+use super::correction::{CorrectionRules, correction_edits};
+
 /// 「算不算模糊音提示」的运行时开关：克隆共享同一份值，`EngineManager` 持有一份并注入各引擎，
 /// 翻转即时生效、无需重建引擎。提示只是 `convert` 收尾的后处理，不影响候选集合与排序。
 #[derive(Debug, Clone, Default)]
@@ -57,6 +59,10 @@ pub struct FuzzyConfig {
     /// 展开时**零罚分**（处数计 0）：用户自己把两个韵母配在同一个键上，两种读音按词频平等
     /// 竞争，不是「打错了」。与用户开的模糊组叠加时，后者照旧计处数。
     pub shared_key: HashMap<String, Vec<String>>,
+    /// 字母换位纠错规则（[`CorrectionRules`]）。错误拼写并入 [`fuzzy_spellings`]，
+    /// [`FuzzyMatcher::fuzzy_variants_scored`] 对其追加正确音节、计 `correction_edits()` 处。
+    /// 双拼方案恒空。
+    pub correction: Arc<CorrectionRules>,
 }
 
 impl FuzzyConfig {
@@ -91,6 +97,7 @@ impl FuzzyConfig {
             || self.un_ong
             || self.eng_ong
             || !self.shared_key.is_empty()
+            || !self.correction.is_empty()
     }
 }
 
@@ -388,7 +395,7 @@ const INITIALS: &[&str] = &[
 
 /// 合法音节集合，用于剔除模糊组合产出的非法码（`juan`+uan_uang→`juang`、`yuan`→`yuang`）。
 /// 只在**输入本身是合法音节**时启用过滤，见 [`FuzzyMatcher::fuzzy_variants_scored`]。
-static VALID_SYLLABLES: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
+pub(crate) static VALID_SYLLABLES: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
     super::syllable::STANDARD_SYLLABLES
         .iter()
         .copied()
@@ -484,6 +491,7 @@ pub fn fuzzy_spellings(config: &FuzzyConfig) -> Vec<String> {
             }
         }
     }
+    out.extend(config.correction.spellings().map(str::to_string));
     out.into_iter().collect()
 }
 
@@ -503,11 +511,11 @@ impl FuzzyMatcher {
     ///
     /// 双拼同键音节（[`FuzzyConfig::shared_key`]）并在这里：对端计 **0 处**，对端再经用户
     /// 模糊组得到的变体照常计处数；同一变体多条来源取处数最小者。
+    ///
+    /// 换位纠错（[`FuzzyConfig::correction`]）也并在这里：`input` 是错误拼写时追加其正确音节，
+    /// 计 `correction_edits()` 处；纠错得到的音节**不再**做模糊组展开（一个音节最多一处编辑来源）。
     pub fn fuzzy_variants_scored(input: &str, config: &FuzzyConfig) -> Vec<(String, usize)> {
         let mut variants = Self::group_variants_scored(input, config);
-        let Some(partners) = config.shared_key.get(input) else {
-            return variants;
-        };
         let mut add = |variant: String, edits: usize| {
             if variant == input {
                 return;
@@ -517,11 +525,16 @@ impl FuzzyMatcher {
                 None => variants.push((variant, edits)),
             }
         };
-        for partner in partners {
-            add(partner.clone(), 0);
-            for (v, e) in Self::group_variants_scored(partner, config) {
-                add(v, e);
+        if let Some(partners) = config.shared_key.get(input) {
+            for partner in partners {
+                add(partner.clone(), 0);
+                for (v, e) in Self::group_variants_scored(partner, config) {
+                    add(v, e);
+                }
             }
+        }
+        for correct in config.correction.corrections_of(input) {
+            add(correct.clone(), correction_edits());
         }
         variants
     }
@@ -605,6 +618,7 @@ impl FuzzyMatcher {
 
 #[cfg(test)]
 mod tests {
+    use super::super::correction::CORRECTION_EDITS;
     use super::*;
 
     fn cfg(f: impl FnOnce(&mut FuzzyConfig)) -> FuzzyConfig {
@@ -662,6 +676,45 @@ mod tests {
         assert_eq!(edits("niu"), Some(1), "对端经 n_l 计 1 处: {v:?}");
         assert_eq!(edits("lin"), None, "不含自身");
         assert_eq!(v.len(), 5, "不重复: {v:?}");
+    }
+
+    // ---------------------------------------------------------------- correction
+
+    fn with_correction(on: bool) -> FuzzyConfig {
+        let c = wind_config::CorrectionConfig {
+            enabled: on,
+            ..Default::default()
+        };
+        cfg(|f| f.correction = Arc::new(CorrectionRules::from_config(&c)))
+    }
+
+    /// 纠错音节按 `CORRECTION_EDITS` 处计罚、不再做模糊组展开；关纠错时不出现。
+    #[test]
+    fn correction_variant_carries_heavy_edits() {
+        let on = with_correction(true);
+        assert!(on.any_enabled(), "只开纠错也须算作开启");
+        assert!(
+            FuzzyMatcher::fuzzy_variants_scored("gogn", &on)
+                .contains(&("gong".to_string(), CORRECTION_EDITS)),
+        );
+        assert!(fuzzy_spellings(&on).contains(&"gogn".to_string()));
+        let off = with_correction(false);
+        assert!(
+            !FuzzyMatcher::fuzzy_variants_scored("gogn", &off)
+                .iter()
+                .any(|(v, _)| v == "gong")
+        );
+        assert!(!off.any_enabled());
+    }
+
+    /// 纠错得到的音节不再经模糊组展开（同一音节上纠错与模糊不叠加）。
+    #[test]
+    fn correction_does_not_stack_with_fuzzy_groups() {
+        let mut c = with_correction(true);
+        c.zh_z = true;
+        let v = FuzzyMatcher::fuzzy_variants_scored("zogn", &c);
+        assert!(v.contains(&("zong".to_string(), CORRECTION_EDITS)), "{v:?}");
+        assert!(!v.iter().any(|(s, _)| s == "zhong"), "{v:?}");
     }
 
     // ---------------------------------------------------------------- any_enabled

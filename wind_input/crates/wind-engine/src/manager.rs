@@ -622,6 +622,9 @@ pub struct EngineManager {
     pinyin: Mutex<wind_config::config::PinyinGlobalConfig>,
     /// 正确拼音提示配置（`[input.correction.hint]`），与 `pinyin` 一同决定 [`fuzzy_hint_on`]。
     hint_cfg: Mutex<wind_config::PinyinHintConfig>,
+    /// 换位纠错规则（`[input.correction]` 生成），注入全拼引擎的 `FuzzyConfig::correction`；
+    /// 配置载入时生成一次，各引擎共享。
+    correction: Mutex<Arc<crate::pinyin::correction::CorrectionRules>>,
     /// 有模板引用 `${correct_pinyin}`（协调器按全部模板位判定后告知，见
     /// [`Self::set_correct_pinyin_in_templates`]）：`hint` 关着也要让拼音引擎算模糊音提示。
     correct_pinyin_in_templates: std::sync::atomic::AtomicBool,
@@ -1014,6 +1017,9 @@ impl EngineManager {
             single_char_used: std::sync::atomic::AtomicU64::new(0),
             pinyin: Mutex::new(config.schema.pinyin.clone()),
             hint_cfg: Mutex::new(config.input.correction.hint.clone()),
+            correction: Mutex::new(Arc::new(
+                crate::pinyin::correction::CorrectionRules::from_config(&config.input.correction),
+            )),
             correct_pinyin_in_templates: std::sync::atomic::AtomicBool::new(false),
             pinyin_hint: crate::pinyin::fuzzy::HintSwitch::new(fuzzy_hint_on(
                 &config.schema.pinyin.fuzzy,
@@ -3190,6 +3196,11 @@ impl EngineManager {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .clone();
+            let correction = self
+                .correction
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
             // 词组分词（t42）：英文方案读 `schema.english.phrase_seg`，临英与快捷输入英文共读
             // `input.temp_english.phrase_seg`（A2-3b），两份开关相或。引擎只需知道「要不要具备
             // 这个能力」——按作用域把关是协调器的事，见 `build_engine` 的参数说明。
@@ -3238,6 +3249,7 @@ impl EngineManager {
                 self.override_dir.as_deref(),
                 &pinyin_cfg,
                 &self.pinyin_hint,
+                &correction,
                 phrase_seg_anywhere,
                 lookup_disabled_dicts,
                 // 顶层入口：方案自身是拼音时不加约束（简拼开）。混输在其内部为 secondary 注入。
@@ -4530,6 +4542,9 @@ impl EngineManager {
         *self.pinyin.lock().unwrap_or_else(|e| e.into_inner()) = config.schema.pinyin.clone();
         *self.hint_cfg.lock().unwrap_or_else(|e| e.into_inner()) =
             config.input.correction.hint.clone();
+        *self.correction.lock().unwrap_or_else(|e| e.into_inner()) = Arc::new(
+            crate::pinyin::correction::CorrectionRules::from_config(&config.input.correction),
+        );
         self.refresh_pinyin_hint();
         // 丢弃缓存：引擎按新上屏策略/词典重建，名称/词频按新方案重读。
         {
@@ -6690,6 +6705,8 @@ impl EngineManager {
         pinyin_cfg: &wind_config::config::PinyinGlobalConfig,
         // `pinyin_hint`：管理器持有的提示开关，原样注入拼音引擎（见 `EngineManager::pinyin_hint`）。
         pinyin_hint: &crate::pinyin::fuzzy::HintSwitch,
+        // `correction`：换位纠错规则（管理器生成一份共享）；双拼方案不用。
+        correction: &Arc<crate::pinyin::correction::CorrectionRules>,
         // `phrase_seg_anywhere`：三个作用域（英文方案 / 临英 / 快捷输入英文）里是否
         // **有任何一个**开着词组分词。不按作用域分别开关，是因为英文引擎实例是三者
         // **共用**的（进程里只有 `engines["english"]` 这一个实例，见 [`EnglishProvider`]）
@@ -6746,6 +6763,7 @@ impl EngineManager {
                 override_dir,
                 pinyin_cfg,
                 pinyin_hint,
+                correction,
                 phrase_seg_anywhere,
                 lookup_disabled_dicts,
                 Some(MixedRole::Primary {
@@ -6793,6 +6811,7 @@ impl EngineManager {
                     override_dir,
                     pinyin_cfg,
                     pinyin_hint,
+                    correction,
                     phrase_seg_anywhere,
                     lookup_disabled_dicts,
                     Some(MixedRole::Secondary(MixPinyinOpts {
@@ -6943,7 +6962,22 @@ impl EngineManager {
             // 从全局拼音配置构建引擎配置和模糊音（Task 1.4：修 fuzzy 从未生效 bug）。
             // enabled 作总开关：未启用时所有模糊标志归零（与 Go 行为一致）。
             let pg = pinyin_cfg;
-            let fuzzy = fuzzy_config_from_global(&pg.fuzzy, pinyin_hint);
+            // 双拼不启用换位纠错（规则是全拼字母层的），纠错置空。
+            let shuangpin = schema
+                .engine
+                .pinyin
+                .scheme
+                .eq_ignore_ascii_case("shuangpin");
+            let empty_correction = Arc::default();
+            let fuzzy = fuzzy_config_from_global(
+                &pg.fuzzy,
+                pinyin_hint,
+                if shuangpin {
+                    &empty_correction
+                } else {
+                    correction
+                },
+            );
             let pcfg = PinyinConfig {
                 use_smart_compose: pg.use_smart_compose,
                 // 纯拼音方案看 `[schema.pinyin.abbrev] enabled`；混输看 `mix.enable_pinyin_abbrev`，
@@ -7026,12 +7060,7 @@ impl EngineManager {
                 }
             }
             // 双拼方案：按 layout 加载布局并注入 ShuangpinConverter
-            if schema
-                .engine
-                .pinyin
-                .scheme
-                .eq_ignore_ascii_case("shuangpin")
-            {
+            if shuangpin {
                 let layout_id = if schema.engine.pinyin.shuangpin.layout.is_empty() {
                     // 与 `shuangpin_layout_id_of` 同源；硬编码过一次，分叉了就是
                     // 「引擎按 A 布局打字、设置页显示 B 布局」。
@@ -8729,10 +8758,12 @@ mod dict_stats;
 
 /// 全局模糊音配置 → 引擎 `FuzzyConfig`：`enabled` 作总开关，未启用时所有模糊标志归零。
 /// 双拼同键音节不来自用户配置，由 `with_shuangpin` 从布局推出。`hint` 是管理器的共享开关
-/// （值见 [`fuzzy_hint_on`]），运行时翻转、不随这里固化。
+/// （值见 [`fuzzy_hint_on`]），运行时翻转、不随这里固化。换位纠错规则（`[input.correction]`
+/// 生成）不受模糊音 `enabled` 管，原样挂上；双拼由调用方传空。
 fn fuzzy_config_from_global(
     f: &wind_config::PinyinFuzzy,
     hint: &crate::pinyin::fuzzy::HintSwitch,
+    correction: &Arc<crate::pinyin::correction::CorrectionRules>,
 ) -> crate::pinyin::fuzzy::FuzzyConfig {
     let on = f.enabled;
     crate::pinyin::fuzzy::FuzzyConfig {
@@ -8750,6 +8781,7 @@ fn fuzzy_config_from_global(
         un_ong: on && f.un_ong,
         eng_ong: on && f.eng_ong,
         hint: hint.clone(),
+        correction: correction.clone(),
         ..Default::default()
     }
 }
