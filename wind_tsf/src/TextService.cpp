@@ -2236,7 +2236,9 @@ LRESULT CALLBACK CTextService::_HotkeyWndProc(HWND hWnd, UINT msg, WPARAM wParam
             int id = (int)wParam;
             uint32_t vk = 0;
             uint32_t mods = 0;
-            if (id >= kHotkeyIdCandidateBase && id < kHotkeyIdCandidateBase + kHotkeyIdCandidateMax)
+            const bool candidateSegment =
+                id >= kHotkeyIdCandidateBase && id < kHotkeyIdCandidateBase + kHotkeyIdCandidateMax;
+            if (candidateSegment)
             {
                 // 候选热键：从注册记录反解 (vk, KEYMOD)，与加词热键同法。
                 // ⚠️ 绝不能按 id 推算修饰键——组合键来自服务端配置，本层不知道也不该知道
@@ -2302,7 +2304,22 @@ LRESULT CALLBACK CTextService::_HotkeyWndProc(HWND hWnd, UINT msg, WPARAM wParam
             if (vk != 0)
             {
                 WIND_LOG_DEBUG_FMT(L"WM_HOTKEY id=0x%04X vk=0x%02X mods=0x%04X\n", id, vk, mods);
-                self->_pKeyEventSink->DispatchHotkey(vk, mods);
+                const BOOL giveBack = self->_pKeyEventSink->DispatchHotkey(vk, mods);
+                // 系统热键吃下的键必须有出口：服务端不要它（如联想态的 Ctrl+数字）就注入一次
+                // 原键交还宿主。物理修饰键仍按着，宿主看到的仍是 Ctrl+数字；注入前候选热键
+                // 必须已注销，判据见 OnHotkeyDispatched。
+                const auto giveBackAction = wind::candhotkey::OnHotkeyDispatched(
+                    candidateSegment, giveBack != FALSE, self->_hotkeysActive != FALSE);
+                if (giveBackAction != wind::candhotkey::GiveBack::None && self->_pKeyEventSink != nullptr)
+                {
+                    if (giveBackAction == wind::candhotkey::GiveBack::UnregisterThenReplay)
+                    {
+                        self->_UnregisterCandidateHotkeys();
+                    }
+                    WIND_LOG_DEBUG_FMT(L"WM_HOTKEY give back to host: vk=0x%02X unregistered=%d\n", vk,
+                                       (int)(giveBackAction == wind::candhotkey::GiveBack::UnregisterThenReplay));
+                    self->_pKeyEventSink->ReplayKeyToHost((WORD)vk);
+                }
             }
         }
         return 0;

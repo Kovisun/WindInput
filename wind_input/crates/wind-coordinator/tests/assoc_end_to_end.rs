@@ -978,6 +978,50 @@ fn assoc_ctrl_combo_closes_window_and_reaches_host() {
     assert!(assoc_texts(&c).is_empty(), "Ctrl+A 之后联想窗该收起");
 }
 
+/// ★ 联想态的候选热键（出厂置顶 Ctrl+数字、删除 Ctrl+Shift+数字）同样收组合 + 交还宿主。
+///
+/// 这组键在候选可见时被 TSF 用 RegisterHotKey 拦成系统热键、经 WM_HOTKEY 派发，原键已被
+/// 系统吃下；TSF 只在响应是「交还宿主」类时才注入原键。这里回 `Consumed` 就是丢键
+/// （浏览器 Ctrl+1 切标签没反应）。
+#[test]
+fn assoc_candidate_hotkeys_close_window_and_reach_host() {
+    let dir = data_dir();
+    if !dict_ready(&dir) {
+        eprintln!("!!! 跳过：build_dev 词库不存在");
+        return;
+    }
+    let c = coord("word", "wubi86_pinyin");
+    for (mods, name) in [(MOD_CTRL, "Ctrl+1"), (MOD_CTRL | MOD_SHIFT, "Ctrl+Shift+1")] {
+        enter_assoc(&c);
+        match c.handle_key_event_policed(&key_event_mods(0x31, mods)) {
+            KeyAction::ClearCompositionThenPassThrough => {}
+            other => panic!("联想态 {name} 应收组合 + 交还宿主，实得 {other:?}"),
+        }
+        assert!(assoc_texts(&c).is_empty(), "{name} 之后联想窗该收起");
+    }
+}
+
+/// 对照：联想态开着 `input.alt_commit` 时 Alt+数字 仍归输入法（上屏该候选的拼音），
+/// 不交还宿主——TSF 的注入只认「交还宿主」类响应，这条不受影响。
+#[test]
+fn assoc_alt_digit_stays_with_alt_commit() {
+    let dir = data_dir();
+    if !dict_ready(&dir) {
+        eprintln!("!!! 跳过：build_dev 词库不存在");
+        return;
+    }
+    let c = coord_tweak("word", "wubi86_pinyin", |cfg| {
+        cfg.input.alt_commit = "pinyin".into();
+    });
+    enter_assoc(&c);
+    match c.handle_key_event_policed(&key_event_mods(0x31, MOD_ALT)) {
+        KeyAction::ClearCompositionThenPassThrough | KeyAction::PassThrough => {
+            panic!("联想态 Alt+1 应由 alt_commit 接走")
+        }
+        _ => {}
+    }
+}
+
 /// ★★★ **用户报障**：联想窗弹出时按 Shift+字母想打英文，字母却落进了中文码表缓冲。
 ///
 /// 根因是 `try_activate_mode` 开头那句联想让位**让过头了**：它本意只为保住 `;`/`'` 的

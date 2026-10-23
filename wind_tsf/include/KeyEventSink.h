@@ -143,7 +143,11 @@ public:
     // 从 RegisterHotKey/WM_HOTKEY 路径派发一个键事件给 Go 服务。
     // 用于 Pin/Delete 候选热键被系统级 RegisterHotKey 拦截后，转发给我们的常规处理流程。
     // vk: 虚拟键码（Win32 VK_*）；mods: 内部 KEYMOD_* 修饰位（不是 TSF MOD_*）。
+    // 返回 TRUE ＝ 服务端要这个键交还宿主（由调用方注入，见实现处）。
     BOOL DispatchHotkey(uint32_t vk, uint32_t mods);
+
+    // 把一个已被吃掉的键重放给宿主（_ReplayKeyToHost 的公开入口，给 WM_HOTKEY 派发用）。
+    void ReplayKeyToHost(WORD vk) { _ReplayKeyToHost(vk); }
 
     /// 「热键模式会话」镜像位的写入口。**服务端是唯一权威，这里只镜像、不推断。**
     ///
@@ -228,10 +232,10 @@ private:
     bool _statsTrackEnglish = true;
 
     // State
-    // 本次 OnKeyDown 的响应是 ClearCompositionThenPassThrough：组合已在响应处理里收掉，
-    // 还欠宿主一次按键重放。**只在 OnKeyDown 里置位并当场消费**——`_HandleServiceResponse`
+    // 本次按键的响应是 ClearCompositionThenPassThrough：组合已在响应处理里收掉，
+    // 还欠宿主一次按键重放。**只在 OnKeyDown / DispatchHotkey 里消费**——`_HandleServiceResponse`
     // 另有三个非按键调用点（同步握手等），它们拿不到 wParam，标志若残留会在下一次按键上
-    // 误重放。故 OnKeyDown 在调用响应处理**之前**先清零。
+    // 误重放。故两个入口都在调用响应处理**之前**先清零。
     BOOL _pendingReplayToHost = FALSE;
     // 本次 OnKeyDown 的响应上屏了文字（CommitText 等，见 ResponseCommitsText）。会话中
     // Ctrl/Alt 组合的 cleanup 判定要用（见 CtrlAltCleanupPolicy.h），与上一项同样只在
