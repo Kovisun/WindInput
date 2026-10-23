@@ -550,7 +550,8 @@ code 是 query 前缀 → 只消费前缀长度，剩余拼音继续转换；否
 `[engine.codetable.english_merge]` 逐项覆盖；混输 `schema.mix` 有同口径的 `english_complete_min_length` /
 `english_exact_position` / `english_complete_position` / `english_max_count` 四项，成词级否决对应
 `block_commit_on_english_word`）与
-`schema.pinyin.english_merge`（`enable` / `min_length`）。拆开的理由是「码表方案要不要捎带
+`schema.pinyin.english_merge`（`enable` / `min_length` / `complete_min_length` / `exact_position` /
+`complete_position` / `max_count`，无否决项，也没有方案级覆盖）。拆开的理由是「码表方案要不要捎带
 英文」与「拼音方案要不要」本就是两件事——五笔常打命令行、变量名，开着有用；全拼的英文词与
 拼音串大面积重叠（`hen`/`men`/`she` 既是音节又是英文词），可能宁可不开。一个总开关只会逼
 用户在「两个都开」和「两个都关」之间二选一。
@@ -575,20 +576,20 @@ code 是 query 前缀 → 只消费前缀长度，剩余拼音继续转换；否
 
 中文侧有候选时，`english_merge::select`（码表、拼音、混输共用）**只保留
 `code == 小写化输入` 的条目**，前缀扩展整片丢弃；中文侧为空时给一页前缀补全
-（`lookup_prefix_fallback`，至多 5 条，长度门槛放宽到 2）。实测现场：全拼 `hen` 曾混进
+（`lookup_prefix_fallback`，至多 5 条，长度门槛放宽到 2；与输入相同（大小写不敏感）的词抬到
+页内最高权重之上、排最前——英文引擎的前缀页按词频排，`hi` 曾排在 his / high / him / history
+之后）。实测现场：全拼 `hen` 曾混进
 hen / hence / henceforth / Henderson / Hendrix，混输 `github` 曾混进 8 条 GitHub 开头的
 长词组。前缀扩展在中英混合输入里没有使用场景——想打某个英文词就继续敲完它。
 
 收窄后英文天然只剩 1~2 条，**按比例分席的配额机制随之删除**（原 `seats_for`）。
 
-**拼音的可选前缀补全**（`schema.pinyin.english_merge.prefix_complete`，出厂关）是这条收窄的
-唯一例外：中文侧有候选时，若输入 ≥5 字母且整串任何切法都切不成完整全拼音节
-（`english_merge::prefix_complete_applies`，标准音节表 DP），在精确之外再补至多 2 条前缀词
-（`lookup_prefix_complete`，跳过精确那条）。双拼下不生效（`manager::convert` 排除）。
-
-**码表 / 混输的按长度补全**（`complete_min_length` / `english_complete_min_length`，出厂 0 =
-不补）：中文侧有候选时，输入达到该码数就补前缀词（五笔设 4 则 `gith` 出 github），完整单词
-优先，合计不超 `max_count` / `english_max_count`（出厂 2）。
+**按长度补全**是这条收窄的唯一例外（码表 / 拼音 `complete_min_length`、混输
+`english_complete_min_length`，出厂 0 = 不补）：中文侧有候选时，输入达到该码数就补前缀词
+（五笔设 4 则 `gith` 出 github），完整单词优先，合计不超 `max_count` / `english_max_count`
+（出厂 2）。拼音另叠一条判据：整串任何切法都切不成完整全拼音节才补
+（`english_merge::prefix_complete_applies`，标准音节表 DP）；双拼下不生效（`english_merge_cfg_for`
+把码长折成 0）。
 
 ⚠️ **上屏否决的判据不跟着收窄**：`english_merge::has_any`（码表三条通路与混输
 `auto_commit_block_on_english` 共用）仍按前缀判，门槛取 `Effective::veto_min_length`
@@ -613,15 +614,23 @@ hen / hence / henceforth / Henderson / Hendrix，混输 `github` 曾混进 8 条
 
 位次统一由协调器 `place_english_after_common_exact` 在**所有排序（含自动调频）之后**
 定位：插在「开头那段连续的 `source_tier <= 1` 候选」之后，即中文常用精确解之后、其余
-候选之前。采用后置定位而非新增比较键，理由见该函数文档（比较键会扰动非英文候选之间的
+候选之前。拼音方案另有一条：开头段为空而首选是吃满整串、全为常用字的拼音词库词（非引擎合成，
+简拼解出来的也算——`bus` 的「不是」、`rug` 的「如果」）时，开头段算上它这一条；只让一条，
+因为简拼下吃满整串的真词成片出现（不是 / 不少 / 不算…），整段让会把英文推出首页。拼凑句
+（`hello` 的「和理论哦」）仍不算；码表 / 混输不走这条。够格的首选要么是用户词（非临时词，
+不看权重——与系统词库不同量纲），要么系统词库权重 ≥ `PINYIN_HEAD_WORD_MIN_WEIGHT`（3000，
+同一词库内比，评测扫参定：正例最低 `get`「个体」5598，反例最高 `big`「逼格」1462，
+`test`「托尔斯泰」860、`old`「欧蓝德」44 都在门槛下）。这个英文词选过（拼音桶或英文桶有
+词频记录）就免让，见 `Coordinator::english_used_before`。采用后置定位而非新增比较键，理由见该函数文档（比较键会扰动非英文候选之间的
 既有次序，而只对英文表态的比较器不是全序）。
 
-码表 / 混输另有两项**位次下限**（1 起，0 回退出厂值）：完整单词 `exact_position` /
-`english_exact_position`（出厂 1）与前缀补全 `complete_position` / `english_complete_position`
+码表 / 混输 / 拼音另有两项**位次下限**（1 起，0 回退出厂值）：完整单词 `exact_position` /
+`english_exact_position`（出厂 1；拼音出厂 0 = 按方案自动，全拼 1、双拼 2——双拼两键一音节，
+`the` / `good` 这类词几乎都解得出中文）与前缀补全 `complete_position` / `english_complete_position`
 （出厂 2）。完整单词落在 max(下限, 让过开头完整匹配中文后的位置)；补全再取 max(自己的下限,
 让过拼音真词后的位置, 完整单词之后)——同一列表里完整单词恒在补全之前，位次按最终列表计。
 只会更靠后，候选不够时落在末尾。五笔打 `git` / `vim`（无中文全码）出厂下英文排第 1。
-协调器经 `EngineManager::active_english_positions` 按活跃方案类型取值（拼音、英文方案恒
+协调器经 `EngineManager::active_english_positions` 按活跃方案类型取值（英文方案恒
 `(1, 1)` = 不限；混输分段续转走 `convert_with`，那里不混英文）。
 
 前缀补全来的英文（`meta.from_prefix_complete`，只有 `lookup_prefix_complete` 打这个标记）

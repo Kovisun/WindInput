@@ -323,7 +323,10 @@ static REGISTRY: &[ConfigField] = &[
     // 拼音方案两者都没有，登记它等于教用户去配一件不成立的事。见 `PinyinEnglishMerge`。
     f("schema.pinyin.english_merge.enable", Bool),
     f("schema.pinyin.english_merge.min_length", Int),
-    f("schema.pinyin.english_merge.prefix_complete", Bool),
+    f("schema.pinyin.english_merge.complete_min_length", Int),
+    f("schema.pinyin.english_merge.exact_position", Int),
+    f("schema.pinyin.english_merge.complete_position", Int),
+    f("schema.pinyin.english_merge.max_count", Int),
     f("schema.pinyin.fuzzy.enabled", Bool),
     f("schema.pinyin.fuzzy.zh_z", Bool),
     f("schema.pinyin.fuzzy.ch_c", Bool),

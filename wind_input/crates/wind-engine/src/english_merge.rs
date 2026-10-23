@@ -24,7 +24,7 @@
 //! ## 配置按引擎分两份，本模块只认折叠后的形态
 //!
 //! `[schema.codetable.english_merge]`（六项，且经方案级 `[engine.codetable.english_merge]`
-//! 折叠）与 `[schema.pinyin.english_merge]`（两项，无 `block_commit`）是**两件独立的事**
+//! 折叠）与 `[schema.pinyin.english_merge]`（无 `block_commit`）是**两件独立的事**
 //! ——理由见 `wind_config::CodetableEnglishMerge` 的文档。管理器把它们折叠成
 //! [`Effective`] 再交给本模块，故这里的函数不关心取值来自哪一份。
 //!
@@ -48,7 +48,7 @@
 //!
 //! 本模块只管「查哪些、谁活下来」。英文候选**排第几**由协调器
 //! `place_english_after_common_exact` 在所有排序（含自动调频）跑完之后统一定位：
-//! 排在「中文常用精确解」之后、其余候选之前；码表 / 混输另有两项位次下限（完整单词 / 前缀补全）。放在这里做不到——引擎看不见协调器随后并入的
+//! 排在「中文常用精确解」之后、其余候选之前；码表 / 混输 / 拼音各有两项位次下限（完整单词 / 前缀补全）。放在这里做不到——引擎看不见协调器随后并入的
 //! 短语候选，也看不见调频的位置提升。
 
 use crate::engine::Engine;
@@ -83,12 +83,6 @@ const EMPTY_BASE_MIN_LENGTH: usize = 2;
 /// 故不在此列）。2 条足够，且候选面上英文再多也没有意义。
 const EXACT_MAX: usize = 2;
 
-/// 前缀补全（中文侧**有**候选时，`prefix_complete` 开着）至多补几条。见 [`lookup_prefix_complete`]。
-const PREFIX_COMPLETE_MAX: usize = 2;
-
-/// 前缀补全的最短输入。短串几乎都是拼音的开头（`chan` / `shan`），且补全词太多、信息量低。
-const PREFIX_COMPLETE_MIN_LEN: usize = 5;
-
 /// 最小触发长度的回退值（配置为 0 时）。与 `manager::build_engine` 给
 /// `schema.mix.min_english_length` 的回退**同值**，两处口径一致。
 const DEFAULT_MIN_LENGTH: usize = 3;
@@ -97,7 +91,7 @@ const DEFAULT_MIN_LENGTH: usize = 3;
 ///
 /// 来源有三个且字段不同——码表侧是 `schema.codetable.english_merge`（经方案级
 /// `[engine.codetable.english_merge]` 折叠），拼音侧是 `schema.pinyin.english_merge`
-/// （三项，无 `block_commit`），混输侧是 `schema.mix` 的 `english_*` 与
+/// （无 `block_commit`），混输侧是 `schema.mix` 的 `english_*` 与
 /// `auto_commit_block_on_english`（`MixedEngine` 构建时折叠）。本结构是它们折叠后的
 /// **共同形态**，让下游三条通路只认一种。
 ///
@@ -111,14 +105,13 @@ pub struct Effective {
     pub block_commit: bool,
     /// **成词级**否决：整串恰是一个英文完整单词时否决上屏（[`has_word`]）。前缀级开着时被它涵盖。
     pub block_commit_on_word: bool,
-    /// 中文侧有候选时也补英文前缀（[`prefix_complete_applies`] 判据下）。只有拼音侧有这项，
-    /// 码表 / 混输侧恒 `false`（它们走 `complete_min_length`）。
-    pub prefix_complete: bool,
-    /// 中文侧有候选时，输入达到几码起按长度给前缀补全（码表 / 混输的
-    /// `complete_min_length`）。0 = 不按长度补。拼音侧恒 0（它走 `prefix_complete`）。
+    /// 中文侧有候选时，输入达到几码起按长度给前缀补全（`complete_min_length`）。
+    /// 0 = 不按长度补。双拼方案由管理器折成 0（见 [`Self::complete_only_non_pinyin`]）。
     pub complete_min_length: usize,
-    /// 中文侧有候选时英文合计至多几条（完整单词优先）。已解析回退值（≥1）；
-    /// 拼音侧为 `usize::MAX`（不封顶，条数由精确 / 补全各自的上限决定）。
+    /// 补全再叠一条拼音判据：整串切不成完整全拼音节才补（[`prefix_complete_applies`]）。
+    /// 只有拼音侧为 `true`；码表 / 混输够长就补。
+    pub complete_only_non_pinyin: bool,
+    /// 中文侧有候选时英文合计至多几条（完整单词优先）。已解析回退值（≥1）。
     pub max_count: usize,
 }
 
@@ -157,9 +150,8 @@ pub fn max_count_or_default(configured: usize) -> usize {
 /// | 空 | [`lookup_prefix_fallback`]：前缀补全一页（不受 `max_count` 约束） |
 /// | 有 | [`lookup`] 的完整单词；补全开着且适用时再补前缀词；合计不超 `max_count` |
 ///
-/// 补全两种判据：拼音走 `prefix_complete`（[`prefix_complete_applies`]，至多
-/// [`PREFIX_COMPLETE_MAX`] 条）；码表 / 混输走 `complete_min_length`（够长就补，补到
-/// `max_count` 为止）。
+/// 补全按 `complete_min_length` 判（够长就补，补到 `max_count` 为止）；拼音另要求整串
+/// 不是完整拼音（[`prefix_complete_applies`]）。
 pub fn select(
     english: &dyn Engine,
     input: &str,
@@ -169,7 +161,9 @@ pub fn select(
     if base_empty {
         return lookup_prefix_fallback(english, input, cfg.min_length);
     }
-    let by_length = cfg.complete_min_length > 0 && input.chars().count() >= cfg.complete_min_length;
+    let by_length = cfg.complete_min_length > 0
+        && input.chars().count() >= cfg.complete_min_length
+        && (!cfg.complete_only_non_pinyin || prefix_complete_applies(input));
     // 按长度补全时，完整单词的门槛一并放到补全门槛：否则 `complete_min_length` 比 `min_length`
     // 小时，打 `go` 补出 good / google 却不出 go 本身。
     let exact_gate = if by_length {
@@ -178,9 +172,7 @@ pub fn select(
         cfg.min_length
     };
     let mut v = lookup(english, input, exact_gate);
-    let room = if cfg.prefix_complete && prefix_complete_applies(input, cfg.min_length) {
-        PREFIX_COMPLETE_MAX
-    } else if by_length {
+    let room = if by_length {
         cfg.max_count.saturating_sub(v.len())
     } else {
         0
@@ -299,21 +291,41 @@ pub fn lookup_prefix_fallback(
     let Ok(r) = english.convert(&lower, PREFIX_FALLBACK_MAX) else {
         return Vec::new();
     };
-    r.candidates
+    // 与输入相同（大小写不敏感）的词排最前，其余保持英文引擎的次序。英文引擎本身已把精确
+    // 整串排在最前，这里只是不依赖它。
+    let (mut out, rest): (Vec<Candidate>, Vec<Candidate>) = r
+        .candidates
         .into_iter()
         .map(|mut c| {
             // 同 `lookup`：码表域标志不跨来源带，理由见该函数文档。
             c.is_exact_code = false;
             c
         })
-        .collect()
+        .partition(|c| c.text.to_lowercase() == lower);
+    out.extend(rest);
+    out.truncate(PREFIX_FALLBACK_MAX);
+    // ★ 次序要落到 weight：上面清了 `is_exact_code`，协调器重排时精确词不再靠
+    // `cmp_exact_first` 领先，而是按 weight 与前缀词比——真机 `hi` 曾落到 his / high / him /
+    // history 之后。精确词抬到页内最高权重之上；没有精确词时不动。
+    // ⚠️ 码表「基础排序」为自然顺序（`base_sort = "natural"`）时协调器不看 weight，本抬权不起
+    // 作用，次序按英文引擎原序（它本身就把精确词排在最前）。
+    let n_exact = out
+        .iter()
+        .take_while(|c| c.text.to_lowercase() == lower)
+        .count();
+    if let Some(top) = out[n_exact..].iter().map(|c| c.weight).max() {
+        for c in &mut out[..n_exact] {
+            c.weight = c.weight.max(top.saturating_add(1));
+        }
+    }
+    out
 }
 
-/// 中文侧**有**候选时，这串输入要不要再补英文前缀（`schema.pinyin.english_merge.prefix_complete`）。
+/// 拼音方案中文侧**有**候选时，这串输入可不可以补英文前缀（长度门槛
+/// `schema.pinyin.english_merge.complete_min_length` 另由 [`select`] 判）。
 ///
-/// 判据（维护者定）：至少 [`PREFIX_COMPLETE_MIN_LEN`] 个字母（`min_length` 更大时以它为准），
-/// 且整串**任何切法**都切不成完整的全拼音节序列——`templa` / `produc` 补，`shang` / `chang`
-/// 不补。「打的不是完整拼音」才说明用户可能在打英文；能切成完整音节的串，前缀词就是
+/// 判据（维护者定）：整串**任何切法**都切不成完整的全拼音节序列——`templa` / `produc` 补，
+/// `shang` / `chang` 不补。「打的不是完整拼音」才说明用户可能在打英文；能切成完整音节的串，前缀词就是
 /// [`lookup`] 文档里说的那种噪音。
 ///
 /// 音节表用 [`crate::pinyin::syllable::is_full_pinyin_code`]（标准音节表、DP 判可达，与临时词
@@ -322,10 +334,8 @@ pub fn lookup_prefix_fallback(
 ///
 /// 含非字母（分隔符 `'`、数字、符号）的串不补：那是拼音语法或在打别的东西。
 /// 判据只对全拼成立；双拼由调用方（`manager::convert`）排除。
-pub fn prefix_complete_applies(input: &str, min_length: usize) -> bool {
-    if input.len() < PREFIX_COMPLETE_MIN_LEN.max(min_length_or_default(min_length))
-        || !input.bytes().all(|b| b.is_ascii_alphabetic())
-    {
+pub fn prefix_complete_applies(input: &str) -> bool {
+    if input.is_empty() || !input.bytes().all(|b| b.is_ascii_alphabetic()) {
         return false;
     }
     !crate::pinyin::syllable::is_full_pinyin_code(&input.to_ascii_lowercase(), 0)
@@ -665,26 +675,59 @@ mod tests {
         assert!(!lookup(&eng, "he", 2).is_empty());
     }
 
-    /// 前缀补全判据 B：≥5 字母，且整串**任何切法**都切不成完整全拼音节才补。
+    /// 拼音补全判据：整串**任何切法**都切不成完整全拼音节才补。
     #[test]
     fn prefix_complete_only_when_not_full_pinyin() {
         // 切不完整 ⇒ 补。
         for s in ["templa", "configu", "produc", "xiaom"] {
-            assert!(prefix_complete_applies(s, 0), "{s} 不是完整拼音，应补");
+            assert!(prefix_complete_applies(s), "{s} 不是完整拼音，应补");
         }
         // 能切成完整音节 ⇒ 不补。`xian` 这类有多种切法的也算（xi'an / xian）。
         for s in ["chang", "shang", "zhongguo", "xianshi", "nihao"] {
-            assert!(!prefix_complete_applies(s, 0), "{s} 是完整拼音，不该补");
+            assert!(!prefix_complete_applies(s), "{s} 是完整拼音，不该补");
         }
-        // 不足 5 字母不补，哪怕切不完整。
-        assert!(!prefix_complete_applies("temp", 0));
         // 带分隔符 / 非字母：用户在用拼音语法或打符号，不补。
-        assert!(!prefix_complete_applies("tem'pla", 0));
+        assert!(!prefix_complete_applies("tem'pla"));
         // 大写按小写判（`Shang` 仍是完整拼音）。
-        assert!(!prefix_complete_applies("Shang", 0));
-        // min_length 调得比 5 大时以它为准。
-        assert!(!prefix_complete_applies("templa", 7));
-        assert!(prefix_complete_applies("templat", 7));
+        assert!(!prefix_complete_applies("Shang"));
+    }
+
+    /// 拼音侧：够长且不是完整拼音才补；完整拼音只给完整单词；长度门槛照码表口径。
+    #[test]
+    fn select_pinyin_completion_needs_non_pinyin() {
+        let eng = FakeEnglish(vec![
+            ("templa", "templa"),
+            ("template", "template"),
+            ("templates", "templates"),
+            ("templar", "templar"),
+            ("shang", "shang"),
+            ("shanghai", "Shanghai"),
+        ]);
+        let cfg = Effective {
+            block_commit: false,
+            block_commit_on_word: false,
+            complete_min_length: 5,
+            complete_only_non_pinyin: true,
+            ..codetable_cfg()
+        };
+        assert_eq!(
+            texts_of(&select(&eng, "templa", false, &cfg)),
+            vec!["templa", "template"],
+            "完整单词优先，合计不超 max_count"
+        );
+        assert_eq!(
+            texts_of(&select(&eng, "shang", false, &cfg)),
+            vec!["shang"],
+            "完整拼音不补"
+        );
+        let short = Effective {
+            complete_min_length: 7,
+            ..cfg
+        };
+        assert_eq!(
+            texts_of(&select(&eng, "templa", false, &short)),
+            vec!["templa"]
+        );
     }
 
     /// 前缀补全至多 2 条，且不与精确命中重复。
@@ -698,7 +741,7 @@ mod tests {
         ]);
         let exact = lookup(&eng, "hello", 0);
         assert_eq!(exact.len(), 1, "前提：精确命中 hello");
-        let extra = lookup_prefix_complete(&eng, "hello", &exact, PREFIX_COMPLETE_MAX);
+        let extra = lookup_prefix_complete(&eng, "hello", &exact, 2);
         let texts: Vec<&str> = extra.iter().map(|c| c.text.as_str()).collect();
         assert_eq!(texts, vec!["hellos", "Hellow"], "至多 2 条、跳过精确那条");
         assert!(extra.iter().all(|c| !c.is_exact_code));
@@ -710,9 +753,24 @@ mod tests {
         // 无精确命中时照补。
         let none = lookup(&eng, "hell", 0);
         assert!(none.is_empty());
-        assert_eq!(
-            lookup_prefix_complete(&eng, "hell", &none, PREFIX_COMPLETE_MAX).len(),
-            2
+        assert_eq!(lookup_prefix_complete(&eng, "hell", &none, 2).len(), 2);
+    }
+
+    /// 前缀兜底页：与输入相同（大小写不敏感）的词排最前，且次序落到 weight。
+    #[test]
+    fn prefix_fallback_puts_exact_word_first() {
+        let eng = FakeEnglish(vec![
+            ("his", "his"),
+            ("high", "high"),
+            ("him", "him"),
+            ("history", "history"),
+            ("hi", "Hi"),
+        ]);
+        let got = lookup_prefix_fallback(&eng, "hi", 0);
+        assert_eq!(texts_of(&got), vec!["Hi", "his", "high", "him", "history"]);
+        assert!(
+            got[1..].iter().all(|c| c.weight < got[0].weight),
+            "次序要落到 weight，否则协调器重排会冲掉"
         );
     }
 
@@ -723,8 +781,8 @@ mod tests {
             min_length: 0,
             block_commit: true,
             block_commit_on_word: true,
-            prefix_complete: false,
             complete_min_length: 0,
+            complete_only_non_pinyin: false,
             max_count: max_count_or_default(0),
         }
     }

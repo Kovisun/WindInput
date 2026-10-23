@@ -111,7 +111,7 @@ pub struct CandidateMeta {
     /// 只服务显示，排序/造词/边界核对一律不读。`Arc<str>`：同一切分的候选共用一份。
     #[serde(skip)]
     pub preedit_split: Option<std::sync::Arc<str>>,
-    /// 拼音「英文前缀补全」（`schema.pinyin.english_merge.prefix_complete`）补出来的英文候选。
+    /// 「英文前缀补全」（`english_merge.complete_min_length` 等）补出来的英文候选。
     ///
     /// 只由 `wind_engine::english_merge::lookup_prefix_complete` 置位；协调器
     /// `place_english_after_common_exact` 据此让它们排在整串拼音真词之后。不能拿「code 比输入

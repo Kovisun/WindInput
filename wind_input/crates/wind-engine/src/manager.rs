@@ -4641,9 +4641,9 @@ impl EngineManager {
             // 无中文候选 ⇒ 给前缀补全（此时用户显然在打英文，补全正是他要的），
             // 精确那条由英文引擎自己排在最前。
             //
-            // 例外是可选的前缀补全：拼音 `prefix_complete`（整串不是完整拼音时）与码表
-            // `complete_min_length`（够长就补）。判据与条数上限都在 `english_merge::select`；
-            // 双拼已在 `english_merge_cfg_for` 折掉。
+            // 例外是可选的前缀补全：`complete_min_length`（够长就补；拼音另要求整串不是完整
+            // 拼音）。判据与条数上限都在 `english_merge::select`；双拼已在
+            // `english_merge_cfg_for` 折掉。
             let english =
                 crate::english_merge::select(eng.as_ref(), input, r.candidates.is_empty(), &cfg);
             // 通路①（满码自动上屏 / 满码空码清空）的英文守护，两级判据见
@@ -4729,8 +4729,8 @@ impl EngineManager {
                     min_length: c.min_length,
                     block_commit: c.block_commit,
                     block_commit_on_word: c.block_commit_on_word,
-                    prefix_complete: false,
                     complete_min_length: c.complete_min_length,
+                    complete_only_non_pinyin: false,
                     max_count: crate::english_merge::max_count_or_default(c.max_count),
                 })
             }
@@ -4747,12 +4747,17 @@ impl EngineManager {
                     // 见 `Effective::block_commit`：拼音没有满码上屏 / 顶码可否决。
                     block_commit: false,
                     block_commit_on_word: false,
-                    // 判据按全拼音节定义，双拼下不生效（双拼码两键一音节，几乎任何串都解得开）。
-                    // 开关关着时短路，不问方案；开着时是一次按方案 id 的缓存命中。
-                    prefix_complete: p.prefix_complete && !self.pinyin_is_shuangpin_of(schema_id),
-                    // 拼音侧没有这两项：条数由精确 / 补全各自的上限决定，行为不变。
-                    complete_min_length: 0,
-                    max_count: usize::MAX,
+                    // 补全判据按全拼音节定义，双拼下不生效（双拼码两键一音节，几乎任何串都解得开）。
+                    // 补全关着时短路，不问方案；开着时是一次按方案 id 的缓存命中。
+                    complete_min_length: if p.complete_min_length > 0
+                        && !self.pinyin_is_shuangpin_of(schema_id)
+                    {
+                        p.complete_min_length
+                    } else {
+                        0
+                    },
+                    complete_only_non_pinyin: true,
+                    max_count: crate::english_merge::max_count_or_default(p.max_count),
                 })
             }
             // 混输有自带的英文混入（`schema.mix.enable_english`，带三方档位仲裁），
@@ -4842,8 +4847,9 @@ impl EngineManager {
     /// `place_english_after_common_exact` 定位。配置 0 回退各自出厂值（1 / 2）。
     ///
     /// 码表取方案级折叠后的 `english_merge.{exact,complete}_position`，混输取
-    /// `schema.mix.english_{exact,complete}_position`；拼音与英文方案没有这两项，恒 `(1, 1)`
-    /// （= 不额外限制，行为不变）。
+    /// `schema.mix.english_{exact,complete}_position`，拼音取 `schema.pinyin.english_merge`
+    /// 的同名两项（完整单词那项 0 = 按方案自动：全拼 1、双拼 2）；英文方案恒 `(1, 1)`
+    /// （= 不额外限制）。
     pub fn active_english_positions(&self) -> (usize, usize) {
         let Some(engine) = self.active_engine() else {
             return (1, 1);
@@ -4859,7 +4865,31 @@ impl EngineManager {
                 let m = self.mix.lock().unwrap_or_else(|e| e.into_inner());
                 (m.english_exact_position, m.english_complete_position)
             }
-            EngineType::Pinyin | EngineType::English => return (1, 1),
+            EngineType::Pinyin => {
+                let e = self
+                    .pinyin
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .english_merge
+                    .clone();
+                // 英文候选没开时列表里不会有英文，不必再问方案是不是双拼。
+                if !e.enable {
+                    return (1, 1);
+                }
+                // 双拼两键一音节，`the` / `good` 这类常用词几乎都解得出中文，英文不抢首选。
+                let auto = if self.pinyin_is_shuangpin_of(&self.active_schema_id()) {
+                    2
+                } else {
+                    1
+                };
+                let exact = if e.exact_position > 0 {
+                    e.exact_position
+                } else {
+                    auto
+                };
+                (exact, e.complete_position)
+            }
+            EngineType::English => return (1, 1),
         };
         let or = |v: usize, d: usize| if v > 0 { v } else { d };
         (
