@@ -31,10 +31,11 @@
 
 - 合入：（待合入）；范围：全拼方案、混输的拼音侧、临时拼音；双拼不启用
 - 变化：
-  - 打错字母顺序的输入出候选：`gogn` 前：干呕功能、干呕… → 后：*共、*供…*工；`gognping` → *公平；
-    `dagnshi` → *当时；`yuo` → *有。前缀 `*` 是纠错标记，上屏文字不带。
-  - 纠错拼写会改动这串输入原有的切分：上面几例原有的简拼 / 拆音节候选（干呕、与哦、习惯）
-    在开纠错时不再出现；`xign` 首选由「习惯」变为 *型。
+  - 打错字母顺序的输入出候选：`gogn` 前：干呕功能、干呕… → 后：*共、*供…*工；`gognping` → *公平。
+    前缀 `*` 是纠错标记，上屏文字不带。
+  - 纠错只加候选：关纠错时有的候选开纠错后都还在（切分、整句、简拼不走纠错边）。截断时纠错
+    候选只占其余候选用剩的名额，故原有候选已占满窗口时不出纠错候选（`yuo`、`xign`、`dagnshi`
+    下 `yu`/`xi`/`da` 的子短语就有数百条）。
   - 打对的输入不变（`gongping`、`zhongguo`）；打字途中的半截（`zhon`）不带标记。
   - 存在完整的非纠错候选（精确或模糊命中、吃满整串，简拼 / 前缀补全不算）时，纠错候选
     不占首选：把第一条这样的候选提到首位，其余次序不变。同一文字经纠错与非纠错都能得到时
@@ -42,7 +43,7 @@
   - 混输满码自动上屏不把纠错候选计入「有拼音候选」：五笔 `hagn`（甗）照旧满码上屏。
 - 触发条件：出厂即生效（`input.correction.enabled = true`，出厂开 `gn_ng` / `on_ong` / `vowel_swap`）。
 - 回退旧行为：`input.correction.enabled = false`；只去标记设 `input.correction.marker = ""`。
-- 钉住的测试：`wind-coordinator/tests/pinyin_correction.rs`、
+- 钉住的测试：`wind-coordinator/tests/pinyin_correction.rs`、`wind-engine/tests/pinyin_correction_floor.rs`、
   `wind-candidate/src/candidate.rs::corrected_tests`、`wind-engine/src/pinyin/hint_align.rs`
 - 来源：内部（设计 `docs/design/pinyin-correction-and-hints.md`）
 

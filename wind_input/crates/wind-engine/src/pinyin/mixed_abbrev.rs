@@ -236,9 +236,11 @@ fn edges<'a>(
     pos: usize,
     trie: &'a SyllableTrie,
 ) -> impl Iterator<Item = Edge> + 'a {
+    // 换位纠错拼写不作音节段：`zhon` 成了整串音节段，整串混合简拼便算「命中」，
+    // 关纠错时才有的前缀简拼降级（「之后」「中欧」）整批不再触发。纠错只能加候选。
     let syls = trie.match_at(input, pos).into_iter().filter_map(|s| {
         let n = s.len();
-        (n > 1).then_some(Edge::Syllable(n))
+        (n > 1 && !trie.is_correction_spelling(&s)).then_some(Edge::Syllable(n))
     });
     let retroflex = is_retroflex_at(input, pos, trie).then_some(Edge::Retroflex);
     let initial = is_initial(input.as_bytes()[pos], trie).then_some(Edge::Initial);
