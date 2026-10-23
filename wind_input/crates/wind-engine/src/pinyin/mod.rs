@@ -1997,7 +1997,8 @@ impl PinyinEngine {
             }
             let result = self.viterbi.decode(&lattice, input_len);
             let sentence: String = result.words.join("");
-            let logp_per_char = result.log_prob / sentence.chars().count().max(1) as f64;
+            // 按词频标定的阈值只看节点分，见 `ViterbiResult::lexical_log_prob`
+            let logp_per_char = result.lexical_log_prob / sentence.chars().count().max(1) as f64;
             // 三道闸门，逐条复刻主路径 step 2 / 2b 的既有判据：
             // - `log_prob.is_finite()`：解码失败时为 NEG_INFINITY，不能把空/错误路径塞进候选；
             // - `words.len() >= 2`：**单节点路径不算组句**。它本质就是一条普通词候选，而整句的
@@ -3503,7 +3504,10 @@ impl Engine for PinyinEngine {
                 let sentence: String = result.words.join("");
                 // 质量闸门：低置信整句宁可不出，也不该顶掉可用的部分候选
                 // （见 MIXED_SENTENCE_MIN_LOGP_PER_CHAR 的取值依据）。
-                let logp_per_char = result.log_prob / sentence.chars().count().max(1) as f64;
+                // 只看节点分：阈值按词频标定，挂上语法模型后 `log_prob` 里多了转移分
+                // （见 `ViterbiResult::lexical_log_prob`）
+                let logp_per_char =
+                    result.lexical_log_prob / sentence.chars().count().max(1) as f64;
                 // **至少两个节点才算「组句」。** 单节点路径（`dblg` → 只有「夺不了冠」）
                 // 本质就是一条简拼候选，包装成整句有实际危害：整句的 code 是**击键串**
                 // （`dblg`），而简拼候选的 code 是全拼码（`duobuliaoguan`）——同一个词的
