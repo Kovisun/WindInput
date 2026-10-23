@@ -15,6 +15,7 @@ const VK_SEMICOLON: u32 = 0xBA;
 const VK_NEXT: u32 = 0x22;
 const VK_OEM_PLUS: u32 = 0xBB;
 const VK_OEM_PERIOD: u32 = 0xBE;
+const VK_NUMPAD0: u32 = 0x60;
 
 fn data_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../build_dev/data")
@@ -78,6 +79,17 @@ fn enter_quick(coord: &Coordinator) {
         Some("mix"),
         "前提：`;` 进快捷输入"
     );
+}
+
+/// 独立 redb（置顶落 shadow 规则要有 store）。文件名带 pid：并行跑测试时固定名会互删。
+fn fresh_store(tag: &str) -> (std::sync::Arc<wind_store::Store>, PathBuf) {
+    let path = std::env::temp_dir().join(format!(
+        "wind_quick_select_{tag}_{}.redb",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&path);
+    let store = std::sync::Arc::new(wind_store::Store::open(&path).unwrap());
+    (store, path)
 }
 
 fn ctrl_digit(coord: &Coordinator, d: u8) -> KeyAction {
@@ -189,10 +201,7 @@ fn main_path_ctrl_digit_still_pins() {
     let mut cfg = config();
     cfg.schema.available = vec!["pinyin".into()];
     cfg.schema.active = "pinyin".into();
-    let path =
-        std::env::temp_dir().join(format!("wind_quick_select_pin_{}.redb", std::process::id()));
-    let _ = std::fs::remove_file(&path);
-    let store = std::sync::Arc::new(wind_store::Store::open(&path).unwrap());
+    let (store, path) = fresh_store("main_pin");
     let coord = Coordinator::new_headless_with_store(cfg, Some(&data_dir()), store);
     type_str(&coord, "shi");
     let before = coord.debug_page_texts();
@@ -204,27 +213,73 @@ fn main_path_ctrl_digit_still_pins() {
     );
     assert_eq!(coord.debug_active_mode(), None);
     assert_eq!(coord.debug_page_texts()[0], before[2], "第 3 个应被置顶");
+    drop(coord);
+    let _ = std::fs::remove_file(&path);
 }
 
-/// 选词键只认快捷输入：临时拼音里 Ctrl+数字 维持原语义，不上屏候选。
+/// 选词键只认快捷输入：临时拼音里 Ctrl+数字 与「选词键不绑」时逐项相同（返回值、模式、
+/// 编码栏、候选），不上屏候选。对照组用 `none` 而不写死期望值：那条路的语义归置顶/兜底
+/// 守卫管，本键只须不碰它。
 #[test]
 fn other_overlays_keep_pin_semantics() {
     skip_without_data!();
-    let mut cfg = config();
-    cfg.input.temp_pinyin.enabled = true;
-    cfg.schema.codetable.z_key_action = "temp_pinyin".into();
-    let coord = Coordinator::new_headless(cfg, Some(&data_dir()));
-    type_str(&coord, "zshi");
-    assert_eq!(
-        coord.debug_active_mode(),
-        Some("temp_pinyin"),
-        "前提：z 进临拼"
-    );
-    let act = ctrl_digit(&coord, 3);
+    let run = |select: &str| {
+        let mut cfg = config();
+        cfg.input.temp_pinyin.enabled = true;
+        cfg.schema.codetable.z_key_action = "temp_pinyin".into();
+        cfg.keys.quick_input_select = select.into();
+        let (store, path) = fresh_store(&format!("temp_pin_{}", select.replace('+', "_")));
+        let coord = Coordinator::new_headless_with_store(cfg, Some(&data_dir()), store);
+        type_str(&coord, "zshi");
+        assert_eq!(
+            coord.debug_active_mode(),
+            Some("temp_pinyin"),
+            "前提：z 进临拼"
+        );
+        assert!(
+            coord.debug_page_texts().len() >= 3,
+            "前提：临拼 shi 至少 3 个候选"
+        );
+        let act = ctrl_digit(&coord, 3);
+        let out = (
+            format!("{act:?}"),
+            coord.debug_active_mode(),
+            coord.debug_preedit(),
+            coord.debug_page_texts(),
+        );
+        drop(coord);
+        let _ = std::fs::remove_file(&path);
+        (act, out)
+    };
+    let (act, with_key) = run("ctrl+number");
+    let (_, without_key) = run("none");
     assert!(
         committed(&act).is_none(),
         "临拼里 Ctrl+3 不应上屏，实得 {act:?}"
     );
+    assert_eq!(with_key, without_key, "选词键不得改变临拼里 Ctrl+3 的结局");
+}
+
+/// 小键盘 Ctrl+数字（`numpad_behavior = direct`，键码 0x60..0x69）在快捷输入里同样选词。
+#[test]
+fn ctrl_numpad_digit_commits_in_quick_input() {
+    skip_without_data!();
+    let coord = Coordinator::new_headless(config(), Some(&data_dir()));
+    enter_quick(&coord);
+    type_str(&coord, "shi");
+    let page = coord.debug_page_texts();
+    let act = coord.handle_key_event(&key(VK_NUMPAD0 + 2, MOD_CTRL));
+    assert_eq!(
+        committed(&act).as_deref(),
+        Some(page[1].as_str()),
+        "小键盘 Ctrl+2 应上屏第 2 个，实得 {act:?}"
+    );
+    // 数字透镜（数字键在录算式）里同样认。
+    enter_quick(&coord);
+    type_str(&coord, "1+2");
+    let page = coord.debug_page_texts();
+    let act = coord.handle_key_event(&key(VK_NUMPAD0 + 1, MOD_CTRL));
+    assert_eq!(committed(&act).as_deref(), Some(page[0].as_str()));
 }
 
 /// 自定义选词键：`ctrl+alt+number` 生效；`none` 时 Ctrl+数字 不再选词。

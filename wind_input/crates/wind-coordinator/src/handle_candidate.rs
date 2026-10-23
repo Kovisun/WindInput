@@ -5203,11 +5203,19 @@ impl Coordinator {
     /// ★ 快捷输入里命中即吃，**一条候选都没有也吃**（`mix_select` 越界回 Consumed）：本键
     /// 落到 mix 处理器就是 `overlay_ctrl_alt_guard`，那会放弃整段输入。TSF 对会话中的
     /// Ctrl/Alt 组合本就先吃下转发，回 Consumed 且组合仍在 ⇒ 键不交宿主。
+    ///
+    /// 小键盘数字同样认（`numpad_behavior = direct` 时键码仍是 0x60..0x69）：它不在热键表，
+    /// TSF 走 cleanup 通路照样送到这里，不认就落进上面那道守卫清空整段。主输入路的置顶照旧
+    /// （`direct` 下不认小键盘），不随本键改。
     pub(crate) fn try_quick_input_select(&self, data: &KeyEventData) -> Option<KeyAction> {
+        let key_code = match data.key_code {
+            0x60..=0x69 => data.key_code - 0x60 + 0x30,
+            k => k,
+        };
         let num = Self::match_candidate_action_key(
             &self.rt().config.keys.quick_input_select,
             data.modifiers,
-            data.key_code,
+            key_code,
         );
         if num == 0 {
             return None;
