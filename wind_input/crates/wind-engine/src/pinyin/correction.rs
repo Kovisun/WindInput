@@ -245,12 +245,8 @@ impl CorrectionRules {
                 }
             };
             let mut produced = false;
-            for syl in STANDARD_SYLLABLES {
-                for (at, _) in syl.match_indices(correct.as_str()) {
-                    let wrong_spelling =
-                        format!("{}{wrong}{}", &syl[..at], &syl[at + correct.len()..]);
-                    produced |= out.insert(wrong_spelling, syl);
-                }
+            for (spelling, syl) in custom_spellings(&wrong, &correct) {
+                produced |= out.insert(spelling, syl);
             }
             if !produced {
                 tracing::warn!("拼写纠错自定义规则生成不出可用的错误拼写，已跳过: {raw:?}");
@@ -295,6 +291,21 @@ impl CorrectionRules {
     }
 }
 
+/// 自定义规则在各标准音节上的替换结果 `(错误拼写, 正确音节)`，未过「可收」筛。
+fn custom_spellings<'a>(
+    wrong: &'a str,
+    correct: &'a str,
+) -> impl Iterator<Item = (String, &'static str)> + 'a {
+    STANDARD_SYLLABLES.iter().flat_map(move |syl| {
+        syl.match_indices(correct).map(move |(at, _)| {
+            (
+                format!("{}{wrong}{}", &syl[..at], &syl[at + correct.len()..]),
+                *syl,
+            )
+        })
+    })
+}
+
 /// 解析自定义规则 `错误写法=正确写法`，返回 `(错误写法, 正确写法)`；无效条目返回 Err(原因)，
 /// 调用方 warn 后跳过。两侧须为非空小写字母串且不相同。
 pub fn parse_custom(rule: &str) -> Result<(String, String), String> {
@@ -308,6 +319,61 @@ pub fn parse_custom(rule: &str) -> Result<(String, String), String> {
         return Err("两侧相同".to_string());
     }
     Ok((wrong.to_string(), correct.to_string()))
+}
+
+/// 错误写法的冲突示例：它能切成合法音节或简拼时返回如 `"tuen = tu+en"`，否则 `None`。
+///
+/// 段 = 两个字母以上的合法音节，或声母（简拼）；单个元音音节（a/o/e）不算一段，否则几乎
+/// 任何串都切得开。至少两段、至少一段是完整音节；取段数最少的切法，同段数时前段尽量长。
+pub fn conflict_example(wrong: &str) -> Option<String> {
+    let max = wrong.len();
+    (2..=max).find_map(|n| {
+        let mut segs = Vec::with_capacity(n);
+        split_into(wrong, n, &mut segs).then(|| format!("{wrong} = {}", segs.join("+")))
+    })
+}
+
+/// 把 `rest` 恰好切成 `n` 段（前段优先取长），且整体至少含一个完整音节。
+fn split_into<'a>(rest: &'a str, n: usize, segs: &mut Vec<&'a str>) -> bool {
+    if n == 0 {
+        return rest.is_empty() && segs.iter().any(|s| VALID_SYLLABLES.contains(s));
+    }
+    for len in (1..=rest.len().min(6)).rev() {
+        let Some(seg) = rest.get(..len) else {
+            continue;
+        };
+        let full = len >= 2 && VALID_SYLLABLES.contains(seg);
+        if !full && !INITIALS.contains(&seg) {
+            continue;
+        }
+        segs.push(seg);
+        if split_into(&rest[len..], n - 1, segs) {
+            return true;
+        }
+        segs.pop();
+    }
+    false
+}
+
+/// 自定义规则 `错误=正确` 的冲突示例：取它生成的错误拼写里第一个有冲突的（`Ok(None)` = 无冲突）。
+/// 规则无效（语法错、一个可用的错误拼写都生成不出来）时返回 Err(原因)。
+pub fn custom_rule_conflict(rule: &str) -> Result<Option<String>, String> {
+    let (wrong, correct) = parse_custom(rule)?;
+    let mut produced = false;
+    for (spelling, _) in custom_spellings(&wrong, &correct) {
+        if !acceptable(&spelling) {
+            continue;
+        }
+        produced = true;
+        if let Some(ex) = conflict_example(&spelling) {
+            return Ok(Some(ex));
+        }
+    }
+    if produced {
+        Ok(None)
+    } else {
+        Err("生成不出可用的错误拼写".to_string())
+    }
 }
 
 #[cfg(test)]
@@ -441,6 +507,39 @@ mod tests {
             c.custom = vec!["xyz=qqq".into(), "dui=diu".into(), "bad".into()];
         });
         assert_eq!(r.spellings().count(), rules(|_| {}).spellings().count());
+    }
+
+    /// 冲突 = 错误写法能切成合法音节或简拼（设计 §2.1）。
+    #[test]
+    fn conflict_example_splits_wrong_spelling() {
+        assert_eq!(conflict_example("tuen").as_deref(), Some("tuen = tu+en"));
+        assert_eq!(conflict_example("xign").as_deref(), Some("xign = xi+g+n"));
+        assert_eq!(conflict_example("nage").as_deref(), Some("nage = na+ge"));
+        assert_eq!(conflict_example("hzong").as_deref(), Some("hzong = h+zong"));
+        assert_eq!(conflict_example("xai").as_deref(), Some("xai = x+ai"));
+    }
+
+    #[test]
+    fn conflict_example_none_when_unsplittable() {
+        assert_eq!(conflict_example("gogn"), None);
+        assert_eq!(conflict_example("hia"), None);
+        assert_eq!(conflict_example("boa"), None, "单个元音不算一段");
+        assert_eq!(conflict_example("tu"), None, "整串就是一个音节，不是冲突");
+        assert_eq!(conflict_example(""), None);
+    }
+
+    /// 自定义规则：取它生成的错误拼写里第一个有冲突的；无效规则给原因。
+    #[test]
+    fn custom_rule_conflict_reports_first_example() {
+        let ex = custom_rule_conflict("uen=un").unwrap().unwrap();
+        assert!(ex.ends_with("u+en"), "{ex}");
+        assert_eq!(
+            custom_rule_conflict("ogn=ong").unwrap().as_deref(),
+            Some("logn = lo+g+n")
+        );
+        assert_eq!(custom_rule_conflict("ioa=iao"), Ok(None));
+        assert!(custom_rule_conflict("bad").is_err());
+        assert!(custom_rule_conflict("dui=diu").is_err(), "生成不出可用拼写");
     }
 
     #[test]
