@@ -53,7 +53,7 @@
 | eng ← en（仅 t/l） | 万象 | **冲突**：tena=te+na |
 | zh/ch/sh ← hz/hc/hs、zih/cih/sih | 雾凇、万象 | 简拼：h+zi |
 | ia ← ai（qai/xai） | 万象；雾凇注释掉 | 简拼：x'ai 喜爱 |
-| ai←ia（w/g/h/k）、ie←ei（w/f/g/h/k/z）、ei←ie（j/q/x）、ao←oa、ou←uo（y/p/f/m）、ui↔iu | 雾凇、万象 | 未发现 |
+| ai←ia（w/g/h/k）、ei←ie（w/f/g/h/k/z）、ie←ei（j/q/x）、ao←oa、ou←uo（y/p/f/m）、ui↔iu | 雾凇、万象 | 未发现 |
 | iao ← ioa/oia | 雾凇、万象 | 弱：xioa=xi+o+a |
 | un ← nu；an/en/in ← na/ne/ni | 万象启用 un←nu；雾凇全注释 | 简拼：dnu=d+nu |
 | ua/uai/uang/iang/ue 的各种换位 | 万象 | 未发现 |
@@ -154,9 +154,9 @@ tone = false
 
 | id | 设置端文案（草案） | 覆盖 | 出厂 | 冲突示例（写进 hint） |
 |---|---|---|---|---|
-| `gn_ng` | ng 打成 gn（ogn→ong） | agn/egn/ign/ogn/iagn/uagn/iogn | 开 | 简拼下 xign 也可是 xi+g+n |
+| `gn_ng` | ng 打成 gn（ogn→ong） | agn/egn/ign/ogn/iagn/uagn/iogn | 关（未过 §9 门禁：F 类简拼首选/首页下降） | 简拼下 xign 也可是 xi+g+n |
 | `on_ong` | 漏 g：on→ong | on→ong、ion→iong | 开 | lone 也可是 lo+ne |
-| `vowel_swap` | 韵母字母颠倒 | ai←ia（wghk）、ie←ei（wfghkz）、ei←ie（jqx）、ao←oa、ou←uo（ypfm）、ui↔iu、iao←ioa/oia、ua/uai/uang/iang/ue 的换位 | 开 | 无 |
+| `vowel_swap` | 韵母字母颠倒 | ai←ia（wghk）、ei←ie（wfghkz）、ie←ei（jqx）、ao←oa、ou←uo（ypfm）、ui↔iu、iao←ioa/oia、ua/uai/uang/iang/ue 的换位 | 开 | 无 |
 | `legacy_spelling` | 旧式拼写 uei/iou/uen | →ui/iu/un | 关 | liou 也可是 li+ou |
 | `h_misplaced` | h 错位（hz→zh、zih→zhi） | hz/hc/hs、zih/cih/sih | 关 | h+zi 是简拼 |
 | `mg_ng` | ng 打成 mg | mg→ng | 关 | m 是简拼首字母 |
@@ -178,6 +178,7 @@ tone = false
 - 某条规则一个可用的错误拼写都生成不出来（全是合法音节或无匹配）⇒ 该条无效，加载时 `warn` 日志，不报错退出。
 - 冲突提示：设置端对每条自定义规则跑与 §2.1 同一冲突检查（错误写法能否切成合法音节/简拼），有冲突就在该行
   显示示例（如 `uen=un`：tuen 也可是 tu+en），不阻止保存。
+  设置端冲突判据中单元音（a/o/e）不成段，§2.1 的「弱」冲突（如 xioa=xi+o+a）不提示。
 - 设置端：「拼写纠错」扩展对话框里列内置规则开关 + 自定义规则列表（增删）。
 - 语法取舍（是否支持声母前置条件如 `[jqx]ie=…ei`）：**本轮只做字面片段**，按需再扩（本设计的判断）。
 
@@ -204,6 +205,9 @@ tone = false
 
 范围（维护者定）：只对**整条文字恰好是词库词**的候选（≥2 字）做推断——`tiaoyan` 拼出的「调研」能标；
 整句里嵌着的词（「我们去调研」）**本轮不标**，留待下轮（需引擎在全精确命中时也保留词边界）。
+
+> 实测（Task 8）：自动推断只给引擎**已经出成整词候选**的词补提示，不召回。大词库下 `tiaoyan` 的候选里
+> 根本没有「调研」，推断无从命中；误读主要靠 §6.2 的表（内置表已收「调研 tiao yan」）。
 
 1. 按 `text` 查词→读音索引。拼音方案目前**没有**常驻的词→码反查（`ReverseIndex` 只供码表，
    `manager.rs:1352`；且只存码、不带权重）。维护者定：**按需建**——仅当「显示正确拼音」开且勾了误读来源、
@@ -270,7 +274,8 @@ tone = false
   出厂降为关。
 - 全拼 `gognping` → 候选含「\*公平」，编码栏 `gogn'ping`；勾纠错来源后显示「\*公(gong)平」。
 - `gongping`（打对）→ 无标记、无提示，与关纠错时逐字节一致。
-- `tiaoyan` → 开提示（误读来源）显示「调(diao)研」；`diaoyan` 无提示；单字 `tiao` 不标。
+- `tiaoyan` → 开提示（误读来源）显示「调(diao)研」（靠内置误读表召回，大词库下自动推断不命中）；
+  `diaoyan` 无提示；单字 `tiao` 不标。
 - 误读表白名单条目能压掉对应误标；表条目在自动推断不命中时仍能提示。
 - 误读召回：表登记 `莘莘 xin xin → shen shen` 时，`xinxin` 候选里出现「莘(shen)莘(shen)」且不在首选；
   取消勾选误读来源后不再出现。

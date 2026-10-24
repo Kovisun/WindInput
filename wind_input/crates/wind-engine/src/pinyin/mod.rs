@@ -11,13 +11,15 @@
 //!
 //! 注意：运行时词频 boost 由上层（协调器）应用，本引擎只产出基础权重候选。
 
+pub mod correction;
 pub mod dag;
 pub mod fuzzy;
-pub(crate) mod fuzzy_hint;
 pub mod generate;
 pub mod grammar;
+pub(crate) mod hint_align;
 pub mod interp;
 pub mod lattice;
+pub mod misread;
 pub mod mixed_abbrev;
 pub mod octagram;
 pub mod parser;
@@ -139,21 +141,43 @@ fn sentence_weight(log_prob: f64, word_count: usize) -> i32 {
 }
 
 /// 简拼候选的**保底配额分母**：截断时至少给 `is_abbrev` 留 `max_candidates / 此值` 席
-/// （生产 `max_candidates = 300` ⇒ 30 席）。见 [`truncate_with_abbrev_quota`]。
+/// （生产 `max_candidates = 300` ⇒ 30 席）。见 [`truncate_with_quotas`]。
 ///
 /// **为什么是 10 而不是混输 `PINYIN_QUOTA_DIVISOR` 的 5**：那边护的是「整个拼音块」，
 /// 五笔 2 码前缀动辄数百条、要抢的席位多；这边护的是简拼这一小类，而它的产出在**上游
 /// 就被限流**了 —— 纯简拼与混合共用 [`ABBREV_INDEX_LIMIT`] = 64，
 /// 再经音节数与逐段校验滤掉绝大多数。真机现场要的是 **1 席**（`shengrikl` 的「生日快乐」
 /// 是第 337 位那一条）。30 席是宽松上界且大概率打不满，`extra` 取多少就只挤多少
-/// （见 `truncate_with_abbrev_quota` 的「只补不挤空」），故放宽的代价有限。
+/// （见 `truncate_with_quotas` 的「只补不挤空」），故放宽的代价有限。
 ///
 /// ⚠️ `max_candidates < 10` 时 `quota == 0`，等价于不设配额 —— 混输子引擎的
 /// `sec.convert(input, 8)`、临拼的 limit=1、`apps/repl` 的 limit=9 都落在这一侧，
 /// 它们本就只取头几条，给配额没有意义。
 const ABBREV_QUOTA_DIVISOR: usize = 10;
 
-/// 截断到 `max_candidates`，但**保证简拼候选至少留 `max / ABBREV_QUOTA_DIVISOR` 席**。
+/// 换位纠错候选在窗口里保底的上限条数（对齐 librime 纠错候选上限 4）。
+const CORRECTION_QUOTA_MAX: usize = 4;
+
+/// 窗口 `max_candidates` 下纠错保底几席：与简拼同按 `max / ABBREV_QUOTA_DIVISOR` 缩放、
+/// 封顶 [`CORRECTION_QUOTA_MAX`]。小窗口（< 10，混输子引擎的 8 / 1、repl 的 9）为 0——
+/// 引擎层没有 D6，保底一席在 limit=1 时就是把原首选挤掉。
+fn correction_quota(max_candidates: usize) -> usize {
+    (max_candidates / ABBREV_QUOTA_DIVISOR).min(CORRECTION_QUOTA_MAX)
+}
+
+/// 截断到 `max_candidates`，按需给两类候选保底：
+///
+/// 1. **换位纠错**（`is_corr`，见 [`correction_quota`]）：窗口里不足时把窗口外分最高的几条
+///    挪进窗口末尾，被挤出的是尾部其余候选，相对次序不变；
+/// 2. **简拼**（`abbrev_quota` 为真时，见下文）：腾位时跳过
+///    纠错保底的那几席，两份保底互不抵消。
+///
+/// 纠错那步保持有序（挪进来的本就排在窗口之后），故 `abbrev_quota = false`（不重排的
+/// 调用方）也照做。
+///
+/// ## 简拼保底
+///
+/// 保证简拼候选至少留 `max / ABBREV_QUOTA_DIVISOR` 席。
 ///
 /// **为什么需要**：`is_abbrev` 是 [`wind_candidate::cmp_match_layers`] 的**第二**键
 /// （首键是 `fp_demoted`），简拼候选因此排在除「低置信全拼降级候选」之外的全部候选之后
@@ -193,15 +217,38 @@ const ABBREV_QUOTA_DIVISOR: usize = 10;
 /// 见那边 doc 记的已知缺口。
 ///
 /// 本函数的职责只是「让候选进得来」，不是「排好序」。
-fn truncate_with_abbrev_quota(cands: &mut Vec<Candidate>, max_candidates: usize) {
+fn truncate_with_quotas(
+    cands: &mut Vec<Candidate>,
+    max_candidates: usize,
+    abbrev_quota: bool,
+    is_corr: &dyn Fn(&Candidate) -> bool,
+) {
     if cands.len() <= max_candidates {
         return;
     }
-    let quota = max_candidates / ABBREV_QUOTA_DIVISOR;
-    if quota == 0 {
-        cands.truncate(max_candidates);
-        return;
+    let corr_quota = correction_quota(max_candidates);
+    if corr_quota > 0 {
+        let kept = cands[..max_candidates]
+            .iter()
+            .filter(|c| is_corr(c))
+            .count();
+        if kept < corr_quota {
+            let picked: Vec<usize> = (max_candidates..cands.len())
+                .filter(|&i| is_corr(&cands[i]))
+                .take(corr_quota - kept)
+                .collect();
+            // 从后往前摘，下标不失效；摘出来的保持原序。
+            let mut extra: Vec<Candidate> = picked.iter().rev().map(|&i| cands.remove(i)).collect();
+            extra.reverse();
+            let at = max_candidates - extra.len();
+            cands.splice(at..at, extra);
+        }
     }
+    let quota = if abbrev_quota {
+        max_candidates / ABBREV_QUOTA_DIVISOR
+    } else {
+        0
+    };
     let kept = cands[..max_candidates]
         .iter()
         .filter(|c| c.is_abbrev)
@@ -211,14 +258,24 @@ fn truncate_with_abbrev_quota(cands: &mut Vec<Candidate>, max_candidates: usize)
         return;
     }
     // 被截掉的那段同样是排好序的，故前几条即权重最高的简拼候选。
-    let extra: Vec<Candidate> = cands[max_candidates..]
+    let mut extra: Vec<Candidate> = cands[max_candidates..]
         .iter()
         .filter(|c| c.is_abbrev)
         .take(quota - kept)
         .cloned()
         .collect();
     cands.truncate(max_candidates);
-    // 腾位：从尾部往前挤掉等量的非简拼候选（排序后尾部即层级最低的那些）。
+    // 纠错保底的那几席（窗口里前 `corr_quota` 条纠错候选）不让位。
+    let mut corr_seen = 0usize;
+    let protected: Vec<bool> = cands
+        .iter()
+        .map(|c| {
+            let p = !c.is_abbrev && is_corr(c) && corr_seen < corr_quota;
+            corr_seen += usize::from(p);
+            p
+        })
+        .collect();
+    // 腾位：从尾部往前挤掉等量的非简拼、非纠错保底候选（排序后尾部即层级最低的那些）。
     //
     // 排在简拼之后的只有 `fp_demoted`（双拼开「允许全拼输入」时的低置信降级候选），
     // 所以**优先被挤掉的正是它们** —— 而它们恰是 `cmp_match_layers` 的 `fp_demoted`
@@ -228,11 +285,13 @@ fn truncate_with_abbrev_quota(cands: &mut Vec<Candidate>, max_candidates: usize)
     let mut i = cands.len();
     while to_remove > 0 && i > 0 {
         i -= 1;
-        if !cands[i].is_abbrev {
+        if !cands[i].is_abbrev && !protected[i] {
             cands.remove(i);
             to_remove -= 1;
         }
     }
+    // 腾不满（理论上不会：两份保底合计不超过窗口的 1/5）时少补几条，长度不越界。
+    extra.truncate(extra.len() - to_remove);
     cands.extend(extra);
 }
 
@@ -1097,9 +1156,26 @@ impl PinyinEngine {
     ///
     /// 双拼同键音节（[`FuzzyConfig::shared_key`]）属于布局、由 [`Self::with_shuangpin`] 注入，
     /// 用户模糊配置里没有这项：传入的为空时沿用已注入的那份，两个 builder 谁先调都不丢。
+    ///
+    /// 双拼方案不启用换位纠错：已注入双拼转换器时丢掉 [`FuzzyConfig::correction`]。
     pub fn with_fuzzy(mut self, mut fuzzy: FuzzyConfig) -> Self {
+        if self.shuangpin.is_some() {
+            fuzzy.correction = Default::default();
+        }
         self.trie
             .load_fuzzy_spellings(&fuzzy::fuzzy_spellings(&fuzzy));
+        // 同一拼写也是模糊错音串时（自定义 `in=ian` 的 `din` 也是 in/ing 的 `ding`）不标纠错边，
+        // 否则主切分连模糊那条也一起丢了。
+        let fuzzy_only = fuzzy::fuzzy_spellings(&FuzzyConfig {
+            correction: Default::default(),
+            ..fuzzy.clone()
+        });
+        self.trie.set_correction_spellings(
+            fuzzy
+                .correction
+                .spellings()
+                .filter(|s| fuzzy_only.binary_search_by(|f| f.as_str().cmp(s)).is_err()),
+        );
         if fuzzy.shared_key.is_empty() {
             fuzzy.shared_key = std::mem::take(&mut self.fuzzy_config.shared_key);
         }
@@ -1126,6 +1202,13 @@ impl PinyinEngine {
     pub fn with_shuangpin(mut self, conv: ShuangpinConverter) -> Self {
         self.input_chars = conv.layout().code_char_set();
         self.fuzzy_config.shared_key = conv.shared_key_syllables();
+        // 双拼不启用换位纠错（规则是全拼字母层的）；先注入的纠错拼写要从切分层摘掉。
+        if !self.fuzzy_config.correction.is_empty() {
+            self.fuzzy_config.correction = Default::default();
+            self.trie
+                .load_fuzzy_spellings(&fuzzy::fuzzy_spellings(&self.fuzzy_config));
+            self.trie.set_correction_spellings([]);
+        }
         self.shuangpin = Some(conv);
         self
     }
@@ -1160,13 +1243,20 @@ impl PinyinEngine {
 
     /// 从起始位置贪心切出连续完整音节（每步取最长匹配），返回 (音节序列, 结束字节位置)。
     /// 对齐 Go `ContiguousCompletedFromStart`：遇到无完整音节即停（残缺尾部不计入）。
+    ///
+    /// 换位纠错的错误拼写（`hagn`、`zhon`）**不算**音节：这几道闸门答的是「这串键像不像拼音」，
+    /// 纠错边只为切得动，不该让混输把五笔码 `hagn` 当成打到一半的拼音、拦下满码上屏。
     fn contiguous_completed_from_start(&self, prefix: &str) -> (Vec<String>, usize) {
+        let correction = &self.fuzzy_config.correction;
         let mut syllables = Vec::new();
         let mut pos = 0;
         while pos < prefix.len() {
             // match_at 返回该位置所有完整音节，最长优先；取最长贪心推进。
             let matches = self.trie.match_at(prefix, pos);
-            let Some(syl) = matches.into_iter().next() else {
+            let Some(syl) = matches
+                .into_iter()
+                .find(|s| correction.corrections_of(s).is_empty())
+            else {
                 break;
             };
             pos += syl.len();
@@ -1285,6 +1375,15 @@ impl PinyinEngine {
         if boundary != 0 && c.code == completed && !completed.is_empty() {
             return Some(cache.get((0, boundary, completed.len()), || {
                 render_preedit(completed, boundary, partial)
+            }));
+        }
+        // 纠错召回的整串候选：主切分不走纠错边，`completed` 覆盖不到它（`gognping` → 空串），
+        // 按所打码切分显示成 `gogn'ping`。
+        // 只认纠错候选：关纠错时这一支结构上不可达。
+        if c.is_corrected && boundary != 0 && c.code == raw_input && !c.is_abbrev && !c.is_sentence
+        {
+            return Some(cache.get((3, boundary, raw_input.len()), || {
+                render_preedit(raw_input, boundary, "")
             }));
         }
         if c.is_sentence && c.boundary != 0 && c.code == raw_input {
@@ -1799,7 +1898,7 @@ impl PinyinEngine {
         let completed: String = syllables.concat();
         // 模糊命中带 `learn_code`（词典码 + 边界），同主路径 step 1：本支路的候选码是击键，
         // 而击键在这里就是全拼（同一个域），分步组词时造词侧拼的正是这份规范码。
-        for h in self.lookup_with_fuzzy_in(&completed, syllables, false, &fz) {
+        for h in self.lookup_with_fuzzy_in(&completed, syllables, false, &fz, false) {
             let c = completed.clone();
             let n = c.len();
             let meta = wind_candidate::CandidateMeta {
@@ -1818,7 +1917,7 @@ impl PinyinEngine {
                 // 逐级限流，见 MAX_FULL_PINYIN_SUBPHRASE：单音节前缀的同音单字动辄 20+ 条，
                 // 不限就会吃光整个配额，把 ① 精确整词和 ③ 前缀补全挤出去。
                 for h in self
-                    .lookup_with_fuzzy_in(&code, &syllables[..end], false, &fz)
+                    .lookup_with_fuzzy_in(&code, &syllables[..end], false, &fz, false)
                     .into_iter()
                     .take(MAX_FULL_PINYIN_SUBPHRASE)
                 {
@@ -2260,7 +2359,12 @@ impl PinyinEngine {
     /// 返回 `(text, weight, order, is_fuzzy)`：原 code 精确命中 is_fuzzy=false；
     /// 模糊变体命中 is_fuzzy=true、按处数打折扣；双拼同键音节（0 处）命中不罚也不标。
     fn lookup_with_fuzzy(&self, code: &str, syllables: &[String], fixed: bool) -> Vec<LookupHit> {
-        self.lookup_with_fuzzy_in(code, syllables, fixed, &self.fuzzy_config)
+        self.lookup_with_fuzzy_in(code, syllables, fixed, &self.fuzzy_config, false)
+    }
+
+    /// 换位纠错召回：同 [`Self::lookup_with_fuzzy`]，但变体展开走纠错边。
+    fn lookup_corrected(&self, code: &str, syllables: &[String]) -> Vec<LookupHit> {
+        self.lookup_with_fuzzy_in(code, syllables, false, &self.fuzzy_config, true)
     }
 
     /// [`Self::lookup_with_fuzzy`] 的本体，模糊配置由调用方给：全拼降级支路传去掉双拼同键
@@ -2271,6 +2375,7 @@ impl PinyinEngine {
         syllables: &[String],
         fixed: bool,
         fz: &FuzzyConfig,
+        with_correction: bool,
     ) -> Vec<LookupHit> {
         // 精确匹配：候选码即查询码 `code`，故词典 boundary 与之同域，可直接采信。
         // 注意此处必须用 search_with_boundary——拼音引擎直接持有 CachedDict、不经
@@ -2296,7 +2401,7 @@ impl PinyinEngine {
         // 模糊变体命中对外一律 boundary=0（不设防）：词典给的是**变体码**（如 zhongguo）的切分，
         // 而候选对外的 code 是用户实际输入的原码（zongguo）——两者不同域，位偏移对不上，
         // 直接采信会错位误杀。词典边界只拿来和同域的变体边界核对（[`fuzzy_shape_edits`]）。
-        let fuzzy = self.fuzzy_codes(code, syllables, fixed, fz, &|v| {
+        let fuzzy = self.fuzzy_codes(code, syllables, fixed, fz, with_correction, &|v| {
             self.dict.has_longer_code(v)
         });
         for (variant, shapes) in fuzzy {
@@ -2343,6 +2448,8 @@ impl PinyinEngine {
         syllables: &[String],
         fixed: bool,
         fz: &FuzzyConfig,
+        // 走不走换位纠错边：只有纠错召回步传 true（见 `SegGraph::from_dag`）。
+        with_correction: bool,
         can_extend: &dyn Fn(&str) -> bool,
     ) -> Vec<(String, Vec<FuzzyCodeShape>)> {
         if !fz.any_enabled() {
@@ -2350,6 +2457,8 @@ impl PinyinEngine {
         }
         let graph = if fixed {
             SegGraph::from_syllables(syllables)
+        } else if with_correction {
+            SegGraph::from_dag_with_correction(&Dag::build(code, &self.trie))
         } else {
             SegGraph::from_dag(&Dag::build(code, &self.trie))
         };
@@ -2407,7 +2516,7 @@ impl PinyinEngine {
         fz: &FuzzyConfig,
     ) -> Vec<Candidate> {
         let mut out = Vec::new();
-        for (variant, shapes) in self.fuzzy_codes(code, syllables, fixed, fz, &|_| true) {
+        for (variant, shapes) in self.fuzzy_codes(code, syllables, fixed, fz, false, &|_| true) {
             for mut c in store_dm.search(&variant, limit) {
                 // 手输码的记录没有边界：按码现切一次再核对，否则任何切法都能借到它。
                 let boundary = effective_boundary(&variant, c.boundary, &self.trie);
@@ -2427,7 +2536,11 @@ impl PinyinEngine {
         out
     }
 
-    /// 给候选填模糊音提示（`meta.fuzzy_hints`），`hint` 关时调用方不进来。
+    /// 给候选填正确拼音提示（`meta.pinyin_hints`，模糊与纠错来源，再按误读表覆盖）并判 `is_corrected`；
+    /// `hint` 关且无纠错规则时调用方不进来。
+    ///
+    /// `is_corrected` 判在最终候选上：同文合并后留下的那条若有非纠错来源（精确命中无
+    /// `learn_code`、或读音对齐得上），就不算经纠错。
     ///
     /// 在 `convert` 收尾对**最终**候选统一做一次，而不是散在各产出点：词库读音只认
     /// `learn_code`，各路径的同文合并（替换 / 继承 `learn_code`）都已落定，提示与
@@ -2443,57 +2556,182 @@ impl PinyinEngine {
     ///
     /// 词库读音取 `learn_code`；双拼对偶声母读出的候选没有它（转换后的全拼就是词典码），
     /// 用候选自身的码。只填提示、不动 `is_fuzzy`：`hint` 开关不得改变排序（D7）。
-    fn fill_fuzzy_hints(
+    fn fill_pinyin_hints(
         &self,
         cands: &mut [Candidate],
         query: &str,
         raw_input: &str,
         sp: Option<&shuangpin::SpConvertResult>,
     ) {
+        let readings = self
+            .fuzzy_config
+            .readings
+            .get()
+            .filter(|_| self.fuzzy_config.hint.get());
         for c in cands.iter_mut() {
-            let sp_main = sp.filter(|_| !c.is_fullpinyin_fallback);
-            if let Some(sp) = sp_main {
-                if c.code.is_empty() || !query.starts_with(c.code.as_str()) {
-                    continue;
-                }
-                // 没有 `learn_code` 的（精确命中）只有换过本义读音才可能带提示：先零分配地判掉。
-                if c.meta.learn_code.is_none()
-                    && !sp
-                        .syllables
-                        .iter()
-                        .any(|s| s.literal.is_some() && s.fp_end <= c.code.len())
-                {
-                    continue;
-                }
-            } else if c.meta.learn_code.is_none() {
-                continue;
+            self.fill_inferred_hint(c, query, raw_input, sp);
+            if let Some(idx) = &readings {
+                self.infer_misread_hint(c, query, sp, idx);
             }
-            let (typed, ends_here) = match sp_main {
-                Some(sp) => (literal_typed(sp, query, c.code.len()), false),
-                None if c.is_fullpinyin_fallback => {
-                    (normalized_typed(&c.code), c.code.len() == raw_input.len())
-                }
-                None => (normalized_typed(&c.code), c.code.len() == query.len()),
-            };
-            let (dict_code, dict_boundary) = match &c.meta.learn_code {
-                Some((code, b)) => (code.as_str(), *b),
-                None => (c.code.as_str(), c.boundary),
-            };
-            let mask = effective_boundary(dict_code, dict_boundary, &self.trie);
-            let Some(syllables) = mixed_abbrev::syllables_from_boundary(dict_code, mask) else {
-                continue;
-            };
-            // 一字一音节；对不上（儿化、含英文的词条）整条不标——宁漏不错。
-            if syllables.len() != c.text.chars().count() {
-                continue;
-            }
-            let hints = fuzzy_hint::align_hints(&typed, &syllables, &self.fuzzy_config, ends_here);
-            if hints.is_empty() {
-                continue;
-            }
-            c.meta.fuzzy_hints = hints;
-            c.meta.fuzzy_syllables = syllables.iter().map(|s| s.to_string()).collect();
+            self.apply_misread_hint(c, query, sp);
         }
+    }
+
+    /// 误读自动推断（设计 §6.1，[`misread::infer`]）：只看整条是词库词、按用户音节逐字读出的候选
+    /// （精确命中 / 单字拼成，无 `learn_code`）；已带模糊 / 纠错提示的、召回的、简拼与补全的不推断。
+    /// 读音索引未就绪时不进来（静默不标）。
+    fn infer_misread_hint(
+        &self,
+        c: &mut Candidate,
+        query: &str,
+        sp: Option<&shuangpin::SpConvertResult>,
+        idx: &wind_dict::cached::ReverseIndex,
+    ) {
+        // 简拼 / 前缀补全不标（设计 §6.1 第 4 条）；末尾半截音节由下面的整音节判据挡掉。
+        if c.meta.learn_code.is_some()
+            || c.is_misread_recall
+            || c.is_abbrev
+            || c.is_prefix
+            || !c.meta.pinyin_hints.is_empty()
+            || c.text.chars().nth(1).is_none()
+        {
+            return;
+        }
+        // 双拼：击键域的码（简拼）无从还原成音节。
+        if sp.is_some() && !c.is_fullpinyin_fallback && !query.starts_with(c.code.as_str()) {
+            return;
+        }
+        let Some(codes) = idx.codes_of(&c.text) else {
+            return;
+        };
+        let typed_code = normalized_typed(&c.code);
+        // 绝大多数候选在这里返回：用户打的就是登记读音。
+        if codes.iter().any(|k| k == typed_code) {
+            return;
+        }
+        let boundary = if typed_code == c.code { c.boundary } else { 0 };
+        let mask = effective_boundary(&typed_code, boundary, &self.trie);
+        let Some(typed) = mixed_abbrev::syllables_from_boundary(&typed_code, mask) else {
+            return;
+        };
+        if !typed.iter().all(|s| self.trie.is_syllable(s)) {
+            return;
+        }
+        let readings: Vec<(Vec<String>, u32)> = codes
+            .iter()
+            .filter_map(|code| {
+                let hit = self
+                    .dict
+                    .search_with_boundary(code)
+                    .into_iter()
+                    .find(|h| h.text == c.text)?;
+                let m = effective_boundary(code, hit.boundary, &self.trie);
+                let syls = mixed_abbrev::syllables_from_boundary(code, m)?;
+                Some((
+                    syls.into_iter().map(str::to_string).collect(),
+                    hit.weight.max(0) as u32,
+                ))
+            })
+            .collect();
+        let empty = misread::MisreadTable::default();
+        let table = self.fuzzy_config.misread.as_deref().unwrap_or(&empty);
+        let hints = misread::infer(&c.text, &typed, &readings, table, &self.fuzzy_config);
+        if hints.is_empty() {
+            return;
+        }
+        let mut syllables: Vec<String> = typed.iter().map(|s| s.to_string()).collect();
+        for h in &hints {
+            syllables[h.char_index as usize] = h.correct.clone();
+        }
+        c.meta.hint_syllables = syllables;
+        c.meta.pinyin_hints = hints;
+    }
+
+    /// 自动推断的提示（模糊 / 纠错来源）与 `is_corrected`，见 [`Self::fill_pinyin_hints`]。
+    fn fill_inferred_hint(
+        &self,
+        c: &mut Candidate,
+        query: &str,
+        raw_input: &str,
+        sp: Option<&shuangpin::SpConvertResult>,
+    ) {
+        let sp_main = sp.filter(|_| !c.is_fullpinyin_fallback);
+        if let Some(sp) = sp_main {
+            if c.code.is_empty() || !query.starts_with(c.code.as_str()) {
+                return;
+            }
+            // 没有 `learn_code` 的（精确命中）只有换过本义读音才可能带提示：先零分配地判掉。
+            if c.meta.learn_code.is_none()
+                && !sp
+                    .syllables
+                    .iter()
+                    .any(|s| s.literal.is_some() && s.fp_end <= c.code.len())
+            {
+                return;
+            }
+        } else if c.meta.learn_code.is_none() {
+            return;
+        }
+        let (typed, ends_here) = match sp_main {
+            Some(sp) => (literal_typed(sp, query, c.code.len()), false),
+            None if c.is_fullpinyin_fallback => {
+                (normalized_typed(&c.code), c.code.len() == raw_input.len())
+            }
+            None => (normalized_typed(&c.code), c.code.len() == query.len()),
+        };
+        let (dict_code, dict_boundary) = match &c.meta.learn_code {
+            Some((code, b)) => (code.as_str(), *b),
+            None => (c.code.as_str(), c.boundary),
+        };
+        let mask = effective_boundary(dict_code, dict_boundary, &self.trie);
+        let Some(syllables) = mixed_abbrev::syllables_from_boundary(dict_code, mask) else {
+            return;
+        };
+        // 一字一音节；对不上（儿化、含英文的词条）整条不标——宁漏不错。
+        if syllables.len() != c.text.chars().count() {
+            return;
+        }
+        let a = hint_align::align(&typed, &syllables, &self.fuzzy_config, ends_here);
+        c.is_corrected = a.corrected;
+        if a.hints.is_empty() {
+            return;
+        }
+        c.meta.pinyin_hints = a.hints;
+        c.meta.hint_syllables = syllables.iter().map(|s| s.to_string()).collect();
+    }
+
+    /// 误读表优先（设计 §6.2）：文字 + 用户所打读音命中表项时，提示换成表里的（只标读错的字，
+    /// `HintKind::Misread`）；白名单条目清掉自动推断的提示。误读召回的候选按表重标、不算纠错。
+    fn apply_misread_hint(
+        &self,
+        c: &mut Candidate,
+        query: &str,
+        sp: Option<&shuangpin::SpConvertResult>,
+    ) {
+        let Some(table) = self.fuzzy_config.misread.as_deref() else {
+            return;
+        };
+        if !table.has_text(&c.text) {
+            return;
+        }
+        let typed = match sp.filter(|_| !c.is_fullpinyin_fallback) {
+            Some(sp) if query.starts_with(c.code.as_str()) => {
+                literal_typed(sp, query, c.code.len())
+            }
+            Some(_) => return,
+            None => normalized_typed(&c.code),
+        };
+        let Some(e) = table.lookup(&c.text, &[typed.as_str()]) else {
+            return;
+        };
+        if c.is_misread_recall {
+            c.is_corrected = false;
+        }
+        c.meta.pinyin_hints = misread_hints(e);
+        c.meta.hint_syllables = match &e.correct {
+            Some(correct) if !c.meta.pinyin_hints.is_empty() => correct.clone(),
+            _ => Vec::new(),
+        };
     }
 }
 
@@ -2514,7 +2752,39 @@ fn literal_typed(sp: &shuangpin::SpConvertResult, query: &str, len: usize) -> St
     out
 }
 
-/// 全拼域的候选码规范成 [`fuzzy_hint::align_hints`] 要的形态：去 `'`、ü 归一化。
+/// 音节序列的边界掩码（bit i = 第 i 字节起一个音节，同 `Candidate::boundary`）。
+fn misread_boundary(syllables: &[String]) -> u64 {
+    let mut mask = 0u64;
+    let mut at = 0usize;
+    for s in syllables {
+        if at >= 64 {
+            return 0;
+        }
+        mask |= 1 << at;
+        at += s.len();
+    }
+    mask
+}
+
+/// 误读条目的逐字提示：只标错误读音与正确读音不同的字。白名单（无正确读音）为空。
+fn misread_hints(e: &misread::MisreadEntry) -> Vec<wind_candidate::PinyinHint> {
+    let Some(correct) = &e.correct else {
+        return Vec::new();
+    };
+    e.wrong
+        .iter()
+        .zip(correct)
+        .enumerate()
+        .filter(|(_, (w, c))| w != c)
+        .map(|(i, (_, c))| wind_candidate::PinyinHint {
+            char_index: i as u16,
+            correct: c.clone(),
+            kind: wind_candidate::HintKind::Misread,
+        })
+        .collect()
+}
+
+/// 全拼域的候选码规范成 [`hint_align::align`] 要的形态：去 `'`、ü 归一化。
 ///
 /// 防御性的：当前各路径交来的码已是这个形态（全拼主路径入口已归一、`completed` 与整句码
 /// 不含 `'`；降级支路的闸门遇 `'` 即拒，且词库用 `lve` 拼写时 `lue` 击键在支路里查不到词），
@@ -4619,6 +4889,79 @@ impl Engine for PinyinEngine {
             self.recall_full_pinyin(raw_input, &fp_syls, &mut candidates);
         }
 
+        // 换位纠错召回：主切分不走纠错边（见 `Dag::maximum_match`），纠错词在这里按走纠错边的
+        // 切分另查——整串与含纠错音节的各级前缀，同 step 1 / step 3 的查法。放在全部召回之后：
+        // `push_unique` 同文先到者占位，同一文字有非纠错来源时留非纠错那条。
+        // 经本步新增的文字：截断时只占非纠错候选用剩的名额（见下方截断处）。不能只看
+        // `is_corrected`——末尾打字途中的半截（`zhon`）对齐判作前缀、不标纠错。
+        let mut correction_added: std::collections::HashSet<String> = Default::default();
+        if !self.fuzzy_config.correction.is_empty() && sp_result.is_none() && !has_sep {
+            let corr_syls = Dag::build(query, trie).maximum_match_with_correction();
+            let first_corr = corr_syls
+                .iter()
+                .position(|s| trie.is_correction_spelling(s));
+            if let Some(first) = first_corr {
+                for end in (first + 1)..=corr_syls.len().min(6) {
+                    let code: String = corr_syls[..end].concat();
+                    for h in self.lookup_corrected(&code, &corr_syls[..end]) {
+                        let learn = h.dict.clone();
+                        let typed = h.typed_boundary;
+                        let before = candidates.len();
+                        push_unique(
+                            &mut candidates,
+                            h.text,
+                            code.clone(),
+                            h.weight,
+                            h.order,
+                            h.is_fuzzy,
+                            false,
+                            h.boundary,
+                            false,
+                        );
+                        if candidates.len() > before {
+                            candidates[before].meta.learn_code = learn;
+                            candidates[before].meta.fuzzy_typed_boundary = typed;
+                            correction_added.insert(candidates[before].text.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        // 误读召回（设计 §6.2）：整串恰为表里某条的错误读音（`xinxin` → 「莘莘」）⇒ 词库读不出
+        // 也放进候选。权重取同页最低再低一档，标 `is_misread_recall`（不占首选、不计自动上屏，
+        // 截断时与纠错共用保底）。词库已有同文字候选时不召回，那条由收尾的提示照标。
+        if let Some(table) = self.fuzzy_config.misread.clone() {
+            // 拼音 weight 恒非负（负 weight 在 `better_natural` 里另有「非精确」含义），故夹到 0。
+            let lowest = candidates.iter().map(|c| c.weight).min().unwrap_or(1);
+            let floor = (lowest - 1).max(0);
+            for e in table.recall(query) {
+                if candidates.iter().any(|c| c.text == e.text)
+                    || opts.admit.as_deref().is_some_and(|f| !f(&e.text))
+                {
+                    continue;
+                }
+                let correct = e.correct.as_deref().unwrap_or_default();
+                let order = candidates.len() as i32;
+                candidates.push(Candidate {
+                    text: e.text.clone(),
+                    code: query.to_string(),
+                    weight: floor,
+                    natural_order: order,
+                    source: CandidateSource::Pinyin,
+                    boundary: misread_boundary(&e.wrong),
+                    is_misread_recall: true,
+                    meta: wind_candidate::CandidateMeta {
+                        learn_code: Some((correct.concat(), misread_boundary(correct))),
+                        pinyin_hints: misread_hints(e),
+                        hint_syllables: correct.to_vec(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                });
+            }
+        }
+
         // 分段上屏所需：标注每个候选实际消费的输入字节数。
         //
         // 本块原在 `sort_by` + `truncate` **之后**，现提到其前。当前排序并不消费它（理由见
@@ -4700,7 +5043,7 @@ impl Engine for PinyinEngine {
         // 排序键只影响顺序；我们「一次性产生 N 条 + 截断」，排序键同时决定了去留。
         // ⇒ 引擎侧的匹配层级（含 `is_promoted_completion` 上浮）保证的是「高价值候选活过
         // 截断」，与协调器 P0 的「显示顺序」**不是同一件事，不可互相替代**。
-        // 保底配额现已有**一档**：`truncate_with_abbrev_quota`，判据是 `is_abbrev`。
+        // 保底配额现已有**一档**：`truncate_with_quotas`，判据是 `is_abbrev`。
         // 但下沉 P0 要的是按**消费长度**分档（参考混输 `PINYIN_QUOTA_DIVISOR`），那件仍未做
         // —— 单档只护住了简拼这一类，消费长度短的候选仍会被长候选整批挤出截断窗口。
         //
@@ -4710,13 +5053,24 @@ impl Engine for PinyinEngine {
                 .then(b.weight.cmp(&a.weight))
                 .then(a.natural_order.cmp(&b.natural_order))
         };
-        candidates.sort_by(engine_order);
-        if abbrev_quota {
-            truncate_with_abbrev_quota(&mut candidates, max_candidates);
-        } else {
-            // 调用方声明了不重排（见 `ConvertOptions::no_abbrev_quota`）：补位在那边是净损失。
-            candidates.truncate(max_candidates);
+        // 换位纠错：截断前先判出纠错候选（`is_corrected`）、去掉同文的纠错那条。纠错候选按
+        // 罚过的 weight（`0.5^CORRECTION_EDITS`，与模糊同量纲）与其余候选同一比较器穿插；
+        // 窗口里保底见 [`correction_quota`]（对齐 librime 纠错上限 4），挤出去的只是窗口尾部。
+        let correction_on = !self.fuzzy_config.correction.is_empty();
+        if correction_on {
+            self.fill_pinyin_hints(&mut candidates, query, raw_input, sp_result.as_ref());
+            wind_candidate::drop_corrected_duplicates(&mut candidates);
         }
+        candidates.sort_by(engine_order);
+        // 纠错召回步新增的也算：末尾半截（`zhon`）对齐判作前缀、不标纠错。
+        // 误读召回同样只占保底名额（`is_misread_recall`）。
+        let is_corr = |c: &Candidate| {
+            c.is_misread_recall
+                || (correction_on && (c.is_corrected || correction_added.contains(&c.text)))
+        };
+        // `abbrev_quota = false`：调用方声明了不重排（见 `ConvertOptions::no_abbrev_quota`），
+        // 简拼补位在那边是净损失；纠错保底保持有序，照做。
+        truncate_with_quotas(&mut candidates, max_candidates, abbrev_quota, &is_corr);
 
         // 零权重读音让位：精确单字的**这个读音**词库权重为 0（𤭢 cei、塞 sei、嫩 nun、这 zhei）
         // ⇒ 并入简拼层按 weight 竞争（`Candidate::is_zero_weight_reading`）。双拼两键 `cw`
@@ -4727,7 +5081,7 @@ impl Engine for PinyinEngine {
         // 用户选过的字由 `freq_rerank::rerank_pinyin_positional` 摘掉标记。
         //
         // ⚠️ **必须在截断之后置位、再稳定重排**：标记把字沉到简拼层末尾，截断前置位的话
-        // `truncate_with_abbrev_quota` 腾位时从尾部先挤掉的就是它们（小鹤 `jx` 的夾/挟/袷整条
+        // `truncate_with_quotas` 腾位时从尾部先挤掉的就是它们（小鹤 `jx` 的夾/挟/袷整条
         // 消失，8 个布局两键共 584 个输入掉字），而词频重排在截断之后、救不回来。
         // 截断按改动前的次序做 ⇒ 活过截断的集合与改前逐条一致，变的只有次序。
         // 位置也须在下方 preedit 读 `candidates.first()` 之前。
@@ -4892,9 +5246,13 @@ impl Engine for PinyinEngine {
             _ => String::new(),
         };
 
-        if self.fuzzy_config.hint.get() {
-            self.fill_fuzzy_hints(&mut candidates, query, raw_input, sp_result.as_ref());
-            self.fill_fuzzy_hints(&mut sentence_pool, query, raw_input, sp_result.as_ref());
+        // 开纠错时 `candidates` 已在截断前标过（见上）。
+        if self.fuzzy_config.hint.get() && !correction_on {
+            self.fill_pinyin_hints(&mut candidates, query, raw_input, sp_result.as_ref());
+        }
+        if self.fuzzy_config.hint.get() || correction_on {
+            self.fill_pinyin_hints(&mut sentence_pool, query, raw_input, sp_result.as_ref());
+            wind_candidate::drop_corrected_duplicates(&mut sentence_pool);
         }
 
         Ok(ConvertResult {
@@ -5214,6 +5572,106 @@ mod tests {
             r.preedit_display, "xu'yao",
             "编码栏显示归一化形态，音节边界照常"
         );
+    }
+
+    /// 合成候选：`p*` 普通、`a*` 简拼、`c*` 纠错，按给出的次序即已排好序。
+    fn quota_list(spec: &[(&str, usize)]) -> Vec<Candidate> {
+        spec.iter()
+            .flat_map(|&(kind, n)| (0..n).map(move |i| (kind, i)))
+            .map(|(kind, i)| Candidate {
+                text: format!("{kind}{i}"),
+                is_abbrev: kind == "a",
+                is_corrected: kind == "c",
+                ..Default::default()
+            })
+            .collect()
+    }
+
+    fn quota_texts(c: &[Candidate]) -> Vec<&str> {
+        c.iter().map(|c| c.text.as_str()).collect()
+    }
+
+    /// 两份保底同时不足：简拼腾位不吃纠错保底的那几席，两边都拿满。
+    #[test]
+    fn abbrev_and_correction_quotas_both_hold() {
+        // 窗口 50：简拼保底 5、纠错保底 4；窗口里全是普通候选。
+        let mut c = quota_list(&[("p", 60), ("c", 6), ("a", 8)]);
+        truncate_with_quotas(&mut c, 50, true, &|c| c.is_corrected);
+        assert_eq!(c.len(), 50);
+        let t = quota_texts(&c);
+        assert_eq!(t.iter().filter(|t| t.starts_with('c')).count(), 4, "{t:?}");
+        assert_eq!(t.iter().filter(|t| t.starts_with('a')).count(), 5, "{t:?}");
+        // 普通候选只被挤掉尾部、相对次序不变。
+        let plain: Vec<&str> = t.iter().copied().filter(|t| t.starts_with('p')).collect();
+        assert_eq!(plain, quota_texts(&quota_list(&[("p", 41)])));
+        // 纠错按分取最前的 4 条。
+        let corr: Vec<&str> = t.iter().copied().filter(|t| t.starts_with('c')).collect();
+        assert_eq!(corr, ["c0", "c1", "c2", "c3"]);
+    }
+
+    /// 小窗口不给纠错保底：limit=1 首选不被挤掉，limit=9 也一席不占。
+    #[test]
+    fn correction_quota_never_displaces_small_window() {
+        for max in [1, 8, 9] {
+            let mut c = quota_list(&[("p", 20), ("c", 6)]);
+            truncate_with_quotas(&mut c, max, false, &|c| c.is_corrected);
+            assert_eq!(
+                quota_texts(&c),
+                quota_texts(&quota_list(&[("p", max)])),
+                "{max}"
+            );
+        }
+        assert_eq!(correction_quota(10), 1);
+        assert_eq!(correction_quota(300), 4);
+    }
+
+    /// 关纠错（谓词恒假）时只有简拼保底：补 5 条简拼、挤掉尾部 5 条普通候选。
+    #[test]
+    fn quotas_without_correction_match_abbrev_only() {
+        let mut a = quota_list(&[("p", 60), ("c", 6), ("a", 8)]);
+        truncate_with_quotas(&mut a, 50, true, &|_| false);
+        let plain = quota_list(&[("p", 45)]);
+        let mut want = quota_texts(&plain);
+        want.extend(["a0", "a1", "a2", "a3", "a4"]);
+        assert_eq!(quota_texts(&a), want);
+    }
+
+    fn correction_fuzzy() -> FuzzyConfig {
+        let mut c = wind_config::CorrectionConfig::default();
+        c.rules.gn_ng = true; // 出厂关；用例是 gogn
+        FuzzyConfig {
+            correction: Arc::new(correction::CorrectionRules::from_config(&c)),
+            ..Default::default()
+        }
+    }
+
+    /// 换位纠错拼写成为可切的边：`gogn` 出「工」。
+    #[test]
+    fn correction_spelling_is_cuttable() {
+        let mut raw = CodetableDict::empty();
+        raw.merge_single("gong".to_string(), "工".to_string(), 100, 0);
+        let eng = PinyinEngine::new(Config::default(), CachedDict::Memory(raw))
+            .with_fuzzy(correction_fuzzy());
+        let r = eng.convert("gogn", 10).unwrap();
+        assert!(r.candidates.iter().any(|c| c.text == "工"), "{r:?}");
+    }
+
+    /// 双拼不启用换位纠错：两个 builder 谁先调都把纠错置空。
+    #[test]
+    fn shuangpin_drops_correction() {
+        let schema_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../data/schemas/shuangpin");
+        let layout =
+            || Layout::from_toml(&schema_dir.join("xiaohe.toml")).expect("加载小鹤布局失败");
+        let dict = || CachedDict::Memory(CodetableDict::empty());
+        let a = PinyinEngine::new(Config::default(), dict())
+            .with_fuzzy(correction_fuzzy())
+            .with_shuangpin(ShuangpinConverter::new(layout()));
+        assert!(a.fuzzy_config.correction.is_empty());
+        let b = PinyinEngine::new(Config::default(), dict())
+            .with_shuangpin(ShuangpinConverter::new(layout()))
+            .with_fuzzy(correction_fuzzy());
+        assert!(b.fuzzy_config.correction.is_empty());
     }
 
     /// ⚠️ 双拼下 `v` 是**布局键**（小鹤 `v` = zh 声母），归一化绝不能触及。
@@ -8496,7 +8954,7 @@ s = ["ao"]
         }
     }
 
-    // ── 模糊音提示（`meta.fuzzy_hints`）：引擎各路径按 learn_code 与用户音节对齐填提示。──
+    // ── 模糊音提示（`meta.pinyin_hints`）：引擎各路径按 learn_code 与用户音节对齐填提示。──
 
     fn hint_cfg() -> FuzzyConfig {
         FuzzyConfig {
@@ -8521,20 +8979,21 @@ s = ["ao"]
         .with_fuzzy(fz)
     }
 
-    fn fh(i: u16, s: &str) -> wind_candidate::FuzzyHint {
-        wind_candidate::FuzzyHint {
+    fn fh(i: u16, s: &str) -> wind_candidate::PinyinHint {
+        wind_candidate::PinyinHint {
             char_index: i,
             correct: s.into(),
+            kind: wind_candidate::HintKind::Fuzzy,
         }
     }
 
-    fn hints_of<'a>(r: &'a ConvertResult, text: &str) -> &'a [wind_candidate::FuzzyHint] {
+    fn hints_of<'a>(r: &'a ConvertResult, text: &str) -> &'a [wind_candidate::PinyinHint] {
         &r.candidates
             .iter()
             .find(|c| c.text == text)
             .unwrap_or_else(|| panic!("应有候选「{text}」，实际: {:?}", texts(r)))
             .meta
-            .fuzzy_hints
+            .pinyin_hints
     }
 
     #[test]
@@ -8554,9 +9013,9 @@ s = ["ao"]
             Some(0),
             "前提：词条码无边界"
         );
-        assert_eq!(c.meta.fuzzy_syllables, ["ping", "guo"]);
+        assert_eq!(c.meta.hint_syllables, ["ping", "guo"]);
         let exact = r.candidates.iter().find(|c| c.text == "拼过").unwrap();
-        assert!(exact.meta.fuzzy_syllables.is_empty(), "无提示不填");
+        assert!(exact.meta.hint_syllables.is_empty(), "无提示不填");
     }
 
     /// 开关是共享的：同一引擎实例上翻转即生效，不必重建。
@@ -8567,7 +9026,7 @@ s = ["ao"]
         let eng = hint_engine(fz);
         switch.set(false);
         let r = eng.convert("pinguo", 20).unwrap();
-        assert!(r.candidates.iter().all(|c| c.meta.fuzzy_hints.is_empty()));
+        assert!(r.candidates.iter().all(|c| c.meta.pinyin_hints.is_empty()));
         switch.set(true);
         let r = eng.convert("pinguo", 20).unwrap();
         assert_eq!(hints_of(&r, "苹果"), &[fh(0, "ping")]);
@@ -8579,7 +9038,7 @@ s = ["ao"]
         fz.hint = fuzzy::HintSwitch::new(false);
         let r = hint_engine(fz).convert("pinguo", 20).unwrap();
         assert!(r.candidates.iter().any(|c| c.text == "苹果"));
-        assert!(r.candidates.iter().all(|c| c.meta.fuzzy_hints.is_empty()));
+        assert!(r.candidates.iter().all(|c| c.meta.pinyin_hints.is_empty()));
     }
 
     #[test]
@@ -8591,11 +9050,11 @@ s = ["ao"]
             texts(&r)
         );
         assert!(
-            r.candidates.iter().all(|c| c.meta.fuzzy_hints.is_empty()),
+            r.candidates.iter().all(|c| c.meta.pinyin_hints.is_empty()),
             "末音节可能没打完，不标: {:?}",
             r.candidates
                 .iter()
-                .map(|c| (&c.text, &c.meta.fuzzy_hints))
+                .map(|c| (&c.text, &c.meta.pinyin_hints))
                 .collect::<Vec<_>>()
         );
         // 对照：末音节是完整的另一读音（`lan` → 南）照标。
@@ -8631,7 +9090,7 @@ s = ["ao"]
             .iter()
             .find(|c| c.is_sentence && c.text == "苹果蓝")
             .unwrap_or_else(|| panic!("应组出整句「苹果蓝」: {:?}", texts(&r)));
-        assert_eq!(s.meta.fuzzy_hints, vec![fh(0, "ping")], "只标模糊段");
+        assert_eq!(s.meta.pinyin_hints, vec![fh(0, "ping")], "只标模糊段");
     }
 
     #[test]
@@ -8653,8 +9112,8 @@ s = ["ao"]
             engine_with_user_words_fuzzy("fz_hint_user_b0", &[("pingguo", "苹果", 0)], hint_cfg());
         let r = eng.convert("pinguo", 20).unwrap();
         let c = r.candidates.iter().find(|c| c.text == "苹果").unwrap();
-        assert_eq!(c.meta.fuzzy_hints, [fh(0, "ping")]);
-        assert_eq!(c.meta.fuzzy_syllables, ["ping", "guo"]);
+        assert_eq!(c.meta.pinyin_hints, [fh(0, "ping")]);
+        assert_eq!(c.meta.hint_syllables, ["ping", "guo"]);
     }
 
     fn sp_hint_engine(layout: &str, words: &[(&str, &str)], fz: FuzzyConfig) -> PinyinEngine {
@@ -8682,7 +9141,7 @@ s = ["ao"]
             .find(|c| c.text == "刷")
             .expect("sx 应出「刷」");
         assert!(!c.is_fuzzy, "只填提示，不改 is_fuzzy（排序不受 hint 影响）");
-        assert_eq!(c.meta.fuzzy_hints, vec![fh(0, "shua")]);
+        assert_eq!(c.meta.pinyin_hints, vec![fh(0, "shua")]);
         // 对照：按 sh 键打（`ux`）是正读，不标。
         let r = eng.convert("ux", 20).unwrap();
         assert!(hints_of(&r, "刷").is_empty());
@@ -8695,7 +9154,7 @@ s = ["ao"]
             .convert("sx", 20)
             .unwrap();
         let c = r.candidates.iter().find(|c| c.text == "刷").unwrap();
-        assert!(!c.is_fuzzy && c.meta.fuzzy_hints.is_empty());
+        assert!(!c.is_fuzzy && c.meta.pinyin_hints.is_empty());
     }
 
     /// hint 开关只影响显示：同一双拼对偶输入，开与关的候选顺序与模糊标记逐条一致。
@@ -8775,7 +9234,7 @@ s = ["ao"]
             .find(|c| c.text == "性情")
             .unwrap_or_else(|| panic!("{:?}", texts(&r)));
         assert!(c.is_fullpinyin_fallback, "前提：来自全拼降级支路");
-        assert_eq!(c.meta.fuzzy_hints, vec![fh(0, "xing")]);
+        assert_eq!(c.meta.pinyin_hints, vec![fh(0, "xing")]);
 
         let r = eng.convert("qingxin", 20).unwrap();
         let c = r
@@ -8784,7 +9243,10 @@ s = ["ao"]
             .find(|c| c.text == "情性")
             .unwrap_or_else(|| panic!("{:?}", texts(&r)));
         assert!(c.is_fullpinyin_fallback, "前提：来自全拼降级支路");
-        assert!(c.meta.fuzzy_hints.is_empty(), "末音节 xin 可能没打完，不标");
+        assert!(
+            c.meta.pinyin_hints.is_empty(),
+            "末音节 xin 可能没打完，不标"
+        );
     }
 
     /// 双拼同键音节（自定义布局 `q = ["iu", "ui"]`）不算打错，不标。

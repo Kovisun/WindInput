@@ -426,7 +426,10 @@ fn resolve_auto_commit_min_len(configured: usize, max_code_length: usize) -> usi
 /// （`len`）**照常把 emoji 计入**——用户要能翻到并选中它；而且没有宿主候选就不会有
 /// emoji，故 `is_empty` 的语义天然不受影响。
 fn sole_non_emoji(candidates: &[Candidate]) -> Option<&Candidate> {
-    let mut it = candidates.iter().filter(|c| !c.is_emoji_suggestion);
+    // 低置信候选（换位纠错、误读召回）同样不计：满码唯一的短语不该被它们拦下。
+    let mut it = candidates
+        .iter()
+        .filter(|c| !c.is_emoji_suggestion && !c.is_low_confidence());
     let first = it.next()?;
     it.next().is_none().then_some(first)
 }
@@ -1832,6 +1835,8 @@ impl Coordinator {
         // ⚠️ 常用字判定必须**先于排序**：混输的拼音精确档拿 `is_common` 作提档准入条件
         // （见 `mark_common` 与 `wind_candidate::is_pinyin_exact_tier`）。过滤仍在下面按模式进行。
         self.mark_common(&mut candidates);
+        // 同文的纠错候选让给非纠错那条（下面的去重留排序靠前者，纠错那条可能更靠前）。
+        wind_candidate::drop_corrected_duplicates(&mut candidates);
         candidates.sort_by(|a, b| candidate_display_order(a, b, ignore_weight, mixed, &input_str));
         // 按 text 去重。**不能用 `retain` + `HashSet`**：被丢弃那条所占的码位要并进幸存者，
         // 否则下一步的检索范围过滤按 (source, code) 分组时会丢掉「该码位下有常用字」这一事实
@@ -1908,6 +1913,8 @@ impl Coordinator {
                 usize::from(self.rt().config.schema.pinyin.sentence_count)
             },
         );
+        // 纠错候选不占首选（D6）：放在全部重排之后、shadow 之前——用户置顶仍有最终话语权。
+        wind_candidate::protect_top_from_corrected(&mut candidates, input_str.len());
         // Shadow 的取码口与写端 `candidate_op_scope` 同源（见 `shadow_code_of`）——双拼下
         // 是归一后的全拼码，其余恒为击键。⚠️ 与上一行的词频记账**刻意不同域**：那条链有
         // 自己的 `freq_code`（码表按输入码、拼音按候选码），两者别互相照抄。

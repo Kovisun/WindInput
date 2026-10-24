@@ -1445,18 +1445,18 @@ border = { color = \"#BB0000\", radius = 0, width = \"2px\" }
                         let want = match (k, i) {
                             ("tooltip", 0) => &want_tooltip,
                             ("text", 0) => {
-                                // text 常态只允许模糊音提示段的角色色（候选正文里的 `(ping)`）。
+                                // text 常态只允许正确拼音提示段的角色色（候选正文里的 `(ping)`）。
                                 assert!(
-                                    st.roles.keys().all(|r| r == "fuzzy_hint"),
-                                    "{name} dark={dark} text.roles 只允许 fuzzy_hint"
+                                    st.roles.keys().all(|r| r == "pinyin_hint"),
+                                    "{name} dark={dark} text.roles 只允许 pinyin_hint"
                                 );
                                 continue;
                             }
                             ("comment", 0) => {
-                                // comment 常态只允许 `${fuzzy_pinyin}` 的角色色（与 fuzzy_hint 同色）。
+                                // comment 常态只允许 `${correct_pinyin}` 的角色色（与 pinyin_hint 同色）。
                                 assert!(
-                                    st.roles.keys().all(|r| r == "fuzzy_pinyin"),
-                                    "{name} dark={dark} comment.roles 只允许 fuzzy_pinyin"
+                                    st.roles.keys().all(|r| r == "correct_pinyin"),
+                                    "{name} dark={dark} comment.roles 只允许 correct_pinyin"
                                 );
                                 continue;
                             }
@@ -1475,9 +1475,9 @@ border = { color = \"#BB0000\", radius = 0, width = \"2px\" }
         }
     }
 
-    /// 出厂主题的 `fuzzy_hint` 与窗口底色对比度 >= 3:1，且不与候选正文色 / 注释色相同。
+    /// 出厂主题的 `pinyin_hint` 与窗口底色对比度 >= 3:1，且不与候选正文色 / 注释色相同。
     #[test]
-    fn factory_fuzzy_hint_is_readable_and_distinct() {
+    fn factory_pinyin_hint_is_readable_and_distinct() {
         use crate::palette::contrast_ratio as contrast;
         let ids = crate::list_theme_ids(&data_dir_for_roles());
         for name in ids
@@ -1487,7 +1487,7 @@ border = { color = \"#BB0000\", radius = 0, width = \"2px\" }
             for dark in [false, true] {
                 let t = roles_theme(name, dark);
                 let v = &t.views;
-                let hint = crate::fuzzy_hint_color(
+                let hint = crate::pinyin_hint_color(
                     &v.text,
                     &v.comment,
                     crate::TextState::Normal,
@@ -1495,11 +1495,11 @@ border = { color = \"#BB0000\", radius = 0, width = \"2px\" }
                     [150, 150, 150, 255],
                     None,
                 );
-                assert_eq!(hint, v.text.roles["fuzzy_hint"], "{name} dark={dark}");
+                assert_eq!(hint, v.text.roles["pinyin_hint"], "{name} dark={dark}");
                 assert_eq!(
-                    v.comment.roles.get("fuzzy_pinyin"),
+                    v.comment.roles.get("correct_pinyin"),
                     Some(&hint),
-                    "{name} dark={dark}：${{fuzzy_pinyin}} 与内嵌提示同色"
+                    "{name} dark={dark}：${{correct_pinyin}} 与内嵌提示同色"
                 );
                 let bg = v.window.bg_color.expect("window 底色");
                 assert!(

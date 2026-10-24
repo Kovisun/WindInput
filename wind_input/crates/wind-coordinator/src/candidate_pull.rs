@@ -60,9 +60,9 @@ pub struct CandidateWindow {
     pub comments: Vec<String>,
     /// 与 [`Self::items`] 一一对应的显示用分段正文；某条为空 = 按 `items` 那条纯文字显示。
     ///
-    /// 目前只有模糊音提示产出它：`items` 是「苹果」（上屏、长按标题照旧读它），这里是
-    /// 「苹」「(ping)」「果」三段，`(ping)` 段角色 `fuzzy_hint`。标哪几条（`hint` / `hint_scope`）
-    /// 与桌面候选窗同一份规则（`Coordinator::fuzzy_hint_texts`），宿主照画即可，不要自己判。
+    /// 目前只有正确拼音提示产出它：`items` 是「苹果」（上屏、长按标题照旧读它），这里是
+    /// 「苹」「(ping)」「果」三段，`(ping)` 段角色 `pinyin_hint`。标哪几条（`hint.enabled` / 来源 / `hint.scope`）
+    /// 与桌面候选窗同一份规则（`Coordinator::pinyin_hint_texts`），宿主照画即可，不要自己判。
     pub text_segments: Vec<Vec<TextSegment>>,
     /// 本次拉取触发了扩容重建（[`Coordinator::candidate_window_growing`]）。
     ///
@@ -71,7 +71,7 @@ pub struct CandidateWindow {
     pub rebuilt: bool,
 }
 
-/// 分段正文的一段。`role` 是 `wind_ui_types::TEXT_ROLES` 里的角色名（如 `fuzzy_hint`），
+/// 分段正文的一段。`role` 是 `wind_ui_types::TEXT_ROLES` 里的角色名（如 `pinyin_hint`），
 /// `None` = 正文。宿主按角色取色，字号与正文相同。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TextSegment {
@@ -175,11 +175,12 @@ impl Coordinator {
         } else {
             let rt = self.rt();
             let reverse = self.reverse.read().unwrap_or_else(|e| e.into_inner());
-            let tone = rt.config.schema.pinyin.fuzzy.hint_tone.then_some(&*reverse);
-            self.fuzzy_hint_texts(&state, &rt.config.schema.pinyin.fuzzy, offset, end, |c| {
+            let hint = &rt.config.input.correction.hint;
+            let tone = hint.tone.then_some(&*reverse);
+            self.pinyin_hint_texts(&state, hint, offset, end, |c| {
                 let full = self.cand_display_text(&state, c);
-                self.cand_display_hints(&state, c, &full, tone)
-                    .map(|h| crate::fuzzy_hint_text::hint_styled_text(&full, &h))
+                self.cand_display_hints(&state, c, &full, hint, tone)
+                    .map(|h| crate::hint_text::hint_styled_text(&full, &h))
                     .unwrap_or_default()
             })
             .iter()

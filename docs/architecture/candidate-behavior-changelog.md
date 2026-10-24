@@ -27,6 +27,50 @@
 
 ---
 
+## 2026-10-24 · 拼音误读表：召回读错的词并提示正确拼音（0.128）
+
+- 合入：feat/pinyin-correction；范围：全拼、双拼、混输的拼音侧、临时拼音
+- 变化：
+  - 整串打成表里的错误读音时，词库读不出的词也进候选：`xinxin` 前：无「莘莘」→ 后：「莘莘」排在
+    完整候选末尾（真实词库第 7 位）；`zhire` → 炽热、`yuchi` → 龋齿。开「显示正确拼音」时内嵌
+    `莘(shen)莘(shen)`，只标读错的字。
+  - 召回候选权重取同页最低再低一档，存在完整的普通候选时不占首选，不计满码 / 短语自动上屏、
+    不否决混输上屏；截断时与纠错候选共用保底名额。
+  - 词库已收了错误读音的词（`hundun` 的「馄饨」）不另召回，那一条按表标 `馄饨(tun)`。
+  - 白名单（表第三列空）压掉模糊 / 纠错推断出的提示。
+  - 选中召回候选后按**正确读音**学习（「莘莘」记在 `shen shen` 下，`learn_code` = 正确读音），
+    不按用户打的 `xinxin` 造词，故它不会因为选过就变成 `xinxin` 下的普通候选。
+  - `[input.correction]` 任一项与两份误读表改动后，配置热重载即生效，不必重启。
+- 触发条件：出厂即生效（`input.correction.hint.misread = true`）；内置表 `schemas/pinyin_misread.txt`
+  120 条，用户可在用户数据目录 `data/pinyin_misread.txt` 追加或覆盖。
+- 回退旧行为：`input.correction.hint.misread = false`。
+- 钉住的测试：`wind-coordinator/tests/pinyin_misread.rs`、`wind-engine/src/pinyin/misread.rs`、
+  `wind-candidate/src/candidate.rs::corrected_tests::misread_recall_does_not_take_top`
+- 来源：内部（设计 `docs/design/pinyin-correction-and-hints.md` §6.2）
+
+## 2026-10-23 · 拼音字母换位纠错：新增纠错候选、带标记、不占首选（0.128）
+
+- 合入：feat/pinyin-correction；范围：全拼方案、混输的拼音侧、临时拼音；双拼不启用
+- 变化：
+  - 打错字母顺序或漏打 `g` 的输入出候选：`kiashi` → *开始、`yuoshi` → *优势、*有时…；
+    `zhonguo` → *中国、`gonping` → *公平。前缀 `*` 是纠错标记，上屏文字不带。
+  - 开 `gn_ng` 后另有：`gogn` 前：干呕功能、干呕… → 后：*共、*供…*工；`gognping` → *公平、
+    `dagnshi` → *当时、`xign` → *型（「习惯」仍在）。
+  - 纠错不删候选、不改其余候选的相对次序（切分、整句、简拼不走纠错边）：纠错候选按罚过的
+    权重（与模糊同量纲）穿插其间，窗口内保底至多 4 条（取数上限的 1/10，不足 10 条的窗口不留）；原有候选可能因此被挤到窗口尾部之后
+    （`yuo` 下「与」等 `yu` 子短语排到数百个 *有、*又… 之后）。
+  - 打对的输入不变（`gongping`、`zhongguo`）；打字途中的半截（`zhon`）不带标记。
+  - 存在完整的非纠错候选（主输入、临拼、快捷输入与特殊模式同一判据）（精确或模糊命中、吃满整串，简拼 / 前缀补全不算）时，纠错候选
+    不占首选：把第一条这样的候选提到首位，其余次序不变。同一文字经纠错与非纠错都能得到时
+    只留非纠错那条。
+  - 混输满码自动上屏不把纠错候选计入「有拼音候选」：五笔 `hagn`（甗）照旧满码上屏。
+- 触发条件：出厂即生效（`input.correction.enabled = true`，出厂开 `on_ong` / `vowel_swap`；
+  `gn_ng` 出厂关——开它时 `xign` 这类简拼的首页会被 *型、*性… 占满）。
+- 回退旧行为：`input.correction.enabled = false`；只去标记设 `input.correction.marker = ""`。
+- 钉住的测试：`wind-coordinator/tests/pinyin_correction.rs`、`wind-engine/tests/pinyin_correction_floor.rs`、`wind-coordinator/tests/pinyin_correction_visibility.rs`、
+  `wind-candidate/src/candidate.rs::corrected_tests`、`wind-engine/src/pinyin/hint_align.rs`
+- 来源：内部（设计 `docs/design/pinyin-correction-and-hints.md`）
+
 ## 2026-10-23 · 拼音英文候选：位次、条数、首选让位、双拼默认位次（0.128）
 
 - 合入：WindInput `676b4b70`；范围：拼音方案（全拼、双拼），空码补全页另含码表 / 混输

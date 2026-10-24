@@ -216,10 +216,10 @@ pub fn span_color(
     body
 }
 
-/// 模糊音提示段的角色名（与 wind-ui-types `TEXT_ROLES` 里的 `fuzzy_hint` 同名）。
-pub const FUZZY_HINT_ROLE: &str = "fuzzy_hint";
+/// 正确拼音提示段的角色名（与 wind-ui-types `TEXT_ROLES` 里的 `pinyin_hint` 同名）。
+pub const PINYIN_HINT_ROLE: &str = "pinyin_hint";
 
-/// 候选正文里模糊音提示段（`(ping)`）的颜色，角色名 [`FUZZY_HINT_ROLE`]。
+/// 候选正文里正确拼音提示段（`(ping)`）的颜色，角色名 [`PINYIN_HINT_ROLE`]。
 ///
 /// - `text`：`views.text`（提示段在候选正文里，角色色写在 `[text.roles]`）；`comment`：`views.comment`。
 /// - `comment_fallback`：注释节点未配正文色时的渲染层兜底（候选窗的 `COMMENT_FALLBACK`）。
@@ -227,11 +227,11 @@ pub const FUZZY_HINT_ROLE: &str = "fuzzy_hint";
 ///   透到桌面等取不到可靠值的情况传 `None`。常态不看它。
 ///
 /// 顺序：① 该状态的 `text.<state>.roles` → ② 该状态改了正文色（有效色值比较，同 [`span_color`]
-/// 规则 3）时，③ 的常态提示色对 `state_bg` 的对比度 ≥ [`FUZZY_HINT_MIN_CONTRAST`] 才沿用，
+/// 规则 3）时，③ 的常态提示色对 `state_bg` 的对比度 ≥ [`PINYIN_HINT_MIN_CONTRAST`] 才沿用，
 /// 否则（对比度不足、底色未知、或 ③ 没配）取该状态下的注释色 → ③ `text.roles`
 /// → ④ 注释在该状态下的正文色。即主题不配时提示段与注释同色，含选中 / 悬停态。
 /// 正文其余部分无角色，直接用 [`body_color`]`(text, state, 候选正文兜底)`。
-pub fn fuzzy_hint_color(
+pub fn pinyin_hint_color(
     text: &RvNode,
     comment: &RvNode,
     state: TextState,
@@ -239,18 +239,18 @@ pub fn fuzzy_hint_color(
     comment_fallback: Rgba,
     state_bg: Option<Rgba>,
 ) -> Rgba {
-    if let Some(c) = state_patch(text, state).and_then(|n| n.roles.get(FUZZY_HINT_ROLE)) {
+    if let Some(c) = state_patch(text, state).and_then(|n| n.roles.get(PINYIN_HINT_ROLE)) {
         return *c;
     }
     let comment_color = body_color(comment, state, comment_fallback);
-    let normal = text.roles.get(FUZZY_HINT_ROLE).copied();
+    let normal = text.roles.get(PINYIN_HINT_ROLE).copied();
     if state != TextState::Normal
         && body_color(text, state, text_fallback)
             != body_color(text, TextState::Normal, text_fallback)
     {
         return match (normal, state_bg) {
             (Some(c), Some(bg))
-                if crate::palette::meets_contrast(c, bg, FUZZY_HINT_MIN_CONTRAST) =>
+                if crate::palette::meets_contrast(c, bg, PINYIN_HINT_MIN_CONTRAST) =>
             {
                 c
             }
@@ -261,7 +261,7 @@ pub fn fuzzy_hint_color(
 }
 
 /// 高亮态沿用常态提示色所需的最低对比度（WCAG 非正文图形 / 大字口径）。
-pub const FUZZY_HINT_MIN_CONTRAST: f64 = 3.0;
+pub const PINYIN_HINT_MIN_CONTRAST: f64 = 3.0;
 
 #[cfg(test)]
 mod tests {
@@ -1252,7 +1252,7 @@ mod tests {
         );
     }
 
-    // ---------------- 模糊音提示 ----------------
+    // ---------------- 正确拼音提示 ----------------
 
     const CMT: Rgba = [10, 20, 30, 255];
     const CMT_SEL: Rgba = [40, 50, 60, 255];
@@ -1261,7 +1261,7 @@ mod tests {
     const TXT_FB: Rgba = [30, 30, 30, 255];
 
     fn hint(text: &RvNode, comment: &RvNode, st: TextState) -> Rgba {
-        fuzzy_hint_color(text, comment, st, TXT_FB, BODY, None)
+        pinyin_hint_color(text, comment, st, TXT_FB, BODY, None)
     }
 
     fn comment_node() -> RvNode {
@@ -1274,7 +1274,7 @@ mod tests {
     }
 
     #[test]
-    fn fuzzy_hint_falls_back_to_comment() {
+    fn pinyin_hint_falls_back_to_comment() {
         let (t, c) = (node(), comment_node());
         assert_eq!(hint(&t, &c, Normal), CMT);
         assert_eq!(hint(&t, &c, Selected), CMT_SEL);
@@ -1283,13 +1283,13 @@ mod tests {
     }
 
     #[test]
-    fn fuzzy_hint_theme_override() {
-        let t = with_roles(node(), &[("fuzzy_hint", RED)]);
+    fn pinyin_hint_theme_override() {
+        let t = with_roles(node(), &[("pinyin_hint", RED)]);
         let c = comment_node();
         assert_eq!(hint(&t, &c, Normal), RED);
         assert_eq!(hint(&t, &c, Selected), RED, "正文色没变的状态沿用常态配色");
         // 状态单列优先。
-        let t = selected(t, with_roles(node(), &[("fuzzy_hint", GREEN)]));
+        let t = selected(t, with_roles(node(), &[("pinyin_hint", GREEN)]));
         assert_eq!(hint(&t, &c, Selected), GREEN);
         assert_eq!(hint(&t, &c, Normal), RED);
     }
@@ -1298,12 +1298,12 @@ mod tests {
     const DARK_SEL_BG: Rgba = [0, 90, 200, 255];
 
     fn hint_on(text: &RvNode, st: TextState, bg: Option<Rgba>) -> Rgba {
-        fuzzy_hint_color(text, &comment_node(), st, TXT_FB, BODY, bg)
+        pinyin_hint_color(text, &comment_node(), st, TXT_FB, BODY, bg)
     }
 
     /// 选中态改了正文色的主题：`text.roles` 配红、选中正文改色。
     fn sel_changes_body() -> RvNode {
-        let mut t = with_roles(body_patch(TXT), &[("fuzzy_hint", RED)]);
+        let mut t = with_roles(body_patch(TXT), &[("pinyin_hint", RED)]);
         t.selected = Some(Box::new(body_patch(TXT_SEL)));
         t.hover = Some(Box::new(body_patch(TXT_SEL)));
         t
@@ -1311,8 +1311,8 @@ mod tests {
 
     /// 浅色高亮底上常态提示色仍够醒目（≥ 3:1）：沿用，不回落注释色。
     #[test]
-    fn fuzzy_hint_keeps_color_on_readable_state_bg() {
-        assert!(crate::palette::contrast_ratio(RED, LIGHT_SEL_BG) >= FUZZY_HINT_MIN_CONTRAST);
+    fn pinyin_hint_keeps_color_on_readable_state_bg() {
+        assert!(crate::palette::contrast_ratio(RED, LIGHT_SEL_BG) >= PINYIN_HINT_MIN_CONTRAST);
         let t = sel_changes_body();
         assert_eq!(hint_on(&t, Selected, Some(LIGHT_SEL_BG)), RED);
         assert_eq!(hint_on(&t, Hover, Some(LIGHT_SEL_BG)), RED);
@@ -1320,8 +1320,8 @@ mod tests {
 
     /// 深色实心高亮底对比度不足：回落该态注释色。
     #[test]
-    fn fuzzy_hint_yields_on_low_contrast_state_bg() {
-        assert!(crate::palette::contrast_ratio(RED, DARK_SEL_BG) < FUZZY_HINT_MIN_CONTRAST);
+    fn pinyin_hint_yields_on_low_contrast_state_bg() {
+        assert!(crate::palette::contrast_ratio(RED, DARK_SEL_BG) < PINYIN_HINT_MIN_CONTRAST);
         assert_eq!(
             hint_on(&sel_changes_body(), Selected, Some(DARK_SEL_BG)),
             CMT_SEL
@@ -1330,13 +1330,13 @@ mod tests {
 
     /// 底色未知（渐变 / 图片 / 透到桌面）：回落该态注释色。
     #[test]
-    fn fuzzy_hint_yields_when_state_bg_unknown() {
+    fn pinyin_hint_yields_when_state_bg_unknown() {
         assert_eq!(hint_on(&sel_changes_body(), Selected, None), CMT_SEL);
     }
 
     /// 常态不看底色；没配常态提示色时即使底色够亮也是注释色。
     #[test]
-    fn fuzzy_hint_state_bg_only_matters_for_configured_hint() {
+    fn pinyin_hint_state_bg_only_matters_for_configured_hint() {
         let t = sel_changes_body();
         assert_eq!(hint_on(&t, Normal, Some(DARK_SEL_BG)), RED);
         assert_eq!(hint_on(&t, Normal, None), RED);
@@ -1347,10 +1347,10 @@ mod tests {
 
     /// 状态单列的 roles 仍最优先，不受底色影响。
     #[test]
-    fn fuzzy_hint_state_role_beats_contrast_rule() {
+    fn pinyin_hint_state_role_beats_contrast_rule() {
         let mut t = sel_changes_body();
         let mut sel = body_patch(TXT_SEL);
-        sel.roles.insert("fuzzy_hint".into(), GREEN);
+        sel.roles.insert("pinyin_hint".into(), GREEN);
         t.selected = Some(Box::new(sel));
         assert_eq!(hint_on(&t, Selected, Some(DARK_SEL_BG)), GREEN);
         assert_eq!(hint_on(&t, Selected, None), GREEN);
@@ -1358,8 +1358,8 @@ mod tests {
 
     /// 选中态把正文色改了（底色变了）且底色未知：常态配的固定色不带进去，改取该态注释色。
     #[test]
-    fn fuzzy_hint_yields_to_comment_when_state_changes_body() {
-        let mut t = with_roles(body_patch(TXT), &[("fuzzy_hint", RED)]);
+    fn pinyin_hint_yields_to_comment_when_state_changes_body() {
+        let mut t = with_roles(body_patch(TXT), &[("pinyin_hint", RED)]);
         t.selected = Some(Box::new(body_patch(TXT_SEL)));
         assert_eq!(hint(&t, &comment_node(), Selected), CMT_SEL);
         assert_eq!(hint(&t, &comment_node(), Normal), RED);

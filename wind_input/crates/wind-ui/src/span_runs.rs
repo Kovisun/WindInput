@@ -47,10 +47,10 @@ pub(crate) fn color_runs(
         .collect()
 }
 
-/// 候选正文的颜色区间：只有模糊音提示段（`fuzzy_hint`）着色，取色走
-/// [`wind_theme::fuzzy_hint_color`]；其余段按正文色、不建区间。与 [`color_runs`] 同样丢掉
+/// 候选正文的颜色区间：只有模糊音提示段（`pinyin_hint`）着色，取色走
+/// [`wind_theme::pinyin_hint_color`]；其余段按正文色、不建区间。与 [`color_runs`] 同样丢掉
 /// 等于正文色的区间（不带提示的候选恒为空 ⇒ 绘制路径与改动前相同）。
-pub(crate) fn fuzzy_hint_runs(
+pub(crate) fn pinyin_hint_runs(
     text_node: &RvNode,
     comment_node: &RvNode,
     state: TextState,
@@ -62,13 +62,13 @@ pub(crate) fn fuzzy_hint_runs(
     let mut hints = text
         .spans()
         .iter()
-        .filter(|s| s.role == Some(wind_theme::FUZZY_HINT_ROLE))
+        .filter(|s| s.role == Some(wind_theme::PINYIN_HINT_ROLE))
         .peekable();
     if hints.peek().is_none() {
         return Vec::new();
     }
     let body = wind_theme::body_color(text_node, state, text_fallback);
-    let rgba = wind_theme::fuzzy_hint_color(
+    let rgba = wind_theme::pinyin_hint_color(
         text_node,
         comment_node,
         state,
@@ -89,7 +89,7 @@ pub(crate) fn fuzzy_hint_runs(
 }
 
 /// 候选正文在 `state` 下背后的实际底色（逐层按 alpha 合成到窗口底，不透明），供
-/// [`wind_theme::fuzzy_hint_color`] 判对比度。各层取色与候选窗绘制同一口径：窗口底 →
+/// [`wind_theme::pinyin_hint_color`] 判对比度。各层取色与候选窗绘制同一口径：窗口底 →
 /// `candidate_list` 底 → 候选项底（选中 / 悬停整体替换基态，未配走出厂兜底）→ 正文叶子底。
 ///
 /// 任一层带背景图 / 渐变 / 覆盖图、或窗口底本身不透明度不足（透到桌面）时取不到可靠值，

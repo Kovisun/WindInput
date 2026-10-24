@@ -3148,21 +3148,101 @@ pub struct PinyinFuzzy {
     pub un_ong: bool,
     #[serde(default)]
     pub eng_ong: bool,
-    /// 模糊命中的候选正文内嵌正确全拼（「苹(ping)果」）。仅 `enabled` 时生效。
-    #[serde(default)]
-    pub hint: bool,
-    /// 提示范围：first = 只标第一个带提示的候选；all = 标全部。
-    #[serde(default, deserialize_with = "crate::tolerant_de::tolerant")]
-    pub hint_scope: FuzzyHintScope,
-    /// 提示带声调（「苹(píng)果」），内嵌提示与注释变量 `${fuzzy_pinyin}` 共用。
-    #[serde(default)]
-    pub hint_tone: bool,
 }
 
-/// 模糊音提示范围（`[schema.pinyin.fuzzy] hint_scope`）。
+/// 拼音纠错与正确拼音提示（`[input.correction]`）。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct CorrectionConfig {
+    /// 纠错总开关。
+    pub enabled: bool,
+    /// 纠错候选的标记，加在候选前（留空 = 不加）。
+    pub marker: String,
+    /// 内置纠错规则开关。
+    pub rules: CorrectionRuleToggles,
+    /// 自定义纠错，每项 `错误=正确`。
+    pub custom: Vec<String>,
+    /// 正确拼音提示。
+    pub hint: PinyinHintConfig,
+}
+
+impl Default for CorrectionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            marker: "*".to_string(),
+            rules: CorrectionRuleToggles::default(),
+            custom: Vec::new(),
+            hint: PinyinHintConfig::default(),
+        }
+    }
+}
+
+/// 内置纠错规则开关（`[input.correction.rules]`）。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct CorrectionRuleToggles {
+    pub gn_ng: bool,
+    pub on_ong: bool,
+    pub vowel_swap: bool,
+    pub legacy_spelling: bool,
+    pub h_misplaced: bool,
+    pub mg_ng: bool,
+    pub n_before_g: bool,
+    pub ai_ia: bool,
+}
+
+impl Default for CorrectionRuleToggles {
+    fn default() -> Self {
+        Self {
+            gn_ng: false,
+            on_ong: true,
+            vowel_swap: true,
+            legacy_spelling: false,
+            h_misplaced: false,
+            mg_ng: false,
+            n_before_g: false,
+            ai_ia: false,
+        }
+    }
+}
+
+/// 正确拼音提示（`[input.correction.hint]`）。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct PinyinHintConfig {
+    /// 候选正文内嵌正确全拼（「苹(ping)果」）的总开关。
+    pub enabled: bool,
+    /// 模糊音命中时提示。
+    pub fuzzy: bool,
+    /// 易读错的字提示。
+    pub misread: bool,
+    /// 纠错命中时提示。
+    pub correction: bool,
+    /// 提示范围：first = 只标第一个带提示的候选；all = 标全部。
+    #[serde(deserialize_with = "crate::tolerant_de::tolerant")]
+    pub scope: HintScope,
+    /// 提示带声调（「苹(píng)果」），内嵌提示与注释变量 `${correct_pinyin}` 共用。
+    pub tone: bool,
+}
+
+impl Default for PinyinHintConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            fuzzy: true,
+            misread: true,
+            correction: false,
+            scope: HintScope::First,
+            tone: false,
+        }
+    }
+}
+
+/// 提示范围（`[input.correction.hint] scope`）。
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
-pub enum FuzzyHintScope {
+pub enum HintScope {
     /// 只标候选列表里第一个带提示的候选。
     #[default]
     First,
@@ -3170,7 +3250,7 @@ pub enum FuzzyHintScope {
     All,
 }
 
-impl FuzzyHintScope {
+impl HintScope {
     pub const VALUES: &'static [&'static str] = &["first", "all"];
 }
 
@@ -4096,6 +4176,9 @@ pub struct InputConfig {
     /// 检索范围放宽（智能档增强）。
     #[serde(default)]
     pub scope_relax: ScopeRelaxConfig,
+    /// 拼音纠错与正确拼音提示。
+    #[serde(default)]
+    pub correction: CorrectionConfig,
     #[serde(default = "default_enter_behavior")]
     pub enter_behavior: String,
     #[serde(default = "default_space_behavior")]
@@ -4298,6 +4381,7 @@ impl Default for InputConfig {
             english_case_cycle_key: String::new(),
             alt_commit: default_alt_commit(),
             scope_relax: ScopeRelaxConfig::default(),
+            correction: CorrectionConfig::default(),
             enter_behavior: "commit".to_string(),
             space_on_empty_behavior: "commit".to_string(),
             punct_on_empty_behavior: default_punct_on_empty_behavior(),
@@ -13985,27 +14069,39 @@ scripts = { latin = 42 }
     }
 
     #[test]
-    fn pinyin_fuzzy_hint_defaults() {
-        let c = Config::default();
-        assert!(!c.schema.pinyin.fuzzy.hint);
-        assert_eq!(c.schema.pinyin.fuzzy.hint_scope, FuzzyHintScope::First);
-        let c = merged_with("[schema.pinyin.fuzzy]\nzh_z = true\n");
-        assert!(!c.schema.pinyin.fuzzy.hint);
-        assert_eq!(c.schema.pinyin.fuzzy.hint_scope, FuzzyHintScope::First);
+    fn correction_defaults() {
+        let c = Config::default().input.correction;
+        assert!(c.enabled);
+        assert_eq!(c.marker, "*");
+        assert!(c.rules.on_ong && c.rules.vowel_swap);
+        assert!(
+            !c.rules.gn_ng
+                && !c.rules.legacy_spelling
+                && !c.rules.h_misplaced
+                && !c.rules.mg_ng
+                && !c.rules.n_before_g
+                && !c.rules.ai_ia
+        );
+        assert!(c.custom.is_empty());
+        assert!(!c.hint.enabled && c.hint.fuzzy && c.hint.misread && !c.hint.correction);
+        assert_eq!(c.hint.scope, HintScope::First);
+        assert!(!c.hint.tone);
     }
 
     #[test]
-    fn pinyin_fuzzy_hint_scope_parses_all() {
-        let c = merged_with("[schema.pinyin.fuzzy]\nhint = true\nhint_scope = \"all\"\n");
-        assert!(c.schema.pinyin.fuzzy.hint);
-        assert_eq!(c.schema.pinyin.fuzzy.hint_scope, FuzzyHintScope::All);
+    fn bad_hint_scope_falls_back_to_first() {
+        let c: Config = toml::from_str("[input.correction.hint]\nscope = \"bogus\"").unwrap();
+        assert_eq!(c.input.correction.hint.scope, HintScope::First);
     }
 
     #[test]
-    fn pinyin_fuzzy_hint_tone_defaults_off_and_parses() {
-        assert!(!Config::default().schema.pinyin.fuzzy.hint_tone);
-        let c = merged_with("[schema.pinyin.fuzzy]\nhint_tone = true\n");
-        assert!(c.schema.pinyin.fuzzy.hint_tone);
+    fn correction_hint_parses_scope_and_tone() {
+        let c =
+            merged_with("[input.correction.hint]\nenabled = true\nscope = \"all\"\ntone = true\n");
+        let h = c.input.correction.hint;
+        assert!(h.enabled && h.tone);
+        assert_eq!(h.scope, HintScope::All);
+        assert!(h.fuzzy, "未写的键保持出厂值");
     }
 
     /// `auto_learn.max_word_length` 的默认值必须**两条路一致**：代码默认

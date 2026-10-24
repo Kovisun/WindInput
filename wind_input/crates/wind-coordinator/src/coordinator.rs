@@ -923,6 +923,8 @@ thread_local! {
 /// 判据是「这个键有没有第二个消费者在引擎侧」，不是「它在不在 schema 段」。
 /// # 不收什么
 ///
+/// - `input.correction`：引擎侧 `EngineManager::sync_correction` 自己判要不要重建（只改提示开关的
+///   不重建），结果在 `reload_user_config` 里并进 `schema_dirty`。
 /// - `schema.keep_all_loaded`：方案常驻策略由 `apply_residency_change` 就地对齐（摘除 /
 ///   后台预热），引擎侧没有它的镜像；收进来会让「切换常驻开关」把全部引擎丢掉重建。
 pub(crate) fn engine_reload_needed(old: &Config, new: &Config) -> bool {
@@ -2086,6 +2088,9 @@ pub struct Coordinator {
     pub(crate) host_services: std::sync::OnceLock<Arc<dyn crate::host_services::HostServices>>,
     /// 自身 Weak 引用：$CC 命令在独立线程异步执行（避免持 state 锁回调自锁方法致死锁）。
     pub(crate) self_weak: std::sync::OnceLock<std::sync::Weak<Coordinator>>,
+    /// 误读推断读音索引的后台构建线程（见 `EngineManager::set_misread_warm_hook`），
+    /// 留着句柄供 [`Coordinator::wait_misread_readings`] 等待。
+    misread_warm_threads: Mutex<Vec<std::thread::JoinHandle<()>>>,
     /// 上屏历史环形缓冲（index 0 = 最近）：供命令栏 `last(n)` 取最近上屏文本。
     pub(crate) recent_commits: Mutex<std::collections::VecDeque<String>>,
     /// 下一词学习的上文：最近一次**选词整体上屏**的词（简体）。默认断开：任何上屏记账
@@ -2705,8 +2710,8 @@ impl Coordinator {
             &bundle.config,
             &crate::data_needs::SchemaFacts::collect(&engine_mgr),
         );
-        // 模板引用 `${fuzzy_pinyin}` 时拼音引擎要算提示（只翻开关，不重建引擎）。
-        engine_mgr.set_fuzzy_pinyin_in_templates(needs.fuzzy_pinyin);
+        // 模板引用 `${correct_pinyin}` 时拼音引擎要算提示（只翻开关，不重建引擎）。
+        engine_mgr.set_correct_pinyin_in_templates(needs.correct_pinyin);
 
         // 短语层（方案 B）：TOML 变更时同步进 store，再从 store（仅 enabled）建层。
         // 启动解析的条目缓存进结构体，作为"恢复默认"重读文件失败时的回退。
@@ -3210,6 +3215,7 @@ impl Coordinator {
             cmdbar_services: std::sync::OnceLock::new(),
             host_services: std::sync::OnceLock::new(),
             self_weak: std::sync::OnceLock::new(),
+            misread_warm_threads: Mutex::default(),
             recent_commits: Mutex::new(std::collections::VecDeque::new()),
             next_word_prev: Mutex::new(None),
             preceding_text: Mutex::new(String::new()),
@@ -3301,6 +3307,46 @@ impl Coordinator {
                     }
                 }));
         }
+        // 误读推断要的读音索引：引擎侧按配置决定建 / 放，这里只提供后台线程。秒级构建，绝不进
+        // 按键线程；只持 Weak。建好后不重刷当前这屏（重刷不重新 convert，补不上提示），从下一次
+        // 按键起生效——未就绪不标。
+        {
+            let weak = Arc::downgrade(&coordinator);
+            coordinator
+                .engine_mgr
+                .set_misread_warm_hook(Arc::new(move |schema_id: String| {
+                    let Some(c) = weak.upgrade() else {
+                        return false;
+                    };
+                    let w = Arc::downgrade(&c);
+                    let spawned = std::thread::Builder::new()
+                        .name("misread-readings".into())
+                        .spawn(move || {
+                            let Some(c) = w.upgrade() else {
+                                return;
+                            };
+                            let t0 = std::time::Instant::now();
+                            if c.engine_mgr.prewarm_misread_readings(&schema_id) {
+                                debug!("误读推断读音索引 {} 用时 {:?}", schema_id, t0.elapsed());
+                            }
+                        });
+                    match spawned {
+                        Ok(h) => {
+                            let mut v = c
+                                .misread_warm_threads
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner());
+                            v.retain(|t| !t.is_finished());
+                            v.push(h);
+                            true
+                        }
+                        Err(e) => {
+                            warn!("无法启动误读读音索引线程: {e}（本次不推断误读）");
+                            false
+                        }
+                    }
+                }));
+        }
         // 启动即显示常驻工具栏（反映初始 中英/方案/标点/全半角）
         coordinator.notify_toolbar();
         // 码元集与按键功能的冲突体检（只告警）。默认字符集下直接返回，无开销。
@@ -3312,6 +3358,24 @@ impl Coordinator {
         coordinator.warn_english_case_cycle_conflict();
         coordinator.warn_sentence_cycle_conflict();
         coordinator
+    }
+
+    /// 等误读推断的后台读音索引构建全部结束（测试用；构建中又派出的也等）。
+    pub fn wait_misread_readings(&self) {
+        loop {
+            let handles: Vec<_> = std::mem::take(
+                &mut *self
+                    .misread_warm_threads
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()),
+            );
+            if handles.is_empty() {
+                return;
+            }
+            for h in handles {
+                let _ = h.join();
+            }
+        }
     }
 
     /// 上屏历史快照（index 0 = 最近）。供命令栏 `last(n)` 读取。
@@ -5043,7 +5107,10 @@ impl Coordinator {
                 // 方案相关项（活跃/可用方案、全局上屏策略）是否变化：变了才热重建引擎，
                 // 避免每次保存都丢词典缓存（拼音合并/unigram 重建开销大）。
                 let old = self.rt();
-                let schema_dirty = engine_reload_needed(&old.config, &cfg);
+                // `[input.correction]` 与误读表由引擎侧同步（每次都重读表文件）：只改提示开关的
+                // 就地生效，改纠错规则 / 「误读」勾选 / 表内容的并入重建。`|` 不短路：同步必须跑。
+                let schema_dirty =
+                    engine_reload_needed(&old.config, &cfg) | self.engine_mgr.sync_correction(&cfg);
                 // 候选窗定位方式切换的边沿检测（见下方 ReportCandidatePos）。
                 let cand_was_fixed = old.config.ui.candidate.is_fixed_position();
                 let was_keep_all = old.config.schema.keep_all_loaded;
@@ -7524,6 +7591,8 @@ impl Coordinator {
         let cmd_prefix = rt.config.input.cmdbar.candidate_prefix.as_str();
         // 检索范围放宽（自动补充）候选的前缀标注，见 docs/design/smart-filter-scope-relax.md
         let scope_prefix = rt.config.input.scope_relax.prefix.as_str();
+        // 换位纠错候选的标记（`input.correction.marker`，留空不加）。
+        let corrected_prefix = rt.config.input.correction.marker.as_str();
         // 编码提示(反查):对拼音来源候选,用主码表真实反查索引填 comment(实际填充见下方候选构造,
         // 受 source==Pinyin 守卫)。门控两类:
         //  - 普通拼音方案:跟随全局 schema.pinyin.code_hint_source(四档,见 CodeHintSource,出厂 off);
@@ -7568,6 +7637,8 @@ impl Coordinator {
                 cmd_prefix
             } else if c.is_scope_filtered {
                 scope_prefix
+            } else if c.is_corrected {
+                corrected_prefix
             } else {
                 ""
             }
@@ -7582,16 +7653,17 @@ impl Coordinator {
                 cand_cfg.truncate_display(full)
             }
         };
-        // 模糊音提示（「苹(ping)果」）：换算到显示文字、过了截断与前缀后的带提示正文。
-        let hint_tone = rt.config.schema.pinyin.fuzzy.hint_tone.then_some(&*reverse);
+        // 正确拼音提示（「苹(ping)果」）：按来源过滤、换算到显示文字、过了截断与前缀后的带提示正文。
+        let hint_cfg = &rt.config.input.correction.hint;
+        let tone_reverse = hint_cfg.tone.then_some(&*reverse);
         let hint_styled = |c: &Candidate, full: &str, disp: &str| {
-            self.cand_display_hints(state, c, full, hint_tone)
-                .map(|h| crate::fuzzy_hint_text::styled_for_shown(full, disp, prefix_of(c), &h))
+            self.cand_display_hints(state, c, full, hint_cfg, tone_reverse)
+                .map(|h| crate::hint_text::styled_for_shown(full, disp, prefix_of(c), &h))
                 .unwrap_or_default()
         };
-        // 哪些候选标（`first` / `all`）见 `fuzzy_hint_texts`。
+        // 哪些候选标（`first` / `all`）见 `pinyin_hint_texts`。
         let mut hint_texts =
-            self.fuzzy_hint_texts(state, &rt.config.schema.pinyin.fuzzy, start, end, |c| {
+            self.pinyin_hint_texts(state, &rt.config.input.correction.hint, start, end, |c| {
                 let full = self.cand_display_text(state, c);
                 hint_styled(c, &full, &truncate(&full))
             });
@@ -8171,7 +8243,7 @@ impl Coordinator {
     pub(crate) fn apply_data_needs(&self) {
         let needs = self.data_needs();
         self.engine_mgr
-            .set_fuzzy_pinyin_in_templates(needs.fuzzy_pinyin);
+            .set_correct_pinyin_in_templates(needs.correct_pinyin);
         self.sync_chaizi_assets_with(&needs);
         if needs.reverse_index {
             self.spawn_index_warm(&self.engine_mgr.code_source_schema(), false);
