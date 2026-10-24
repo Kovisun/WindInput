@@ -3,7 +3,8 @@
 //!
 //! 对齐用 DP 把 `typed` 切成与词库音节同样多的段，每段按 Equal / Fuzzy / Corrected /
 //! Prefix / FuzzyPrefix 判类（先命中先得：同一段既能按模糊又能按纠错解释时归模糊），
-//! 取总代价最小的切法。`Fuzzy` 段产出提示，`Corrected` 段使整条记为经纠错。
+//! 取总代价最小的切法。`Fuzzy` 段产出模糊来源的提示，`Corrected` 段产出纠错来源的提示并使
+//! 整条记为经纠错。
 
 use super::fuzzy::{FuzzyConfig, FuzzyMatcher};
 use wind_candidate::{HintKind, PinyinHint};
@@ -67,7 +68,7 @@ fn classify(
 /// 对齐结果。
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct Alignment {
-    /// 读错的音节（`char_index` 升序）；只在 `cfg.hint` 开时填。
+    /// 带提示的音节（`char_index` 升序，模糊与纠错两种来源）；只在 `cfg.hint` 开时填。
     pub hints: Vec<PinyinHint>,
     /// 有音节只能按换位纠错对上；`cfg.correction` 非空时恒算。
     pub corrected: bool,
@@ -141,11 +142,16 @@ pub(crate) fn align(
     for i in (1..=n).rev() {
         let (prev, kind) = from[i][p].expect("best 非空则回溯链完整");
         out.corrected |= kind == Kind::Corrected;
-        if want_hints && kind == Kind::Fuzzy {
+        let hint_kind = match kind {
+            Kind::Fuzzy => Some(HintKind::Fuzzy),
+            Kind::Corrected => Some(HintKind::Correction),
+            _ => None,
+        };
+        if let Some(hint_kind) = hint_kind.filter(|_| want_hints) {
             out.hints.push(PinyinHint {
                 char_index: (i - 1) as u16,
                 correct: dict_syllables[i - 1].to_string(),
-                kind: HintKind::Fuzzy,
+                kind: hint_kind,
             });
         }
         p = prev;
@@ -184,7 +190,15 @@ mod tests {
     fn correction_segment_marks_corrected() {
         let a = align("gognping", &["gong", "ping"], &corr_cfg(), true);
         assert!(a.corrected);
-        assert!(a.hints.is_empty(), "纠错段不产模糊提示: {:?}", a.hints);
+        assert_eq!(
+            a.hints,
+            vec![PinyinHint {
+                char_index: 0,
+                correct: "gong".into(),
+                kind: HintKind::Correction,
+            }],
+            "纠错段产纠错来源的提示"
+        );
     }
 
     #[test]

@@ -45,7 +45,7 @@ pub(crate) struct DataNeeds {
     pub(crate) s2t: bool,
     /// 繁入简出转换器（`input.t2s.enabled`，与 s2t 互斥时让位）。
     pub(crate) t2s: bool,
-    /// 任一层注释模板或启用的悬停段引用 `${correct_pinyin}`：`hint` 关着也要让拼音引擎算模糊音
+    /// 任一层注释模板或启用的悬停段引用 `${correct_pinyin}`：`hint` 关着也要让拼音引擎算正确拼音
     /// 提示（`EngineManager::set_correct_pinyin_in_templates`）。
     pub(crate) correct_pinyin: bool,
 }

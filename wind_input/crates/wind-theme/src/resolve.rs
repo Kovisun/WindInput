@@ -1445,7 +1445,7 @@ border = { color = \"#BB0000\", radius = 0, width = \"2px\" }
                         let want = match (k, i) {
                             ("tooltip", 0) => &want_tooltip,
                             ("text", 0) => {
-                                // text 常态只允许模糊音提示段的角色色（候选正文里的 `(ping)`）。
+                                // text 常态只允许正确拼音提示段的角色色（候选正文里的 `(ping)`）。
                                 assert!(
                                     st.roles.keys().all(|r| r == "pinyin_hint"),
                                     "{name} dark={dark} text.roles 只允许 pinyin_hint"

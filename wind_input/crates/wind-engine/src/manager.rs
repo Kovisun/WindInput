@@ -620,16 +620,16 @@ pub struct EngineManager {
     single_char_used: std::sync::atomic::AtomicU64,
     /// 全局拼音配置（fuzzy/code_hint_source/...）。Mutex 以支持热重载。
     pinyin: Mutex<wind_config::config::PinyinGlobalConfig>,
-    /// 正确拼音提示配置（`[input.correction.hint]`），与 `pinyin` 一同决定 [`fuzzy_hint_on`]。
-    hint_cfg: Mutex<wind_config::PinyinHintConfig>,
+    /// 纠错与提示配置（`[input.correction]`），与 `pinyin` 一同决定 [`pinyin_hint_on`]。
+    correction_cfg: Mutex<wind_config::CorrectionConfig>,
     /// 换位纠错规则（`[input.correction]` 生成），注入全拼引擎的 `FuzzyConfig::correction`；
     /// 配置载入时生成一次，各引擎共享。
     correction: Mutex<Arc<crate::pinyin::correction::CorrectionRules>>,
     /// 有模板引用 `${correct_pinyin}`（协调器按全部模板位判定后告知，见
-    /// [`Self::set_correct_pinyin_in_templates`]）：`hint` 关着也要让拼音引擎算模糊音提示。
+    /// [`Self::set_correct_pinyin_in_templates`]）：`hint` 关着也要让拼音引擎算正确拼音提示。
     correct_pinyin_in_templates: std::sync::atomic::AtomicBool,
-    /// 拼音引擎「算不算模糊音提示」的共享开关，注入每个拼音引擎与双拼转换器（见
-    /// [`crate::pinyin::fuzzy::HintSwitch`]）。值 = [`fuzzy_hint_on`]，由 `pinyin` 与
+    /// 拼音引擎「算不算正确拼音提示」的共享开关，注入每个拼音引擎与双拼转换器（见
+    /// [`crate::pinyin::fuzzy::HintSwitch`]）。值 = [`pinyin_hint_on`]，由 `pinyin`、`correction_cfg` 与
     /// `correct_pinyin_in_templates` 共同决定（[`Self::refresh_pinyin_hint`]）；翻转不重建引擎。
     pinyin_hint: crate::pinyin::fuzzy::HintSwitch,
     /// 双拼韵母键集缓存：(已缓存的活跃方案 id, Option<HashSet<u8>>)。
@@ -1016,14 +1016,14 @@ impl EngineManager {
             single_char_codes: Mutex::new(None),
             single_char_used: std::sync::atomic::AtomicU64::new(0),
             pinyin: Mutex::new(config.schema.pinyin.clone()),
-            hint_cfg: Mutex::new(config.input.correction.hint.clone()),
+            correction_cfg: Mutex::new(config.input.correction.clone()),
             correction: Mutex::new(Arc::new(
                 crate::pinyin::correction::CorrectionRules::from_config(&config.input.correction),
             )),
             correct_pinyin_in_templates: std::sync::atomic::AtomicBool::new(false),
-            pinyin_hint: crate::pinyin::fuzzy::HintSwitch::new(fuzzy_hint_on(
+            pinyin_hint: crate::pinyin::fuzzy::HintSwitch::new(pinyin_hint_on(
                 &config.schema.pinyin.fuzzy,
-                &config.input.correction.hint,
+                &config.input.correction,
                 false,
             )),
             shuangpin_finals_cache: Mutex::new((String::new(), None)),
@@ -4540,8 +4540,10 @@ impl EngineManager {
             .unwrap_or_else(|e| e.into_inner()) = config.schema.primary_pinyin.clone();
         // 全局拼音配置变更：更新缓存，引擎缓存随下方 clear() 一起失效，下次按新配置重建。
         *self.pinyin.lock().unwrap_or_else(|e| e.into_inner()) = config.schema.pinyin.clone();
-        *self.hint_cfg.lock().unwrap_or_else(|e| e.into_inner()) =
-            config.input.correction.hint.clone();
+        *self
+            .correction_cfg
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = config.input.correction.clone();
         *self.correction.lock().unwrap_or_else(|e| e.into_inner()) = Arc::new(
             crate::pinyin::correction::CorrectionRules::from_config(&config.input.correction),
         );
@@ -5154,12 +5156,15 @@ impl EngineManager {
             .correct_pinyin_in_templates
             .load(std::sync::atomic::Ordering::Relaxed);
         let pinyin = self.pinyin.lock().unwrap_or_else(|e| e.into_inner());
-        let hint = self.hint_cfg.lock().unwrap_or_else(|e| e.into_inner());
+        let corr = self
+            .correction_cfg
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         self.pinyin_hint
-            .set(fuzzy_hint_on(&pinyin.fuzzy, &hint, tpl));
+            .set(pinyin_hint_on(&pinyin.fuzzy, &corr, tpl));
     }
 
-    /// 拼音引擎当前是否算模糊音提示（诊断 / 测试用）。
+    /// 拼音引擎当前是否算正确拼音提示（诊断 / 测试用）。
     pub fn pinyin_hint_active(&self) -> bool {
         self.pinyin_hint.get()
     }
@@ -8758,7 +8763,7 @@ mod dict_stats;
 
 /// 全局模糊音配置 → 引擎 `FuzzyConfig`：`enabled` 作总开关，未启用时所有模糊标志归零。
 /// 双拼同键音节不来自用户配置，由 `with_shuangpin` 从布局推出。`hint` 是管理器的共享开关
-/// （值见 [`fuzzy_hint_on`]），运行时翻转、不随这里固化。换位纠错规则（`[input.correction]`
+/// （值见 [`pinyin_hint_on`]），运行时翻转、不随这里固化。换位纠错规则（`[input.correction]`
 /// 生成）不受模糊音 `enabled` 管，原样挂上；双拼由调用方传空。
 fn fuzzy_config_from_global(
     f: &wind_config::PinyinFuzzy,
@@ -8786,14 +8791,17 @@ fn fuzzy_config_from_global(
     }
 }
 
-/// 引擎算不算模糊音提示：正文内嵌（`hint.enabled`）或模板引用 `${correct_pinyin}`（`correct_pinyin_tpl`）
-/// 任一要它就算，模糊音 `enabled` 与 `hint.fuzzy` 作总开关；内嵌与否由协调器只按 `hint` 判。
-fn fuzzy_hint_on(
+/// 引擎算不算正确拼音提示：正文内嵌（`hint.enabled`）或模板引用 `${correct_pinyin}`（`correct_pinyin_tpl`）
+/// 任一要它，且至少一个勾选的来源能产出（模糊来源要模糊音开、纠错来源要纠错开）。引擎各来源
+/// 一并算，按来源取舍由协调器做。
+fn pinyin_hint_on(
     f: &wind_config::PinyinFuzzy,
-    hint: &wind_config::PinyinHintConfig,
+    corr: &wind_config::CorrectionConfig,
     correct_pinyin_tpl: bool,
 ) -> bool {
-    f.enabled && hint.fuzzy && (hint.enabled || correct_pinyin_tpl)
+    let h = &corr.hint;
+    (h.enabled || correct_pinyin_tpl)
+        && ((f.enabled && h.fuzzy) || h.misread || (corr.enabled && h.correction))
 }
 
 #[cfg(test)]
@@ -8818,31 +8826,34 @@ mod tests {
         assert!(!reverse_index_keeps("old", "stroke", "wubi86", &pins));
     }
 
-    /// 引擎算提示的条件：`enabled && hint.fuzzy && (hint.enabled || 模板引用 ${correct_pinyin})`；
-    /// 任一总开关关时恒不算。
+    /// 引擎算提示的条件：`(hint.enabled || 模板引用) && (模糊来源有效 || misread || 纠错来源有效)`；
+    /// 模糊来源要模糊音开、纠错来源要纠错开。
     #[test]
-    fn fuzzy_hint_on_truth_table() {
-        for enabled in [false, true] {
-            for hint_fuzzy in [false, true] {
-                for hint_on in [false, true] {
-                    for tpl in [false, true] {
-                        let f = wind_config::PinyinFuzzy {
-                            enabled,
-                            ..Default::default()
-                        };
-                        let h = wind_config::PinyinHintConfig {
-                            enabled: hint_on,
-                            fuzzy: hint_fuzzy,
-                            ..Default::default()
-                        };
-                        assert_eq!(
-                            fuzzy_hint_on(&f, &h, tpl),
-                            enabled && hint_fuzzy && (hint_on || tpl),
-                            "enabled={enabled} fuzzy={hint_fuzzy} hint={hint_on} tpl={tpl}"
-                        );
-                    }
-                }
-            }
+    fn pinyin_hint_on_truth_table() {
+        for bits in 0u32..128 {
+            let b = |i: u32| bits & (1 << i) != 0;
+            let (fz_on, corr_on, hint_on, src_f, src_m, src_c, tpl) =
+                (b(0), b(1), b(2), b(3), b(4), b(5), b(6));
+            let f = wind_config::PinyinFuzzy {
+                enabled: fz_on,
+                ..Default::default()
+            };
+            let corr = wind_config::CorrectionConfig {
+                enabled: corr_on,
+                hint: wind_config::PinyinHintConfig {
+                    enabled: hint_on,
+                    fuzzy: src_f,
+                    misread: src_m,
+                    correction: src_c,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            assert_eq!(
+                pinyin_hint_on(&f, &corr, tpl),
+                (hint_on || tpl) && ((fz_on && src_f) || src_m || (corr_on && src_c)),
+                "bits={bits:07b}"
+            );
         }
     }
 
@@ -8862,9 +8873,17 @@ mod tests {
 
         cfg.schema.pinyin.fuzzy.enabled = false;
         cfg.input.correction.hint.enabled = true;
+        cfg.input.correction.hint.misread = false;
         m.reload_from_config(&cfg);
         m.set_correct_pinyin_in_templates(true);
-        assert!(!m.pinyin_hint_active(), "总开关关：恒 false");
+        assert!(!m.pinyin_hint_active(), "勾选的来源都不生效：恒 false");
+
+        cfg.input.correction.hint.correction = true;
+        m.reload_from_config(&cfg);
+        assert!(m.pinyin_hint_active(), "纠错来源勾上且纠错开：算提示");
+        cfg.input.correction.enabled = false;
+        m.reload_from_config(&cfg);
+        assert!(!m.pinyin_hint_active(), "纠错关：纠错来源不生效");
     }
 
     /// 混输引用环的路径要能直接贴进日志：自引用、互指、下游成环、菱形（非环）四种形状。

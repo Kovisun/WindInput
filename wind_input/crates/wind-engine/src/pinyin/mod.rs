@@ -2534,7 +2534,7 @@ impl PinyinEngine {
         out
     }
 
-    /// 给候选填模糊音提示（`meta.pinyin_hints`）并判 `is_corrected`；`hint` 关且无纠错规则时
+    /// 给候选填正确拼音提示（`meta.pinyin_hints`，模糊与纠错来源）并判 `is_corrected`；`hint` 关且无纠错规则时
     /// 调用方不进来。
     ///
     /// `is_corrected` 判在最终候选上：同文合并后留下的那条若有非纠错来源（精确命中无

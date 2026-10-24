@@ -28,8 +28,8 @@ pub enum CandidateSource {
     Assoc,
 }
 
-/// 模糊音提示：候选**引擎文字**第 `char_index` 个字（0 起）对应的音节被读错，
-/// 正确音节为 `correct`。
+/// 正确拼音提示：候选**引擎文字**第 `char_index` 个字（0 起）对应的音节与用户所敲不同，
+/// 正确音节为 `correct`，来源见 `kind`。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PinyinHint {
     pub char_index: u16,
@@ -127,7 +127,8 @@ pub struct CandidateMeta {
     /// 长」代替：英文方案、混输自己的前缀候选也长那样，却不该被挪动。
     #[serde(skip)]
     pub from_prefix_complete: bool,
-    /// 模糊音提示（空 = 无提示）。仅在模糊音与 `hint` 都开启时由引擎填充。
+    /// 正确拼音提示（空 = 无提示）。引擎在提示开关（`HintSwitch`）开时填充，各来源一并给出，
+    /// 按来源勾选取舍由协调器做。
     #[serde(skip)]
     pub pinyin_hints: Vec<PinyinHint>,
     /// 带提示候选的整词正确音节（一字一个，`["zhong", "guo"]`）；与 `pinyin_hints` 同时由引擎

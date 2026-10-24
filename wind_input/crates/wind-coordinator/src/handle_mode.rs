@@ -1091,9 +1091,9 @@ impl Coordinator {
         }
     }
 
-    /// 候选的模糊音提示换算到显示文字 `display`（[`Self::cand_display_text`] 的结果）上；
-    /// 没有提示、或显示文字与引擎文字字数对不上（简繁转换改了字数）⇒ `None`。`tone` 有值
-    /// （`hint.tone` 开）时提示换成带调读音。
+    /// 候选的正确拼音提示按来源勾选（`hint`）过滤后换算到显示文字 `display`
+    /// （[`Self::cand_display_text`] 的结果）上；没有勾选来源的提示、或显示文字与引擎文字字数
+    /// 对不上（简繁转换改了字数）⇒ `None`。`tone` 有值（`hint.tone` 开）时提示换成带调读音。
     ///
     /// 逆切分次选只显示后段时，字数要与引擎的后段（`display_text`）相同才按后段扣前段——
     /// [`crate::hint_text::remap_hints`] 单凭字数分不清这两种情形，在这里先判掉。
@@ -1102,9 +1102,11 @@ impl Coordinator {
         state: &State,
         c: &Candidate,
         display: &str,
+        hint: &wind_config::PinyinHintConfig,
         tone: Option<&wind_reverse::ReverseLookup>,
     ) -> Option<Vec<wind_candidate::PinyinHint>> {
-        if c.meta.pinyin_hints.is_empty() {
+        let kept = crate::hint_text::enabled_hints(hint, &c.meta.pinyin_hints);
+        if kept.is_empty() {
             return None;
         }
         let engine_shown = if Self::split_back_only(state, c) {
@@ -1115,19 +1117,16 @@ impl Coordinator {
         if display.chars().count() != engine_shown.chars().count() {
             return None;
         }
-        let toned;
         let hints = match tone {
-            Some(reverse) => {
-                toned = crate::hint_text::toned_hints(&c.text, &c.meta.pinyin_hints, reverse);
-                &toned
-            }
-            None => &c.meta.pinyin_hints,
+            Some(reverse) => crate::hint_text::toned_hints(&c.text, &kept, reverse),
+            None => kept,
         };
-        crate::hint_text::remap_hints(&c.text, display, hints).filter(|h| !h.is_empty())
+        crate::hint_text::remap_hints(&c.text, display, &hints).filter(|h| !h.is_empty())
     }
 
     /// `state.candidates[start..end]` 逐条的带提示正文（空 = 不标），按 `hint.scope` 定哪些
-    /// 候选标；`hint.enabled` 或 `hint.fuzzy` 关着一律不标（引擎可能因模板引用 `${correct_pinyin}` 照样算了提示）。
+    /// 候选标；`hint.enabled` 关着一律不标（引擎可能因模板引用 `${correct_pinyin}` 照样算了提示）。
+    /// 来源过滤在 `styled` 里做（[`Self::cand_display_hints`]），`first` 因此在过滤后的合并结果上取。
     ///
     /// `styled(c)` 是该候选在**宿主自己的显示形态**（截断、前缀标注…）下的带提示正文——桌面候选窗
     /// 与移动端拉取窗口显示形态不同，各自传入，标哪条的规则只此一份。`first` 只标最终界面顺序里
@@ -1141,11 +1140,16 @@ impl Coordinator {
         end: usize,
         styled: impl Fn(&Candidate) -> wind_ui_types::StyledText,
     ) -> Vec<wind_ui_types::StyledText> {
-        if !(hint.enabled && hint.fuzzy) {
+        if !hint.enabled {
             return vec![Default::default(); end.saturating_sub(start)];
         }
         let hinted = |c: &Candidate| {
-            if c.meta.pinyin_hints.is_empty() {
+            if !c
+                .meta
+                .pinyin_hints
+                .iter()
+                .any(|h| crate::hint_text::hint_kind_enabled(hint, h.kind))
+            {
                 Default::default()
             } else {
                 styled(c)

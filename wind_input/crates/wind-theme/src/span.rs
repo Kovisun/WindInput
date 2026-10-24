@@ -216,10 +216,10 @@ pub fn span_color(
     body
 }
 
-/// 模糊音提示段的角色名（与 wind-ui-types `TEXT_ROLES` 里的 `pinyin_hint` 同名）。
+/// 正确拼音提示段的角色名（与 wind-ui-types `TEXT_ROLES` 里的 `pinyin_hint` 同名）。
 pub const PINYIN_HINT_ROLE: &str = "pinyin_hint";
 
-/// 候选正文里模糊音提示段（`(ping)`）的颜色，角色名 [`PINYIN_HINT_ROLE`]。
+/// 候选正文里正确拼音提示段（`(ping)`）的颜色，角色名 [`PINYIN_HINT_ROLE`]。
 ///
 /// - `text`：`views.text`（提示段在候选正文里，角色色写在 `[text.roles]`）；`comment`：`views.comment`。
 /// - `comment_fallback`：注释节点未配正文色时的渲染层兜底（候选窗的 `COMMENT_FALLBACK`）。
@@ -1252,7 +1252,7 @@ mod tests {
         );
     }
 
-    // ---------------- 模糊音提示 ----------------
+    // ---------------- 正确拼音提示 ----------------
 
     const CMT: Rgba = [10, 20, 30, 255];
     const CMT_SEL: Rgba = [40, 50, 60, 255];

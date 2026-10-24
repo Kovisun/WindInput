@@ -251,9 +251,10 @@ fn assert_plain_order_kept(input: &str, on: &[CandidateItem], off: &[CandidateIt
 
 /// 简拼冲突类输入：首选与关纠错时相同；非纠错候选在首页的相对顺序不变。
 ///
-/// `xign` 只断言后一半：`gn_ng` 出厂开，`xign` 纠成 `xing` 的「型」按 D6 可以压过简拼
-/// （简拼不算完整候选，与 `gogn` 出「工」同一条规则），首选必然变——这正是设计 §5.2 给
-/// `gn_ng` 记的冲突示例，留给评测门禁（§9）决定该规则出厂开不开。
+/// `xign` 只断言后一半：本文件的 `config()` 打开了 `gn_ng`（出厂关），`xign` 纠成 `xing` 的
+/// 「型」按 D6 可以压过简拼（简拼不算完整候选，与 `gogn` 出「工」同一条规则），首选必然变
+/// ——这正是设计 §5.2 给 `gn_ng` 记的冲突示例；出厂配置下的首选见
+/// [`xign_top_unchanged_with_factory_rules`]。
 ///
 /// 且 `xign` 的首页全是 *型 一类纠错候选（`xing` 的整串字排在 `xi` 半截之前），首页上比
 /// 相对顺序会空过；故它改比**全部候选**，并先断言交集非空（「习惯」等仍在）。被纠错候选
@@ -288,6 +289,33 @@ fn abbrev_inputs_unaffected_by_correction() {
             assert_plain_order_kept(input, &on.items, &off.items);
         }
     }
+}
+
+/// 出厂规则（`gn_ng` 关）：`xign` 首选与关纠错时相同（「习惯」）。
+#[test]
+fn xign_top_unchanged_with_factory_rules() {
+    if !has_data() {
+        return;
+    }
+    let factory = || {
+        let mut c = Config::default();
+        c.schema.available = vec!["pinyin".into()];
+        c.schema.active = "pinyin".into();
+        c.input.default.chinese_mode = true;
+        c
+    };
+    let on = show_with(factory(), "xign");
+    let mut off_cfg = factory();
+    off_cfg.input.correction.enabled = false;
+    let off = show_with(off_cfg, "xign");
+    assert_eq!(off.items[0].text, "习惯", "前提：{:?}", texts(&off.items));
+    assert_eq!(
+        on.items[0].text,
+        off.items[0].text,
+        "on {:?} / off {:?}",
+        texts(&on.items),
+        texts(&off.items)
+    );
 }
 
 /// 敲入 `input` 后的全部候选文字（界面序，不含标记）。

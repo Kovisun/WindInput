@@ -9,7 +9,7 @@ use std::sync::{Arc, LazyLock};
 
 use super::correction::{CORRECTION_EDITS, CorrectionRules};
 
-/// 「算不算模糊音提示」的运行时开关：克隆共享同一份值，`EngineManager` 持有一份并注入各引擎，
+/// 「算不算正确拼音提示」的运行时开关：克隆共享同一份值，`EngineManager` 持有一份并注入各引擎，
 /// 翻转即时生效、无需重建引擎。提示只是 `convert` 收尾的后处理，不影响候选集合与排序。
 #[derive(Debug, Clone, Default)]
 pub struct HintSwitch(Arc<AtomicBool>);
@@ -46,8 +46,8 @@ pub struct FuzzyConfig {
     pub un_ong: bool,
     /// `eng ↔ ong`（`deng`↔`dong`、`zheng`↔`zhong`）。
     pub eng_ong: bool,
-    /// 算不算模糊音提示（见 [`HintSwitch`]；管理器按 `enabled && (hint || 模板引用 ${correct_pinyin})`
-    /// 置值）。不影响展开/匹配，仅供上层消费。
+    /// 算不算正确拼音提示（见 [`HintSwitch`]；管理器按 `pinyin_hint_on` 置值）。
+    /// 不影响展开/匹配，仅供上层消费。
     pub hint: HintSwitch,
     /// 双拼**同键韵母**推出的等价音节：音节 → 同一键对下其余的合法读音
     /// （自定义布局 `q = ["iu", "ui"]` 时 `diu` → `[dui]`、`dui` → `[diu]`）。

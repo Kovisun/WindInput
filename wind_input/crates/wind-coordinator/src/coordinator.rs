@@ -7586,10 +7586,11 @@ impl Coordinator {
                 cand_cfg.truncate_display(full)
             }
         };
-        // 模糊音提示（「苹(ping)果」）：换算到显示文字、过了截断与前缀后的带提示正文。
-        let tone_reverse = rt.config.input.correction.hint.tone.then_some(&*reverse);
+        // 正确拼音提示（「苹(ping)果」）：按来源过滤、换算到显示文字、过了截断与前缀后的带提示正文。
+        let hint_cfg = &rt.config.input.correction.hint;
+        let tone_reverse = hint_cfg.tone.then_some(&*reverse);
         let hint_styled = |c: &Candidate, full: &str, disp: &str| {
-            self.cand_display_hints(state, c, full, tone_reverse)
+            self.cand_display_hints(state, c, full, hint_cfg, tone_reverse)
                 .map(|h| crate::hint_text::styled_for_shown(full, disp, prefix_of(c), &h))
                 .unwrap_or_default()
         };

@@ -1,4 +1,4 @@
-//! 模糊音提示的显示正文：协调器按 `meta.pinyin_hints` 与 `hint.scope` 生成
+//! 正确拼音提示的显示正文：协调器按 `meta.pinyin_hints`、来源勾选与 `hint.scope` 生成
 //! `CandidateItem.text_styled`（「苹(ping)果」，`(ping)` 段角色 `pinyin_hint`），上屏文字不变。
 //!
 //! 自造夹具，不依赖 `build_dev/data`：`pinguo` 精确命中「拼过」，in/ing 模糊命中「苹果」「平过」。
@@ -330,4 +330,96 @@ fn correct_pinyin_var_toned() {
 fn correct_pinyin_var_empty_for_exact_candidate() {
     let items = zongguo("var_exact", false);
     assert!(item(&items, "宗").comment.is_empty());
+}
+
+// ───────────────────── 来源过滤（fuzzy / misread / correction） ─────────────────────
+
+const GP: &str = "公平\tgong ping\t3000\n";
+
+/// `gognping`（`gn_ng` 出厂关，这里打开）纠成「公平」，`edit` 再调提示配置。
+fn gognping(tag: &str, edit: impl FnOnce(&mut Config)) -> Vec<CandidateItem> {
+    let f = fixture_with(tag, GP);
+    let (coord, rx) = open_with(&f, true, HintScope::All, |c| {
+        c.input.correction.rules.gn_ng = true;
+        edit(c);
+    });
+    type_str(&coord, "gognping");
+    shown(&coord, &rx)
+}
+
+/// 勾上纠错来源：纠错候选内嵌正确拼音，标记在提示之前。
+#[test]
+fn correction_source_inlines_correct_pinyin() {
+    let items = gognping("corr_on", |c| c.input.correction.hint.correction = true);
+    let gp = item(&items, "*公平");
+    assert_eq!(gp.text_styled.as_str(), "*公(gong)平");
+    assert_eq!(hint_span(gp), vec![("(gong)", Some("pinyin_hint"))]);
+}
+
+/// 出厂来源不含纠错：纠错候选只带标记、不内嵌。
+#[test]
+fn correction_source_off_by_default() {
+    let items = gognping("corr_def", |_| {});
+    assert!(item(&items, "*公平").text_styled.is_empty());
+}
+
+/// 不勾模糊音来源：模糊候选不内嵌。
+#[test]
+fn fuzzy_source_unchecked_hides_fuzzy_hint() {
+    let f = fixture("fuzzy_off");
+    let (coord, rx) = open_with(&f, true, HintScope::All, |c| {
+        c.input.correction.hint.fuzzy = false;
+    });
+    type_str(&coord, "pinguo");
+    let items = shown(&coord, &rx);
+    assert!(item(&items, "苹果").text_styled.is_empty());
+}
+
+/// `${correct_pinyin}` 按来源过滤：只勾误读时，模糊候选的变量为空。
+#[test]
+fn template_var_respects_sources() {
+    let f = fixture_with("var_src", ZG);
+    let (coord, rx) = open_with(&f, false, HintScope::First, |c| {
+        c.schema.pinyin.fuzzy.zh_z = true;
+        let h = &mut c.input.correction.hint;
+        h.fuzzy = false;
+        h.misread = true;
+        h.correction = false;
+        c.ui.candidate.comment_template_vertical = "${correct_pinyin}".into();
+        c.ui.candidate.comment_template_horizontal = "${correct_pinyin}".into();
+    });
+    type_str(&coord, "zongguo");
+    let items = shown(&coord, &rx);
+    assert!(item(&items, "中国").comment.is_empty());
+}
+
+/// `${correct_pinyin}` 不看总开关与 `scope`：`hint.enabled` 关、`scope=first`，第二个模糊候选也出值。
+#[test]
+fn template_var_ignores_master_switch() {
+    let f = fixture_with(
+        "var_master",
+        "中国\tzhong guo\t3000\n中过\tzhong guo\t100\n",
+    );
+    let (coord, rx) = open_with(&f, false, HintScope::First, |c| {
+        c.schema.pinyin.fuzzy.zh_z = true;
+        c.ui.candidate.comment_template_vertical = "${correct_pinyin}".into();
+        c.ui.candidate.comment_template_horizontal = "${correct_pinyin}".into();
+    });
+    type_str(&coord, "zongguo");
+    let items = shown(&coord, &rx);
+    assert_eq!(item(&items, "中国").comment.as_str(), "zhong guo");
+    assert_eq!(item(&items, "中过").comment.as_str(), "zhong guo");
+    assert!(items.iter().all(|c| c.text_styled.is_empty()));
+}
+
+/// 纠错来源的 `${correct_pinyin}`：勾上即出纠正后的整词拼音。
+#[test]
+fn template_var_correction_source() {
+    let items = gognping("var_corr", |c| {
+        c.input.correction.hint.enabled = false;
+        c.input.correction.hint.correction = true;
+        c.ui.candidate.comment_template_vertical = "${correct_pinyin}".into();
+        c.ui.candidate.comment_template_horizontal = "${correct_pinyin}".into();
+    });
+    assert_eq!(item(&items, "*公平").comment.as_str(), "gong ping");
 }

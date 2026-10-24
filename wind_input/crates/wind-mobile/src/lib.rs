@@ -2185,7 +2185,7 @@ mod candidate_tooltip_tests {
     }
 }
 
-/// 模糊音提示的分段透传：核心按 `hint.enabled` / `hint.scope` 给候选生成带提示正文，这里只验
+/// 正确拼音提示的分段透传：核心按 `hint.enabled` / 来源 / `hint.scope` 给候选生成带提示正文，这里只验
 /// 「拉取窗口带出分段、提示段角色 `pinyin_hint`、关掉即空」。哪些候选该标在协调器测试里验。
 #[cfg(test)]
 mod pinyin_hint_tests {
