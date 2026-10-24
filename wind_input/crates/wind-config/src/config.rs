@@ -3155,7 +3155,7 @@ pub struct PinyinFuzzy {
 pub struct CorrectionConfig {
     /// 纠错总开关。
     pub enabled: bool,
-    /// 纠错候选的标记（留空 = 不加）。
+    /// 纠错候选的标记，加在候选前（留空 = 不加）。
     pub marker: String,
     /// 内置纠错规则开关。
     pub rules: CorrectionRuleToggles,
