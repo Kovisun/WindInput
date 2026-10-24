@@ -2562,10 +2562,88 @@ impl PinyinEngine {
         raw_input: &str,
         sp: Option<&shuangpin::SpConvertResult>,
     ) {
+        let readings = self
+            .fuzzy_config
+            .readings
+            .get()
+            .filter(|_| self.fuzzy_config.hint.get());
         for c in cands.iter_mut() {
             self.fill_inferred_hint(c, query, raw_input, sp);
+            if let Some(idx) = &readings {
+                self.infer_misread_hint(c, query, sp, idx);
+            }
             self.apply_misread_hint(c, query, sp);
         }
+    }
+
+    /// 误读自动推断（设计 §6.1，[`misread::infer`]）：只看整条是词库词、按用户音节逐字读出的候选
+    /// （精确命中 / 单字拼成，无 `learn_code`）；已带模糊 / 纠错提示的、召回的、简拼与补全的不推断。
+    /// 读音索引未就绪时不进来（静默不标）。
+    fn infer_misread_hint(
+        &self,
+        c: &mut Candidate,
+        query: &str,
+        sp: Option<&shuangpin::SpConvertResult>,
+        idx: &wind_dict::cached::ReverseIndex,
+    ) {
+        // 简拼 / 前缀补全不标（设计 §6.1 第 4 条）；末尾半截音节由下面的整音节判据挡掉。
+        if c.meta.learn_code.is_some()
+            || c.is_misread_recall
+            || c.is_abbrev
+            || c.is_prefix
+            || !c.meta.pinyin_hints.is_empty()
+            || c.text.chars().nth(1).is_none()
+        {
+            return;
+        }
+        // 双拼：击键域的码（简拼）无从还原成音节。
+        if sp.is_some() && !c.is_fullpinyin_fallback && !query.starts_with(c.code.as_str()) {
+            return;
+        }
+        let Some(codes) = idx.codes_of(&c.text) else {
+            return;
+        };
+        let typed_code = normalized_typed(&c.code);
+        // 绝大多数候选在这里返回：用户打的就是登记读音。
+        if codes.iter().any(|k| k == typed_code) {
+            return;
+        }
+        let boundary = if typed_code == c.code { c.boundary } else { 0 };
+        let mask = effective_boundary(&typed_code, boundary, &self.trie);
+        let Some(typed) = mixed_abbrev::syllables_from_boundary(&typed_code, mask) else {
+            return;
+        };
+        if !typed.iter().all(|s| self.trie.is_syllable(s)) {
+            return;
+        }
+        let readings: Vec<(Vec<String>, u32)> = codes
+            .iter()
+            .filter_map(|code| {
+                let hit = self
+                    .dict
+                    .search_with_boundary(code)
+                    .into_iter()
+                    .find(|h| h.text == c.text)?;
+                let m = effective_boundary(code, hit.boundary, &self.trie);
+                let syls = mixed_abbrev::syllables_from_boundary(code, m)?;
+                Some((
+                    syls.into_iter().map(str::to_string).collect(),
+                    hit.weight.max(0) as u32,
+                ))
+            })
+            .collect();
+        let empty = misread::MisreadTable::default();
+        let table = self.fuzzy_config.misread.as_deref().unwrap_or(&empty);
+        let hints = misread::infer(&c.text, &typed, &readings, table, &self.fuzzy_config);
+        if hints.is_empty() {
+            return;
+        }
+        let mut syllables: Vec<String> = typed.iter().map(|s| s.to_string()).collect();
+        for h in &hints {
+            syllables[h.char_index as usize] = h.correct.clone();
+        }
+        c.meta.hint_syllables = syllables;
+        c.meta.pinyin_hints = hints;
     }
 
     /// 自动推断的提示（模糊 / 纠错来源）与 `is_corrected`，见 [`Self::fill_pinyin_hints`]。

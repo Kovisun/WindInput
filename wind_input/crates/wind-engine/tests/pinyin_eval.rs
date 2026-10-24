@@ -27,6 +27,8 @@
 //!   （`gn_ng,on_ong`，`all` = 八条全开）
 //! - `WIND_PINYIN_EVAL_PER_RULE` F/G 类每条规则抽样数（默认 300）
 //! - `WIND_PINYIN_EVAL_LATENCY=1` 额外跑一遍逐键耗时（每条样本按前缀逐键 convert）
+//! - `WIND_PINYIN_EVAL_MISREAD=1` 开正文提示与误读来源、建好读音索引，另统计界面首页上的误读提示
+//!   （打对的输入上出现的都算误标候选，逐条列出供人工判）；`=table` 只用误读表、不建索引，两档相减即自动推断那部分
 //!
 //! 除 JSON 外还写 `<out>.ranks.tsv`：每条样本的引擎序 / 界面序位次与界面首页。两档之间逐位比对
 //! 用它；与协调器对拍见 `wind-coordinator/tests/pinyin_eval_ui_parity.rs`（读同一份 TSV）。
@@ -148,7 +150,41 @@ fn manager(dir: &Path) -> EngineManager {
         }
     }
     apply_correction_env(&mut cfg.input.correction);
-    EngineManager::new(&cfg, Some(dir))
+    if misread_eval() {
+        cfg.input.correction.hint.enabled = true;
+        cfg.input.correction.hint.misread = true;
+    }
+    let mgr = EngineManager::new(&cfg, Some(dir));
+    // `=table`：只用误读表、不建读音索引（与 `=1` 对比即得自动推断那部分）。
+    if misread_eval() && std::env::var("WIND_PINYIN_EVAL_MISREAD").is_ok_and(|v| v == "1") {
+        let _ = mgr.convert_with("pinyin", "nihao", UI_LIMIT);
+        assert!(mgr.prewarm_misread_readings("pinyin"), "读音索引应建成");
+    }
+    mgr
+}
+
+fn misread_eval() -> bool {
+    std::env::var("WIND_PINYIN_EVAL_MISREAD").is_ok_and(|v| v == "1" || v == "table")
+}
+
+fn misread_styled(c: &wind_candidate::Candidate) -> Option<String> {
+    let hints: Vec<_> = c
+        .meta
+        .pinyin_hints
+        .iter()
+        .filter(|h| h.kind == wind_candidate::HintKind::Misread)
+        .collect();
+    if hints.is_empty() {
+        return None;
+    }
+    let mut out = String::new();
+    for (i, ch) in c.text.chars().enumerate() {
+        out.push(ch);
+        if let Some(h) = hints.iter().find(|h| h.char_index as usize == i) {
+            let _ = write!(out, "({})", h.correct);
+        }
+    }
+    Some(out)
 }
 
 /// 纠错规则 id 与配置开关（设计 §5.2）。
@@ -1128,7 +1164,11 @@ fn pinyin_eval_report() {
         "class\tform\tinput\texpect\tengine_rank\tui_rank\tcorrected_on_page\tui_top1\tui_page\n",
     );
     let mut scores: Vec<(Class, Score, usize)> = Vec::new();
+    // 误读统计（`WIND_PINYIN_EVAL_MISREAD=1`）：类 → (样本数, 首页有误读提示的样本数, 提示候选数, 期望词被标数)。
+    let mut misread_stats: Vec<(Class, [usize; 4])> = Vec::new();
+    let mut misread_rows: Vec<String> = Vec::new();
     for (class, set) in &samples {
+        let mut mr = [0usize; 4];
         let t = Instant::now();
         let mut sc = Score::default();
         for s in set {
@@ -1148,6 +1188,31 @@ fn pinyin_eval_report() {
                     sc.ui_page += 1;
                 }
                 sc.ui_mrr_sum += 1.0 / (r as f64 + 1.0);
+            }
+            if misread_eval() && *class != Class::G {
+                mr[0] += 1;
+                let marked: Vec<(String, bool)> = ui
+                    .iter()
+                    .take(PAGE)
+                    .filter(|c| !c.is_misread_recall)
+                    .filter_map(|c| misread_styled(c).map(|t| (t, c.text == s.text)))
+                    .collect();
+                if !marked.is_empty() {
+                    mr[1] += 1;
+                    mr[2] += marked.len();
+                    mr[3] += marked.iter().filter(|m| m.1).count();
+                    misread_rows.push(format!(
+                        "{}\t{}\t{}\t{}",
+                        class.key(),
+                        s.input,
+                        s.text,
+                        marked
+                            .iter()
+                            .map(|m| m.0.as_str())
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    ));
+                }
             }
             let corr_on_page = ui.iter().take(PAGE).filter(|c| c.is_corrected).count();
             *sc.corrected_on_page.entry(corr_on_page).or_default() += 1;
@@ -1277,8 +1342,33 @@ fn pinyin_eval_report() {
         }
         let ms = t.elapsed().as_millis() as usize;
         scores.push((*class, sc, ms));
+        misread_stats.push((*class, mr));
     }
     let run_ms = t_run.elapsed().as_millis();
+    if misread_eval() {
+        println!("\n=== 误读推断：打对的输入上首页（{PAGE} 条）的误读提示 ===");
+        println!("类\t样本\t有提示的样本\t提示候选\t期望词被标");
+        let mut tot = [0usize; 4];
+        for (class, m) in misread_stats.iter().filter(|(c, _)| *c != Class::G) {
+            println!("{}\t{}\t{}\t{}\t{}", class.key(), m[0], m[1], m[2], m[3]);
+            for i in 0..4 {
+                tot[i] += m[i];
+            }
+        }
+        println!("合计\t{}\t{}\t{}\t{}", tot[0], tot[1], tot[2], tot[3]);
+        let path = out.with_extension("misread.tsv");
+        if let Some(d) = path.parent() {
+            let _ = std::fs::create_dir_all(d);
+        }
+        let body = format!(
+            "class\tinput\texpect\tmarked\n{}\n",
+            misread_rows.join("\n")
+        );
+        match std::fs::write(&path, body) {
+            Ok(()) => println!("明细: {}", path.display()),
+            Err(e) => println!("明细写盘失败 {}: {e}", path.display()),
+        }
+    }
 
     // ---- 4. 报告
     println!("\n=== 基线报告 (seed={}, top_n={}) ===", seed, TOP_N);

@@ -9,7 +9,12 @@
 //! 用户表同键（文字 + 错误读音）覆盖内置。
 
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex, RwLock};
 use tracing::warn;
+use wind_candidate::{HintKind, PinyinHint};
+use wind_dict::cached::ReverseIndex;
+
+use super::fuzzy::{FuzzyConfig, FuzzyMatcher};
 
 /// 内置表在 `schemas/` 下的相对路径，也是用户追加表在用户数据目录下的文件名。
 pub const MISREAD_FILE: &str = "pinyin_misread.txt";
@@ -123,6 +128,104 @@ impl MisreadTable {
             by_wrong,
         }
     }
+}
+
+/// 自动推断误读（设计 §6.1）：候选文字是词库词，而用户打的音节与它**所有**登记读音都不同 ⇒
+/// 取权重最高的读音，逐字标出不同处（`调(diao)研`）。
+///
+/// `readings`：该词全部登记读音（一字一音节）与权重。不标：单字、字数 ≠ 音节数、不在词库、
+/// 某个读音就是用户打的、表里有这条（表优先，含白名单）、差异能被已开的模糊规则解释（归模糊来源）。
+pub fn infer(
+    text: &str,
+    typed: &[&str],
+    readings: &[(Vec<String>, u32)],
+    table: &MisreadTable,
+    fuzzy: &FuzzyConfig,
+) -> Vec<PinyinHint> {
+    let n = text.chars().count();
+    if n < 2 || typed.len() != n || table.lookup(text, typed).is_some() {
+        return Vec::new();
+    }
+    let same_len = || readings.iter().filter(|(r, _)| r.len() == n);
+    if same_len().next().is_none() || readings.iter().any(|(r, _)| r.iter().eq(typed.iter())) {
+        return Vec::new();
+    }
+    let explained_by_fuzzy = |r: &[String]| {
+        r.iter().zip(typed).all(|(c, u)| {
+            c == u
+                || FuzzyMatcher::fuzzy_spelling_variants(c, fuzzy)
+                    .iter()
+                    .any(|v| v == u)
+        })
+    };
+    if same_len().any(|(r, _)| explained_by_fuzzy(r)) {
+        return Vec::new();
+    }
+    // 同权取先登记的那条（`max_by_key` 取最后一个最大值，故反向找）。
+    let Some((best, _)) = same_len().rev().max_by_key(|(_, w)| *w) else {
+        return Vec::new();
+    };
+    best.iter()
+        .zip(typed)
+        .enumerate()
+        .filter(|(_, (c, u))| c != *u)
+        .map(|(i, (c, _))| PinyinHint {
+            char_index: i as u16,
+            correct: c.clone(),
+            kind: HintKind::Misread,
+        })
+        .collect()
+}
+
+/// 一个方案的「词 → 读音」索引槽（拼音方案的反查索引）：后台建好后放进来，引擎每次查时读；
+/// 空 = 未就绪或已释放，推断静默不标。克隆共享同一个槽。
+#[derive(Clone, Default)]
+pub struct ReadingSlot(Arc<RwLock<Option<Arc<ReverseIndex>>>>);
+
+impl std::fmt::Debug for ReadingSlot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ReadingSlot(ready={})", self.get().is_some())
+    }
+}
+
+impl ReadingSlot {
+    pub fn get(&self) -> Option<Arc<ReverseIndex>> {
+        self.0.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    pub fn set(&self, idx: Option<Arc<ReverseIndex>>) {
+        *self.0.write().unwrap_or_else(|e| e.into_inner()) = idx;
+    }
+}
+
+/// 管理器持有的各方案读音索引槽（方案 id → 槽）。建拼音引擎时按方案取槽注入。
+#[derive(Clone, Default, Debug)]
+pub struct ReadingSlots(Arc<Mutex<HashMap<String, ReadingSlot>>>);
+
+impl ReadingSlots {
+    /// 取 `schema_id` 的槽，没有就建一个空的。
+    pub fn slot(&self, schema_id: &str) -> ReadingSlot {
+        self.lock()
+            .entry(schema_id.to_string())
+            .or_default()
+            .clone()
+    }
+
+    /// 已登记（建过拼音引擎）的方案 id。
+    pub fn ids(&self) -> Vec<String> {
+        self.lock().keys().cloned().collect()
+    }
+
+    pub fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, ReadingSlot>> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+/// 建拼音引擎时注入的误读来源：误读表（`None` = 不召回不标）与读音索引槽。
+#[derive(Clone, Default, Debug)]
+pub struct MisreadInputs {
+    pub table: Option<Arc<MisreadTable>>,
+    pub readings: ReadingSlots,
 }
 
 fn parse_line(line: &str) -> Option<MisreadEntry> {
@@ -290,6 +393,124 @@ mod tests {
             .collect();
         println!("核对 {} 条，词库缺读音 {} 条", checked.len(), missing.len());
         assert!(missing.is_empty(), "词库里没有这些正确读音：{missing:?}");
+    }
+
+    fn infer_with(
+        typed: &str,
+        readings: &[(&str, u32)],
+        table: &str,
+        fuzzy: &FuzzyConfig,
+    ) -> Vec<PinyinHint> {
+        let typed: Vec<&str> = typed.split(' ').collect();
+        let readings: Vec<(Vec<String>, u32)> =
+            readings.iter().map(|(r, w)| (syls(r), *w)).collect();
+        let table = MisreadTable::parse(table, "t");
+        infer("调研", &typed, &readings, &table, fuzzy)
+    }
+
+    fn hint(i: u16, c: &str) -> PinyinHint {
+        PinyinHint {
+            char_index: i,
+            correct: c.to_string(),
+            kind: HintKind::Misread,
+        }
+    }
+
+    #[test]
+    fn infer_marks_tiaoyan() {
+        let got = infer_with(
+            "tiao yan",
+            &[("diao yan", 3784)],
+            "",
+            &FuzzyConfig::default(),
+        );
+        assert_eq!(got, [hint(0, "diao")]);
+    }
+
+    #[test]
+    fn infer_picks_heaviest_reading() {
+        let got = infer_with(
+            "tiao yan",
+            &[("zhou yan", 10), ("diao yan", 3784)],
+            "",
+            &FuzzyConfig::default(),
+        );
+        assert_eq!(got, [hint(0, "diao")]);
+    }
+
+    #[test]
+    fn infer_skips_matching_reading() {
+        let got = infer_with(
+            "tiao yan",
+            &[("diao yan", 3784), ("tiao yan", 1)],
+            "",
+            &FuzzyConfig::default(),
+        );
+        assert!(got.is_empty());
+    }
+
+    #[test]
+    fn infer_skips_single_char() {
+        let table = MisreadTable::default();
+        let r = vec![(syls("diao"), 100)];
+        assert!(infer("调", &["tiao"], &r, &table, &FuzzyConfig::default()).is_empty());
+    }
+
+    #[test]
+    fn infer_skips_count_mismatch() {
+        let f = FuzzyConfig::default();
+        assert!(
+            infer_with("tiaoyan", &[("diao yan", 3784)], "", &f).is_empty(),
+            "音节数≠字数"
+        );
+        assert!(
+            infer_with("tiao yan", &[("diao yan er", 3784)], "", &f).is_empty(),
+            "读音字数对不上的不算登记读音"
+        );
+    }
+
+    #[test]
+    fn infer_skips_unknown_word() {
+        assert!(infer_with("tiao yan", &[], "", &FuzzyConfig::default()).is_empty());
+    }
+
+    #[test]
+    fn infer_whitelist_suppresses() {
+        let got = infer_with(
+            "tiao yan",
+            &[("diao yan", 3784)],
+            "调研\ttiao yan\t\n",
+            &FuzzyConfig::default(),
+        );
+        assert!(got.is_empty());
+    }
+
+    #[test]
+    fn infer_defers_to_fuzzy() {
+        let fuzzy = FuzzyConfig {
+            in_ing: true,
+            ..Default::default()
+        };
+        let table = MisreadTable::default();
+        let r = vec![(syls("ping guo"), 3000)];
+        assert!(infer("苹果", &["pin", "guo"], &r, &table, &fuzzy).is_empty());
+        assert_eq!(
+            infer("苹果", &["pin", "guo"], &r, &table, &FuzzyConfig::default()),
+            [hint(0, "ping")],
+            "模糊没开时照标"
+        );
+    }
+
+    #[test]
+    fn reading_slots_share_per_schema() {
+        let slots = ReadingSlots::default();
+        let a = slots.slot("pinyin");
+        assert!(a.get().is_none());
+        slots
+            .slot("pinyin")
+            .set(Some(Arc::new(ReverseIndex::default())));
+        assert!(a.get().is_some(), "同方案取到的是同一个槽");
+        assert!(slots.slot("shuangpin").get().is_none());
     }
 
     /// 内置表每行都收得进来（坏行会被静默跳过，条数对不上就是有坏行）。

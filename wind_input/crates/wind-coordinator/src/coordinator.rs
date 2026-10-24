@@ -2088,6 +2088,9 @@ pub struct Coordinator {
     pub(crate) host_services: std::sync::OnceLock<Arc<dyn crate::host_services::HostServices>>,
     /// 自身 Weak 引用：$CC 命令在独立线程异步执行（避免持 state 锁回调自锁方法致死锁）。
     pub(crate) self_weak: std::sync::OnceLock<std::sync::Weak<Coordinator>>,
+    /// 误读推断读音索引的后台构建线程（见 `EngineManager::set_misread_warm_hook`），
+    /// 留着句柄供 [`Coordinator::wait_misread_readings`] 等待。
+    misread_warm_threads: Mutex<Vec<std::thread::JoinHandle<()>>>,
     /// 上屏历史环形缓冲（index 0 = 最近）：供命令栏 `last(n)` 取最近上屏文本。
     pub(crate) recent_commits: Mutex<std::collections::VecDeque<String>>,
     /// 下一词学习的上文：最近一次**选词整体上屏**的词（简体）。默认断开：任何上屏记账
@@ -3212,6 +3215,7 @@ impl Coordinator {
             cmdbar_services: std::sync::OnceLock::new(),
             host_services: std::sync::OnceLock::new(),
             self_weak: std::sync::OnceLock::new(),
+            misread_warm_threads: Mutex::default(),
             recent_commits: Mutex::new(std::collections::VecDeque::new()),
             next_word_prev: Mutex::new(None),
             preceding_text: Mutex::new(String::new()),
@@ -3303,6 +3307,45 @@ impl Coordinator {
                     }
                 }));
         }
+        // 误读推断要的读音索引：引擎侧按配置决定建 / 放，这里只提供后台线程；建好后重刷当前这屏
+        // 候选把提示补上。秒级构建，绝不进按键线程；只持 Weak。
+        {
+            let weak = Arc::downgrade(&coordinator);
+            coordinator
+                .engine_mgr
+                .set_misread_warm_hook(Arc::new(move |schema_id: String| {
+                    let Some(c) = weak.upgrade() else {
+                        return;
+                    };
+                    let w = Arc::downgrade(&c);
+                    let spawned = std::thread::Builder::new()
+                        .name("misread-readings".into())
+                        .spawn(move || {
+                            let Some(c) = w.upgrade() else {
+                                return;
+                            };
+                            let t0 = std::time::Instant::now();
+                            if c.engine_mgr.prewarm_misread_readings(&schema_id) {
+                                debug!("误读推断读音索引 {} 用时 {:?}", schema_id, t0.elapsed());
+                                let s = c.state.lock().unwrap_or_else(|e| e.into_inner());
+                                if !s.input_buffer.is_empty() {
+                                    c.notify_ui_update(&s);
+                                }
+                            }
+                        });
+                    match spawned {
+                        Ok(h) => {
+                            let mut v = c
+                                .misread_warm_threads
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner());
+                            v.retain(|t| !t.is_finished());
+                            v.push(h);
+                        }
+                        Err(e) => warn!("无法启动误读读音索引线程: {e}（本次不推断误读）"),
+                    }
+                }));
+        }
         // 启动即显示常驻工具栏（反映初始 中英/方案/标点/全半角）
         coordinator.notify_toolbar();
         // 码元集与按键功能的冲突体检（只告警）。默认字符集下直接返回，无开销。
@@ -3314,6 +3357,24 @@ impl Coordinator {
         coordinator.warn_english_case_cycle_conflict();
         coordinator.warn_sentence_cycle_conflict();
         coordinator
+    }
+
+    /// 等误读推断的后台读音索引构建全部结束（测试用；构建中又派出的也等）。
+    pub fn wait_misread_readings(&self) {
+        loop {
+            let handles: Vec<_> = std::mem::take(
+                &mut *self
+                    .misread_warm_threads
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()),
+            );
+            if handles.is_empty() {
+                return;
+            }
+            for h in handles {
+                let _ = h.join();
+            }
+        }
     }
 
     /// 上屏历史快照（index 0 = 最近）。供命令栏 `last(n)` 读取。
