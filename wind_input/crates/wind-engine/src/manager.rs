@@ -8980,6 +8980,32 @@ mod tests {
         assert!(!m.sync_correction(&off), "同一份配置再同步不重建");
     }
 
+    /// 用户数据目录（`<userdata>/data`）下的 `pinyin_misread.yaml` 与内置表合并，同键覆盖内置。
+    #[test]
+    fn load_misread_merges_user_table() {
+        let dir = std::env::temp_dir().join(format!("wind_misread_user_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (data, user) = (dir.join("install"), dir.join("userdata").join("data"));
+        std::fs::create_dir_all(data.join("schemas")).unwrap();
+        std::fs::create_dir_all(&user).unwrap();
+        let file = crate::pinyin::misread::MISREAD_FILE;
+        std::fs::write(
+            data.join("schemas").join(file),
+            "- {text: 莘莘, wrong: xin xin, right: shen shen}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            user.join(file),
+            "---\nname: user\n...\n- {text: 炽热, wrong: zhi re, right: chi re, note: 自加}\n",
+        )
+        .unwrap();
+        let t = EngineManager::load_misread(Some(&data), Some(&user));
+        assert_eq!(t.len(), 2);
+        assert!(t.lookup("炽热", &["zhire"]).is_some(), "用户表生效");
+        assert!(t.lookup("莘莘", &["xinxin"]).is_some(), "内置表保留");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// 每次同步都重读误读表：表文件改了 ⇒ 要重建（「误读」开着时）。
     #[test]
     fn sync_correction_rereads_misread_table() {

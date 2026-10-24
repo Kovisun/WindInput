@@ -69,7 +69,12 @@ impl MisreadTable {
     /// 坏条目（缺字段、音节非纯字母、音节数与字数不等、错误读音与正确读音相同）warn 跳过；
     /// 列表体整体不是合法 YAML 时逐行解析，只丢坏的那几行。
     pub fn parse(src: &str, origin: &str) -> Self {
-        let body = body_of(src);
+        let (head, body) = split_head_body(src);
+        if head_has_entries(head) {
+            warn!(
+                "误读表 {origin} 的 meta 头（`...` 之前）里有条目，这些条目不生效，应写在 `...` 之后"
+            );
+        }
         let items: Vec<serde_yaml::Value> = match serde_yaml::from_str(body) {
             Ok(serde_yaml::Value::Sequence(items)) => items,
             Ok(serde_yaml::Value::Null) => Vec::new(),
@@ -164,16 +169,21 @@ impl MisreadTable {
     }
 }
 
-/// `...` 行之后的列表体；没有分隔行时整份都是列表体。
-fn body_of(src: &str) -> &str {
+/// 按 `...` 行切成 meta 头与列表体；没有分隔行时整份都是列表体。
+fn split_head_body(src: &str) -> (&str, &str) {
     let mut at = 0;
     for line in src.split_inclusive('\n') {
         at += line.len();
         if line.trim_end() == HEAD_BODY_SEP {
-            return &src[at..];
+            return (&src[..at - line.len()], &src[at..]);
         }
     }
-    src
+    ("", src)
+}
+
+/// meta 头里出现了列表项（`- {…}`）：多半是条目写到了 `...` 之前。
+fn head_has_entries(head: &str) -> bool {
+    head.lines().any(|l| l.trim_start().starts_with("- {"))
 }
 
 /// 一项展开成条目（`wrong` 是列表时每个读音一条）；任一处不合格整项作废。
@@ -281,6 +291,18 @@ mod tests {
     }
 
     #[test]
+    fn entries_in_meta_head_are_detected() {
+        let src = "---\nname: t\n- {text: 莘莘, wrong: xin xin, right: shen shen}\n...\n";
+        let (head, body) = split_head_body(src);
+        assert!(head_has_entries(head));
+        assert!(body.is_empty());
+        assert!(
+            !head_has_entries("---\nname: t\n# - {text: 例}\n"),
+            "注释不算"
+        );
+    }
+
+    #[test]
     fn without_meta_head_whole_file_is_body() {
         let t = MisreadTable::parse("- {text: 莘莘, wrong: xin xin, right: shen shen}\n", "t");
         assert_eq!(t.len(), 1);
@@ -346,7 +368,7 @@ mod tests {
     fn builtin_table_parses_cleanly() {
         let src = builtin_src();
         let items: Vec<serde_yaml::Value> =
-            serde_yaml::from_str(body_of(&src)).expect("内置表应是合法 YAML 列表");
+            serde_yaml::from_str(split_head_body(&src).1).expect("内置表应是合法 YAML 列表");
         let expanded: usize = items
             .iter()
             .map(|v| match v.get("wrong") {
@@ -367,8 +389,19 @@ mod tests {
         assert!(t.len() >= 400, "内置表 {} 条", t.len());
     }
 
-    /// 内置表对照随包词库（`build_dev/data` 的 cn_dicts，不含错音表 `corrections`）：每条的正确读音
-    /// 是词库登记的读音，错误读音**不是**词库登记的读音（否则那是合法读法，不该标错）。
+    /// 错误拼写连写后撞上的词库词权重达到这个值就不收（打常用词时召回项会混进首页）。
+    const HIGH_FREQ_WEIGHT: i64 = 5000;
+
+    /// 撞上高频词也照收的条目：(文字, 错误读音, 理由)。加条目须写明为什么值得。
+    const HIGH_FREQ_EXEMPT: &[(&str, &str, &str)] = &[];
+
+    /// 内置表对照随包词库（`build_dev/data` 的 cn_dicts，不含错音表 `corrections` 与 `others` 的
+    /// 「错音错字提示」段——那两处收的是错误读音，供提示用，不是合法读音）：
+    /// 1. 每条的正确读音是词库登记的读音；
+    /// 2. 错误读音**不是**该词登记的读音（否则那是合法读法，不该标错）；
+    /// 3. 错误拼写连写后，词库里别的词在这个码下的最高权重 < [`HIGH_FREQ_WEIGHT`]
+    ///    （豁免见 [`HIGH_FREQ_EXEMPT`]）。
+    ///
     /// 读大词库较慢且依赖本地数据，故 `#[ignore]`；改表后手动跑：
     /// `cargo test -p wind-engine --lib builtin_table_matches_dict_readings -- --ignored --nocapture`
     #[test]
@@ -376,23 +409,40 @@ mod tests {
     fn builtin_table_matches_dict_readings() {
         let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../../../");
         let table = MisreadTable::parse(&builtin_src(), "builtin");
+        let wrong_codes: std::collections::HashSet<String> =
+            table.entries.iter().map(|e| e.wrong_code()).collect();
         let dicts = format!("{root}build_dev/data/schemas/pinyin/cn_dicts");
         let mut readings: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
+        // 错误拼写连写 → 该码下的 (权重, 文字)。
+        let mut by_code: HashMap<String, Vec<(i64, String)>> = HashMap::new();
         for entry in std::fs::read_dir(&dicts).expect("需要 build_dev/data 词库") {
             let path = entry.unwrap().path();
             let name = path.file_name().unwrap().to_string_lossy().to_string();
             if !name.ends_with(".dict.yaml") || name.starts_with("corrections") {
                 continue;
             }
+            let mut in_misread_section = false;
             for line in std::fs::read_to_string(&path).unwrap().lines() {
+                if line.starts_with("#####") {
+                    in_misread_section = line.contains("错音错字提示");
+                }
+                if in_misread_section {
+                    continue;
+                }
                 let mut cols = line.split('\t');
-                if let (Some(t), Some(code)) = (cols.next(), cols.next())
-                    && table.has_text(t)
-                {
+                let (Some(t), Some(code)) = (cols.next(), cols.next()) else {
+                    continue;
+                };
+                if table.has_text(t) {
                     readings
                         .entry(t.to_string())
                         .or_default()
                         .insert(code.to_string());
+                }
+                let joined = code.replace(' ', "");
+                if wrong_codes.contains(&joined) {
+                    let w = cols.next().and_then(|w| w.trim().parse().ok()).unwrap_or(0);
+                    by_code.entry(joined).or_default().push((w, t.to_string()));
                 }
             }
         }
@@ -413,16 +463,40 @@ mod tests {
             .filter(|e| has(e, &e.wrong))
             .map(|e| format!("{} {}", e.text, e.wrong.join(" ")))
             .collect();
+        let high_freq: Vec<String> = table
+            .entries
+            .iter()
+            .filter(|e| {
+                let wrong = e.wrong.join(" ");
+                !HIGH_FREQ_EXEMPT
+                    .iter()
+                    .any(|(t, w, _)| *t == e.text && *w == wrong)
+            })
+            .filter_map(|e| {
+                let (w, t) = by_code
+                    .get(&e.wrong_code())?
+                    .iter()
+                    .filter(|(_, t)| *t != e.text)
+                    .max()?;
+                (*w >= HIGH_FREQ_WEIGHT)
+                    .then(|| format!("{} {} 撞「{t}」({w})", e.text, e.wrong.join(" ")))
+            })
+            .collect();
         println!(
-            "核对 {} 条：词库缺正确读音 {} 条，错误读音是词库读音 {} 条",
+            "核对 {} 条：词库缺正确读音 {} 条，错误读音是词库读音 {} 条，错误拼写撞高频词 {} 条",
             table.len(),
             missing.len(),
-            legit_wrong.len()
+            legit_wrong.len(),
+            high_freq.len()
         );
         assert!(missing.is_empty(), "词库里没有这些正确读音：{missing:?}");
         assert!(
             legit_wrong.is_empty(),
             "这些「错误读音」词库有登记：{legit_wrong:?}"
+        );
+        assert!(
+            high_freq.is_empty(),
+            "这些错误拼写撞上高频词（不收，或写进 HIGH_FREQ_EXEMPT 并说明理由）：{high_freq:?}"
         );
     }
 }

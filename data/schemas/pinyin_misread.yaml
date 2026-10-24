@@ -22,6 +22,7 @@ description: 常见误读词的正确读音（内置）
 ...
 
 # —— 形声字：照声旁（半边）读错 ——
+- {text: 馄饨, wrong: hun dun, right: hun tun}
 - {text: 唾弃, wrong: chui qi, right: tuo qi}
 - {text: 蛤蟆, wrong: ge ma, right: ha ma}
 - {text: 炽热, wrong: zhi re, right: chi re}
@@ -62,6 +63,7 @@ description: 常见误读词的正确读音（内置）
 - {text: 浣熊, wrong: wan xiong, right: huan xiong}
 - {text: 莅临, wrong: wei lin, right: li lin}
 - {text: 蛊惑, wrong: chong huo, right: gu huo}
+- {text: 胴体, wrong: tong ti, right: dong ti}
 - {text: 畸形, wrong: qi xing, right: ji xing}
 - {text: 歼灭, wrong: qian mie, right: jian mie}
 - {text: 河畔, wrong: he ban, right: he pan}
@@ -189,6 +191,7 @@ description: 常见误读词的正确读音（内置）
 - {text: 怄气, wrong: qu qi, right: ou qi}
 - {text: 老妪, wrong: lao qu, right: lao yu}
 - {text: 骰子, wrong: gu zi, right: tou zi}
+- {text: 饮鸩止渴, wrong: yin jiu zhi ke, right: yin zhen zhi ke}
 - {text: 干涸, wrong: gan gu, right: gan he}
 - {text: 付梓, wrong: fu xin, right: fu zi}
 - {text: 桑梓, wrong: sang xin, right: sang zi}
@@ -220,6 +223,7 @@ description: 常见误读词的正确读音（内置）
 - {text: 驰骋, wrong: chi pin, right: chi cheng}
 - {text: 娉婷, wrong: pin ting, right: ping ting}
 - {text: 澄澈, wrong: deng che, right: cheng che}
+- {text: 荨麻疹, wrong: qian ma zhen, right: xun ma zhen}
 - {text: 嫔妃, wrong: bin fei, right: pin fei}
 - {text: 挟持, wrong: jia chi, right: xie chi}
 - {text: 要挟, wrong: yao jia, right: yao xie}
@@ -301,7 +305,7 @@ description: 常见误读词的正确读音（内置）
 - {text: 栉风沐雨, wrong: jie feng mu yu, right: zhi feng mu yu}
 - {text: 风声鹤唳, wrong: feng sheng he lei, right: feng sheng he li}
 - {text: 自出机杼, wrong: zi chu ji yu, right: zi chu ji zhu}
-- {text: 杳无音信, wrong: xing wu yin xin, right: yao wu yin xin}
+- {text: 杳无音信, wrong: [xing wu yin xin, miao wu yin xin], right: yao wu yin xin}
 - {text: 茕茕孑立, wrong: ying ying jie li, right: qiong qiong jie li}
 - {text: 孑然一身, wrong: zi ran yi shen, right: jie ran yi shen}
 - {text: 踽踽独行, wrong: yu yu du xing, right: ju ju du xing}
@@ -314,6 +318,7 @@ description: 常见误读词的正确读音（内置）
 - {text: 魑魅魍魉, wrong: li mei wang liang, right: chi mei wang liang}
 - {text: 并行不悖, wrong: bing xing bu bo, right: bing xing bu bei}
 - {text: 悖论, wrong: bo lun, right: bei lun}
+- {text: 虚与委蛇, wrong: xu yu wei she, right: xu yu wei yi}
 - {text: 卷帙浩繁, wrong: juan shi hao fan, right: juan zhi hao fan}
 - {text: 光风霁月, wrong: guang feng qi yue, right: guang feng ji yue}
 - {text: 荠菜, wrong: qi cai, right: ji cai}
@@ -327,6 +332,8 @@ description: 常见误读词的正确读音（内置）
 # —— 多音字：读成另一个音 ——
 - {text: 调研, wrong: tiao yan, right: diao yan}
 - {text: 契机, wrong: qie ji, right: qi ji}
+- {text: 角色, wrong: jiao se, right: jue se}
+- {text: 主角, wrong: zhu jiao, right: zhu jue}
 - {text: 配角, wrong: pei jiao, right: pei jue}
 - {text: 丑角, wrong: chou jiao, right: chou jue}
 - {text: 名角, wrong: ming jiao, right: ming jue}
@@ -372,8 +379,10 @@ description: 常见误读词的正确读音（内置）
 - {text: 曝晒, wrong: bao shai, right: pu shai}
 - {text: 一曝十寒, wrong: yi bao shi han, right: yi pu shi han}
 - {text: 咀嚼, wrong: ju jiao, right: ju jue}
+- {text: 埋怨, wrong: mai yuan, right: man yuan}
 - {text: 呆板, wrong: ai ban, right: dai ban}
 - {text: 呆滞, wrong: ai zhi, right: dai zhi}
+- {text: 弄堂, wrong: nong tang, right: long tang}
 - {text: 星宿, wrong: xing su, right: xing xiu}
 - {text: 发酵, wrong: fa xiao, right: fa jiao}
 - {text: 纤维, wrong: qian wei, right: xian wei}
@@ -401,6 +410,7 @@ description: 常见误读词的正确读音（内置）
 - {text: 自给自足, wrong: zi gei zi zu, right: zi ji zi zu}
 - {text: 配给, wrong: pei gei, right: pei ji}
 - {text: 给养, wrong: gei yang, right: ji yang}
+- {text: 大腹便便, wrong: da fu bian bian, right: da fu pian pian}
 - {text: 参差不齐, wrong: can cha bu qi, right: cen ci bu qi}
 - {text: 参差, wrong: can cha, right: cen ci}
 - {text: 人参, wrong: ren can, right: ren shen}
@@ -410,8 +420,16 @@ description: 常见误读词的正确读音（内置）
 - {text: 一蹴而就, wrong: yi jiu er jiu, right: yi cu er jiu}
 - {text: 蹴鞠, wrong: jiu ju, right: cu ju}
 - {text: 似的, wrong: si de, right: shi de}
+- {text: 一模一样, wrong: yi mo yi yang, right: yi mu yi yang}
+- {text: 模样, wrong: mo yang, right: mu yang}
+- {text: 模具, wrong: mo ju, right: mu ju}
+- {text: 模板, wrong: mo ban, right: mu ban}
 - {text: 模子, wrong: mo zi, right: mu zi}
+- {text: 装模作样, wrong: zhuang mo zuo yang, right: zhuang mu zuo yang}
+- {text: 有模有样, wrong: you mo you yang, right: you mu you yang}
+- {text: 说服, wrong: shui fu, right: shuo fu}
 - {text: 说客, wrong: shuo ke, right: shui ke}
+- {text: 道行, wrong: dao hang, right: dao heng}
 - {text: 行伍, wrong: xing wu, right: hang wu}
 - {text: 行当, wrong: xing dang, right: hang dang}
 - {text: 校对, wrong: xiao dui, right: jiao dui}
@@ -435,6 +453,7 @@ description: 常见误读词的正确读音（内置）
 - {text: 厦门, wrong: sha men, right: xia men}
 - {text: 扁舟, wrong: bian zhou, right: pian zhou}
 - {text: 一叶扁舟, wrong: yi ye bian zhou, right: yi ye pian zhou}
+- {text: 心宽体胖, wrong: xin kuan ti pang, right: xin kuan ti pan}
 - {text: 呱呱坠地, wrong: gua gua zhui di, right: gu gu zhui di}
 - {text: 揠苗助长, wrong: yan miao zhu zhang, right: ya miao zhu zhang}
 - {text: 刚愎自用, wrong: gang fu zi yong, right: gang bi zi yong}
@@ -448,6 +467,7 @@ description: 常见误读词的正确读音（内置）
 - {text: 剑鞘, wrong: jian xiao, right: jian qiao}
 - {text: 万马齐喑, wrong: wan ma qi an, right: wan ma qi yin}
 - {text: 咯血, wrong: ge xue, right: ka xue}
+- {text: 强劲, wrong: qiang jin, right: qiang jing}
 - {text: 刚劲, wrong: gang jin, right: gang jing}
 - {text: 劲敌, wrong: jin di, right: jing di}
 - {text: 劲旅, wrong: jin lv, right: jing lv}
@@ -487,6 +507,8 @@ description: 常见误读词的正确读音（内置）
 - {text: 涮锅, wrong: shua guo, right: shuan guo}
 - {text: 和面, wrong: he mian, right: huo mian}
 - {text: 和稀泥, wrong: he xi ni, right: huo xi ni}
+- {text: 暖和, wrong: nuan he, right: nuan huo}
+- {text: 掺和, wrong: chan he, right: chan huo}
 - {text: 系鞋带, wrong: xi xie dai, right: ji xie dai}
 - {text: 系领带, wrong: xi ling dai, right: ji ling dai}
 - {text: 囤积, wrong: dun ji, right: tun ji}
@@ -528,7 +550,8 @@ description: 常见误读词的正确读音（内置）
 - {text: 独辟蹊径, wrong: du pi qi jing, right: du pi xi jing}
 - {text: 蹊径, wrong: qi jing, right: xi jing}
 - {text: 拾级而上, wrong: shi ji er shang, right: she ji er shang}
-- {text: 叱咤风云, wrong: chi tuo feng yun, right: chi zha feng yun}
+- {text: 叱咤, wrong: [chi cha, chi tuo], right: chi zha}
+- {text: 叱咤风云, wrong: [chi tuo feng yun, chi cha feng yun], right: chi zha feng yun}
 - {text: 少不更事, wrong: shao bu gan shi, right: shao bu geng shi}
 
 # —— 成语与固定说法 ——
@@ -542,6 +565,7 @@ description: 常见误读词的正确读音（内置）
 - {text: 莞尔, wrong: guan er, right: wan er}
 - {text: 一声不吭, wrong: yi sheng bu hang, right: yi sheng bu keng}
 - {text: 吭声, wrong: hang sheng, right: keng sheng}
+- {text: 力能扛鼎, wrong: li neng kang ding, right: li neng gang ding}
 - {text: 百战不殆, wrong: bai zhan bu tai, right: bai zhan bu dai}
 - {text: 谑而不虐, wrong: nve er bu nve, right: xue er bu nve}
 - {text: 狼吞虎咽, wrong: lang tun hu ye, right: lang tun hu yan}
@@ -550,6 +574,7 @@ description: 常见误读词的正确读音（内置）
 
 # —— 地名 ——
 - {text: 蚌埠, wrong: bang bu, right: beng bu}
+- {text: 六安, wrong: liu an, right: lu an}
 - {text: 番禺, wrong: fan yu, right: pan yu}
 - {text: 亳州, wrong: hao zhou, right: bo zhou}
 - {text: 涪陵, wrong: pei ling, right: fu ling}
@@ -616,4 +641,5 @@ description: 常见误读词的正确读音（内置）
 # —— 宗教用语 ——
 - {text: 般若, wrong: ban ruo, right: bo re}
 - {text: 伽蓝, wrong: jia lan, right: qie lan}
+- {text: 阿弥陀佛, wrong: a mi tuo fo, right: e mi tuo fo}
 - {text: 偈语, wrong: jie yu, right: ji yu}
