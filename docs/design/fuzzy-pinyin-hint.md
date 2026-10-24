@@ -1,5 +1,7 @@
 # 模糊音正确拼音提示
 
+> ⚠️ 配置与命名已被 [pinyin-correction-and-hints.md](pinyin-correction-and-hints.md) 取代（键挪到 `[input.correction.hint]`，角色 `pinyin_hint`、变量 `${correct_pinyin}`）；下文旧名仅作历史记录。
+>
 > 2026-10-21 设计；分支 `feat/fuzzy-pinyin-hint`。
 > 前身：`text-span-colors.md`（分段样式 / 角色）、`candidate-comment-above-line.md`
 > （§2 把「逐字 ruby」另立项——本设计是候选**正文**分段的第一个消费者）。
