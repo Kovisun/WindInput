@@ -1074,10 +1074,10 @@ mod tests {
         let root = s.user_text_dir().to_path_buf();
         assert_eq!(
             s.locate_data_path(Some(crate::MISREAD_FILE)).unwrap(),
-            root.join("pinyin_misread.txt")
+            root.join("pinyin_misread.yaml")
         );
         assert!(
-            s.locate_data_path(Some("pinyin/pinyin_misread.txt"))
+            s.locate_data_path(Some("pinyin/pinyin_misread.yaml"))
                 .is_err()
         );
         assert!(s.begin_edit(crate::MISREAD_FILE).is_err(), "不走编辑会话");

@@ -44,8 +44,8 @@ fn fixture(tag: &str) -> Fixture {
     )
     .unwrap();
     std::fs::write(
-        schemas.join("pinyin_misread.txt"),
-        "莘莘\txin xin\tshen shen\n",
+        schemas.join("pinyin_misread.yaml"),
+        "- {text: 莘莘, wrong: xin xin, right: shen shen}\n",
     )
     .unwrap();
     Fixture { dir }

@@ -632,15 +632,6 @@ pub struct EngineManager {
     /// 误读表（内置 ⊕ 用户追加，见 [`crate::pinyin::misread`]）：构造与 `reload_from_config` 时读盘，
     /// 「误读」来源勾选时才注入拼音引擎（[`Self::misread_for_engines`]）。
     misread: Mutex<Arc<crate::pinyin::misread::MisreadTable>>,
-    /// 误读自动推断的「词 → 读音」索引槽（各拼音方案的反查索引），见 [`Self::refresh_misread_readings`]。
-    /// 要它（[`Self::misread_infer_wanted`]）时后台建好放进槽，不要时清空释放。
-    misread_readings: crate::pinyin::misread::ReadingSlots,
-    /// 读音索引代次：清空槽（配置关掉、词库失效）时推进；后台建好时代次已变就丢弃结果。
-    misread_readings_gen: std::sync::atomic::AtomicU64,
-    /// 已派出后台构建、尚未结束的方案（去重）。
-    misread_warming: Mutex<std::collections::HashSet<String>>,
-    /// 派后台构建的回调（协调器起线程调 [`Self::prewarm_misread_readings`]）。没注册就不建。
-    misread_warm_hook: std::sync::OnceLock<MisreadWarmHook>,
     /// 有模板引用 `${correct_pinyin}`（协调器按全部模板位判定后告知，见
     /// [`Self::set_correct_pinyin_in_templates`]）：`hint` 关着也要让拼音引擎算正确拼音提示。
     correct_pinyin_in_templates: std::sync::atomic::AtomicBool,
@@ -746,10 +737,6 @@ pub struct ActiveDataFacts {
     /// 自动造词开着（[`EngineManager::auto_phrase_enabled`]）。
     pub auto_phrase: bool,
 }
-
-/// 误读读音索引的后台构建回调，参数是方案 id（见 [`EngineManager::set_misread_warm_hook`]）。
-/// 返回是否真的派出去了（线程起不来时 `false`，管理器清掉在建标记）。
-pub type MisreadWarmHook = Arc<dyn Fn(String) -> bool + Send + Sync>;
 
 /// 进程级缓存根目录（%LOCALAPPDATA%\WindInput\cache），EngineManager::new 设置一次。
 static CACHE_DIR: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
@@ -1042,10 +1029,6 @@ impl EngineManager {
                 crate::pinyin::correction::CorrectionRules::from_config(&config.input.correction),
             )),
             misread: Mutex::new(Arc::new(misread)),
-            misread_readings: Default::default(),
-            misread_readings_gen: std::sync::atomic::AtomicU64::new(0),
-            misread_warming: Mutex::default(),
-            misread_warm_hook: std::sync::OnceLock::new(),
             correct_pinyin_in_templates: std::sync::atomic::AtomicBool::new(false),
             pinyin_hint: crate::pinyin::fuzzy::HintSwitch::new(pinyin_hint_on(
                 &config.schema.pinyin.fuzzy,
@@ -3227,10 +3210,7 @@ impl EngineManager {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .clone();
-            let misread = crate::pinyin::misread::MisreadInputs {
-                table: self.misread_for_engines(),
-                readings: self.misread_readings.clone(),
-            };
+            let misread = self.misread_for_engines();
             // 词组分词（t42）：英文方案读 `schema.english.phrase_seg`，临英与快捷输入英文共读
             // `input.temp_english.phrase_seg`（A2-3b），两份开关相或。引擎只需知道「要不要具备
             // 这个能力」——按作用域把关是协调器的事，见 `build_engine` 的参数说明。
@@ -3280,7 +3260,7 @@ impl EngineManager {
                 &pinyin_cfg,
                 &self.pinyin_hint,
                 &correction,
-                &misread,
+                misread.as_ref(),
                 phrase_seg_anywhere,
                 lookup_disabled_dicts,
                 // 顶层入口：方案自身是拼音时不加约束（简拼开）。混输在其内部为 secondary 注入。
@@ -3319,8 +3299,6 @@ impl EngineManager {
                     if schema_id == self.active_schema_id() {
                         self.warm_disabled_dicts_async(schema_id);
                     }
-                    // 新建的拼音引擎（含混输里的）登记了读音索引槽：要的话后台补建。
-                    self.refresh_misread_readings();
                     return true;
                 }
                 None => {
@@ -4109,7 +4087,6 @@ impl EngineManager {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clear();
-        self.invalidate_misread_readings();
         // 单字全码表同源于「启用词库合并」，与反查索引同生命周期，一并失效。
         *self
             .single_char_codes
@@ -4233,7 +4210,6 @@ impl EngineManager {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clear();
-        self.invalidate_misread_readings();
         *self
             .single_char_codes
             .lock()
@@ -4415,7 +4391,6 @@ impl EngineManager {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clear();
-        self.invalidate_misread_readings();
         // 单字全码表同源于「启用词库合并」，与反查索引同生命周期，一并失效。
         *self
             .single_char_codes
@@ -4529,7 +4504,6 @@ impl EngineManager {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clear();
-        self.invalidate_misread_readings();
         // 方案文件/override 可能随配置重载而变（设置页改完即热重载），按键功能表一并失效。
         // 两张表同批：会话态那张漏清的表现是「设置页改了翻页键，重启才生效」。
         self.key_actions_cache
@@ -5191,8 +5165,8 @@ impl EngineManager {
         self.refresh_pinyin_hint();
     }
 
-    /// 读误读表：内置（`schemas/pinyin_misread.txt`，经资源层 `user > custom > data` 取一份）
-    /// ⊕ 用户追加（用户数据目录 `data/pinyin_misread.txt`，同键覆盖内置）。文件缺失按空表。
+    /// 读误读表：内置（`schemas/pinyin_misread.yaml`，经资源层 `user > custom > data` 取一份）
+    /// ⊕ 用户追加（用户数据目录 `data/pinyin_misread.yaml`，同键覆盖内置）。文件缺失按空表。
     fn load_misread(
         data_dir: Option<&Path>,
         user_data_dir: Option<&Path>,
@@ -5261,182 +5235,6 @@ impl EngineManager {
             .unwrap_or_else(|e| e.into_inner());
         self.pinyin_hint
             .set(pinyin_hint_on(&pinyin.fuzzy, &corr, tpl));
-        drop((pinyin, corr));
-        self.refresh_misread_readings();
-    }
-
-    /// 误读自动推断要不要读音索引：「误读」来源勾选，且正文内嵌或模板引用 `${correct_pinyin}`。
-    pub fn misread_infer_wanted(&self) -> bool {
-        let tpl = self
-            .correct_pinyin_in_templates
-            .load(std::sync::atomic::Ordering::Relaxed);
-        let corr = self
-            .correction_cfg
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        corr.hint.misread && (corr.hint.enabled || tpl)
-    }
-
-    /// 读音索引跟随配置：要时给建过拼音引擎、槽还空的方案派后台构建；不要时清空释放。
-    /// 配置同步（[`Self::refresh_pinyin_hint`]）与拼音引擎建好时调，不阻塞。
-    pub fn refresh_misread_readings(&self) {
-        if !self.misread_infer_wanted() {
-            if self.drop_misread_readings() {
-                info!("误读推断已关，释放读音索引");
-            }
-            return;
-        }
-        // 槽没有引擎持有了（引擎被摘 / 重建前的旧槽）就丢掉、不派——不为没在用的方案建索引。
-        // 混输里的拼音子引擎同样持有自己方案的槽，故不必按方案表判「已加载」。
-        let pending: Vec<String> = {
-            let mut slots = self.misread_readings.lock();
-            slots.retain(|_, s| s.in_use());
-            slots
-                .iter()
-                .filter(|(_, s)| s.get().is_none())
-                .map(|(id, _)| id.clone())
-                .collect()
-        };
-        for id in pending {
-            self.request_misread_warm(&id);
-        }
-    }
-
-    /// 清空全部读音索引槽并推进代次（在建的结果作废）。返回是否真有已建好的被释放。
-    fn drop_misread_readings(&self) -> bool {
-        let slots = self.misread_readings.lock();
-        self.misread_readings_gen
-            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-        let mut freed = false;
-        for slot in slots.values() {
-            if slot.get().is_some() {
-                slot.set(None);
-                freed = true;
-            }
-        }
-        drop(slots);
-        // 反查索引表（`reverse_index`）里那份不在这里摘：联想等消费者可能正用着它，去留归那边的
-        // 内存护栏；大索引是 mmap，不占私有内存。
-        freed
-    }
-
-    /// 词库可能变了（反查索引失效处）：作废读音索引，要的话按新词库重建。
-    fn invalidate_misread_readings(&self) {
-        self.drop_misread_readings();
-        self.refresh_misread_readings();
-    }
-
-    fn request_misread_warm(&self, schema_id: &str) {
-        let Some(hook) = self.misread_warm_hook.get() else {
-            return;
-        };
-        if !self
-            .misread_warming
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(schema_id.to_string())
-        {
-            return;
-        }
-        if !hook(schema_id.to_string()) {
-            self.clear_misread_warming(schema_id);
-        }
-    }
-
-    fn clear_misread_warming(&self, schema_id: &str) {
-        self.misread_warming
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(schema_id);
-    }
-
-    /// 在建标记的守卫：构建结束（含 panic）时清掉 `schema_id` 的标记。
-    fn misread_warming_guard<'a>(&'a self, schema_id: &'a str) -> impl Drop + 'a {
-        struct Guard<'a>(&'a EngineManager, &'a str);
-        impl Drop for Guard<'_> {
-            fn drop(&mut self) {
-                self.0.clear_misread_warming(self.1);
-            }
-        }
-        Guard(self, schema_id)
-    }
-
-    /// 注册后台构建回调（一次性，重复注册忽略），注册后立即按当前配置补派一次。
-    pub fn set_misread_warm_hook(&self, hook: MisreadWarmHook) {
-        let _ = self.misread_warm_hook.set(hook);
-        self.refresh_misread_readings();
-    }
-
-    /// **阻塞**地建 / 开 `schema_id` 的读音索引并放进槽（后台线程 / 测试用，不可进按键链路）。
-    /// 构建期间配置关掉或词库失效（代次变了）就丢弃结果；仍要的话重新派一次。返回是否放进了槽。
-    pub fn prewarm_misread_readings(&self, schema_id: &str) -> bool {
-        let gen0 = self
-            .misread_readings_gen
-            .load(std::sync::atomic::Ordering::Acquire);
-        let guard = self.misread_warming_guard(schema_id);
-        let idx = if self.misread_infer_wanted() {
-            self.reverse_index_for(schema_id)
-        } else {
-            None
-        };
-        let Some(idx) = idx else {
-            return false;
-        };
-        self.finish_misread_warm(schema_id, idx, gen0, guard)
-    }
-
-    /// 构建完成后的收尾：代次未变且仍要就放进槽；否则丢弃，仍要的话重派。`warming` 是本次的
-    /// 在建标记守卫，收尾里按时机放掉。
-    fn finish_misread_warm(
-        &self,
-        schema_id: &str,
-        idx: Arc<ReverseIndex>,
-        gen0: u64,
-        warming: impl Drop,
-    ) -> bool {
-        if self.install_misread_readings(schema_id, Arc::clone(&idx), gen0) {
-            return true;
-        }
-        // 作废了。失效点先清表、本次构建随后才把索引插回表里——它可能出自失效前的词库，
-        // 摘掉（只摘这一份），否则重派的那次走快路径直接复用它。
-        {
-            let mut g = self.reverse_index.lock().unwrap_or_else(|e| e.into_inner());
-            if g.get(schema_id).is_some_and(|cur| Arc::ptr_eq(cur, &idx)) {
-                g.remove(schema_id);
-            }
-        }
-        // 摘完才清在建标记：早清的话，并发刷新派的构建可能赶在摘之前复用旧索引。
-        drop(warming);
-        // 仍要的话按新词库再来一次（已在建的会被去重挡掉）。
-        if self.misread_infer_wanted() {
-            self.request_misread_warm(schema_id);
-        }
-        false
-    }
-
-    /// 代次未变且仍要时才放进槽。与 [`Self::drop_misread_readings`] 同在槽表锁下，不会交错。
-    fn install_misread_readings(&self, schema_id: &str, idx: Arc<ReverseIndex>, gen0: u64) -> bool {
-        let slots = self.misread_readings.lock();
-        let cur = self
-            .misread_readings_gen
-            .load(std::sync::atomic::Ordering::Acquire);
-        if cur != gen0 || !self.misread_infer_wanted() {
-            return false;
-        }
-        let Some(slot) = slots.get(schema_id) else {
-            return false;
-        };
-        slot.set(Some(idx));
-        info!("误读推断读音索引就绪：{schema_id}");
-        true
-    }
-
-    /// `schema_id` 的读音索引是否已在槽里（诊断 / 测试用）。
-    pub fn misread_readings_ready(&self, schema_id: &str) -> bool {
-        self.misread_readings
-            .lock()
-            .get(schema_id)
-            .is_some_and(|s| s.get().is_some())
     }
 
     /// 拼音引擎当前是否算正确拼音提示（诊断 / 测试用）。
@@ -6987,9 +6785,8 @@ impl EngineManager {
         pinyin_hint: &crate::pinyin::fuzzy::HintSwitch,
         // `correction`：换位纠错规则（管理器生成一份共享）；双拼方案不用。
         correction: &Arc<crate::pinyin::correction::CorrectionRules>,
-        // `misread`：误读表（`None` = 不召回不标，见 `EngineManager::misread_for_engines`）与各方案的
-        // 读音索引槽（误读自动推断，见 `EngineManager::misread_readings`）。
-        misread: &crate::pinyin::misread::MisreadInputs,
+        // `misread`：误读表，`None` = 不召回不标（见 `EngineManager::misread_for_engines`）。
+        misread: Option<&Arc<crate::pinyin::misread::MisreadTable>>,
         // `phrase_seg_anywhere`：三个作用域（英文方案 / 临英 / 快捷输入英文）里是否
         // **有任何一个**开着词组分词。不按作用域分别开关，是因为英文引擎实例是三者
         // **共用**的（进程里只有 `engines["english"]` 这一个实例，见 [`EnglishProvider`]）
@@ -7262,12 +7059,8 @@ impl EngineManager {
                 } else {
                     correction
                 },
-                misread.table.as_ref(),
+                misread,
             );
-            let fuzzy = crate::pinyin::fuzzy::FuzzyConfig {
-                readings: misread.readings.slot(schema_id),
-                ..fuzzy
-            };
             let pcfg = PinyinConfig {
                 use_smart_compose: pg.use_smart_compose,
                 // 纯拼音方案看 `[schema.pinyin.abbrev] enabled`；混输看 `mix.enable_pinyin_abbrev`，
@@ -9187,169 +8980,30 @@ mod tests {
         assert!(!m.sync_correction(&off), "同一份配置再同步不重建");
     }
 
-    /// 误读推断要读音索引的条件：「误读」勾选且（正文内嵌 或 模板引用）。
+    /// 用户数据目录（`<userdata>/data`）下的 `pinyin_misread.yaml` 与内置表合并，同键覆盖内置。
     #[test]
-    fn misread_infer_wanted_follows_hint_and_templates() {
-        let cfg = Config::default();
-        let m = EngineManager::new(&cfg, None);
-        assert!(!m.misread_infer_wanted(), "出厂不内嵌、无模板引用");
-        m.set_correct_pinyin_in_templates(true);
-        assert!(m.misread_infer_wanted(), "模板引用即要");
-        let mut on = cfg.clone();
-        on.input.correction.hint.enabled = true;
-        on.input.correction.hint.misread = false;
-        m.sync_correction(&on);
-        assert!(!m.misread_infer_wanted(), "没勾「误读」不要");
-    }
-
-    /// 后台构建与配置变化的竞态：构建期间代次推进（关掉 / 词库失效）⇒ 结果丢弃；
-    /// 代次没变但已不要 ⇒ 也丢弃；关掉时已放进去的被释放。
-    #[test]
-    fn stale_misread_readings_are_discarded() {
-        let mut cfg = Config::default();
-        cfg.input.correction.hint.enabled = true;
-        let m = EngineManager::new(&cfg, None);
-        let slot = m.misread_readings.slot("py");
-        let idx = || Arc::new(ReverseIndex::default());
-        let cur_gen = || {
-            m.misread_readings_gen
-                .load(std::sync::atomic::Ordering::Acquire)
-        };
-
-        let g0 = cur_gen();
-        m.invalidate_misread_readings();
-        assert!(
-            !m.install_misread_readings("py", idx(), g0),
-            "开工后代次变了：丢弃"
-        );
-        assert!(slot.get().is_none());
-
-        assert!(m.install_misread_readings("py", idx(), cur_gen()));
-        assert!(m.misread_readings_ready("py"));
-
-        let g1 = cur_gen();
-        let mut off = cfg.clone();
-        off.input.correction.hint.enabled = false;
-        m.sync_correction(&off);
-        assert!(!m.misread_readings_ready("py"), "不要了：释放");
-        assert!(
-            !m.install_misread_readings("py", idx(), g1),
-            "关掉前开工的结果丢弃"
-        );
-        assert!(
-            !m.install_misread_readings("py", idx(), cur_gen()),
-            "代次虽新但已不要：丢弃"
-        );
-        assert!(slot.get().is_none());
-    }
-
-    /// 在建期间词库失效：失效点先清了反查索引表，在建的那次随后把**旧**索引插回表里。结果被代次
-    /// 丢弃后，表里那份也得摘掉，否则重派的构建走快路径直接复用旧索引。
-    #[test]
-    fn discarded_misread_build_is_not_reused() {
-        let mut cfg = Config::default();
-        cfg.input.correction.hint.enabled = true;
-        let m = EngineManager::new(&cfg, None);
-        let _engine_slot = m.misread_readings.slot("py"); // 代替引擎持有
-        let g0 = m
-            .misread_readings_gen
-            .load(std::sync::atomic::Ordering::Acquire);
-        // 失效点：清表、作废读音索引。
-        m.reverse_index
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clear();
-        m.invalidate_misread_readings();
-        // 在建的那次（开工于失效前）此刻才建完，插回表里。
-        let stale = m.reverse_index_for("py").expect("无数据目录时建空索引");
-        assert!(
-            !m.finish_misread_warm("py", stale.clone(), g0, m.misread_warming_guard("py")),
-            "代次变了：丢弃"
-        );
-        assert!(
-            m.reverse_index_if_ready("py").is_none(),
-            "丢弃的旧索引不得留在反查索引表里"
-        );
-        assert!(m.prewarm_misread_readings("py"), "重派的那次建成");
-        let fresh = m.misread_readings.slot("py").get().unwrap();
-        assert!(!Arc::ptr_eq(&fresh, &stale), "重派的不复用旧索引");
-    }
-
-    /// 后台线程 panic 或起不来时，在建标记也得清掉，否则该方案本进程再不派。
-    #[test]
-    fn misread_warming_mark_cleared_on_failure() {
-        let mut cfg = Config::default();
-        cfg.input.correction.hint.enabled = true;
-        let m = EngineManager::new(&cfg, None);
-        let _engine_slot = m.misread_readings.slot("py"); // 代替引擎持有
-        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let c = calls.clone();
-        // 起不来：回调报失败。
-        m.set_misread_warm_hook(Arc::new(move |_| {
-            c.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            false
-        }));
-        m.refresh_misread_readings();
-        assert_eq!(
-            calls.load(std::sync::atomic::Ordering::Relaxed),
-            2,
-            "失败后标记已清，下次照样派"
-        );
-        // 构建线程中途 panic：守卫照样清标记。
-        m.misread_warming.lock().unwrap().insert("py".to_string());
-        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _guard = m.misread_warming_guard("py");
-            panic!("构建中途失败");
-        }));
-        assert!(r.is_err());
-        assert!(!m.misread_warming.lock().unwrap().contains("py"));
-    }
-
-    /// 没有引擎持有的槽（引擎被摘）不再派读音索引构建，并从槽表里丢掉。
-    #[test]
-    fn unloaded_schema_is_not_warmed() {
-        let mut cfg = Config::default();
-        cfg.input.correction.hint.enabled = true;
-        let m = EngineManager::new(&cfg, None);
-        // 引擎被摘后没人持有这个槽。
-        drop(m.misread_readings.slot("py"));
-        let asked = Arc::new(Mutex::new(Vec::<String>::new()));
-        let a = asked.clone();
-        m.set_misread_warm_hook(Arc::new(move |id| {
-            a.lock().unwrap().push(id);
-            true
-        }));
-        assert!(
-            asked.lock().unwrap().is_empty(),
-            "{:?}",
-            asked.lock().unwrap()
-        );
-        assert!(m.misread_readings.ids().is_empty());
-    }
-
-    /// 要读音索引时给已登记、槽还空的方案派后台构建，同一方案在建期间不重复派。
-    #[test]
-    fn misread_warm_requests_are_deduplicated() {
-        let mut cfg = Config::default();
-        cfg.input.correction.hint.enabled = true;
-        let m = EngineManager::new(&cfg, None);
-        let _engine_slot = m.misread_readings.slot("py"); // 代替引擎持有
-        let asked = Arc::new(Mutex::new(Vec::<String>::new()));
-        let a = asked.clone();
-        m.set_misread_warm_hook(Arc::new(move |id| {
-            a.lock().unwrap().push(id);
-            true
-        }));
-        m.refresh_misread_readings();
-        assert_eq!(
-            *asked.lock().unwrap(),
-            ["py"],
-            "注册即补派一次，在建期间不重复"
-        );
-        // 构建结束（无数据目录 ⇒ 空索引）后放进槽，不再派。
-        assert!(m.prewarm_misread_readings("py"));
-        m.refresh_misread_readings();
-        assert_eq!(asked.lock().unwrap().len(), 1);
+    fn load_misread_merges_user_table() {
+        let dir = std::env::temp_dir().join(format!("wind_misread_user_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (data, user) = (dir.join("install"), dir.join("userdata").join("data"));
+        std::fs::create_dir_all(data.join("schemas")).unwrap();
+        std::fs::create_dir_all(&user).unwrap();
+        let file = crate::pinyin::misread::MISREAD_FILE;
+        std::fs::write(
+            data.join("schemas").join(file),
+            "- {text: 莘莘, wrong: xin xin, right: shen shen}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            user.join(file),
+            "---\nname: user\n...\n- {text: 炽热, wrong: zhi re, right: chi re, note: 自加}\n",
+        )
+        .unwrap();
+        let t = EngineManager::load_misread(Some(&data), Some(&user));
+        assert_eq!(t.len(), 2);
+        assert!(t.lookup("炽热", &["zhire"]).is_some(), "用户表生效");
+        assert!(t.lookup("莘莘", &["xinxin"]).is_some(), "内置表保留");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// 每次同步都重读误读表：表文件改了 ⇒ 要重建（「误读」开着时）。
@@ -9361,11 +9015,16 @@ mod tests {
         let file = dir
             .join("schemas")
             .join(crate::pinyin::misread::MISREAD_FILE);
-        std::fs::write(&file, "莘莘\txin xin\tshen shen\n").unwrap();
+        std::fs::write(&file, "- {text: 莘莘, wrong: xin xin, right: shen shen}\n").unwrap();
         let cfg = Config::default();
         let m = EngineManager::new(&cfg, Some(&dir));
         assert!(!m.sync_correction(&cfg), "表没变不重建");
-        std::fs::write(&file, "莘莘\txin xin\tshen shen\n炽热\tzhi re\tchi re\n").unwrap();
+        std::fs::write(
+            &file,
+            "- {text: 莘莘, wrong: xin xin, right: shen shen}\n\
+             - {text: 炽热, wrong: zhi re, right: chi re}\n",
+        )
+        .unwrap();
         assert!(m.sync_correction(&cfg), "表变了要重建");
         assert_eq!(m.misread.lock().unwrap().len(), 2, "已换成新表");
         let _ = std::fs::remove_dir_all(&dir);

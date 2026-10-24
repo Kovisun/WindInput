@@ -365,8 +365,7 @@ fn shuangpin_has_no_letter_correction() {
     }
 }
 
-/// 内置误读表收了「调研 tiao yan」：大词库下自动推断够不着它（整词读不出 `tiaoyan`），靠表召回
-/// 并标正确拼音（文档站「纠错与提示」页的例子）。
+/// 内置误读表召回词库读不出的词并标正确拼音（文档站「纠错与提示」页与变更记录里的例子）。
 #[test]
 fn builtin_misread_table_recalls_tiaoyan() {
     if !has_data() {
@@ -377,17 +376,23 @@ fn builtin_misread_table_recalls_tiaoyan() {
     c.schema.active = "pinyin".into();
     c.input.default.chinese_mode = true;
     c.input.correction.hint.enabled = true;
-    let all = all_texts(c.clone(), "tiaoyan");
-    let pos = all
-        .iter()
-        .position(|t| t == "调研")
-        .unwrap_or_else(|| panic!("应召回「调研」：{all:?}"));
-    assert!(pos > 0, "召回候选不占首选：{all:?}");
-    let shown = show_with(c, "tiaoyan");
-    let item = shown
-        .items
-        .iter()
-        .find(|i| i.text == "调研")
-        .unwrap_or_else(|| panic!("「调研」应在首页：{:?}", texts(&shown.items)));
-    assert_eq!(item.text_styled.as_str(), "调(diao)研");
+    for (input, text, styled) in [
+        ("tiaoyan", "调研", "调(diao)研"),
+        ("zhire", "炽热", "炽(chi)热"),
+        ("bangbu", "蚌埠", "蚌(beng)埠"),
+    ] {
+        let all = all_texts(c.clone(), input);
+        let pos = all
+            .iter()
+            .position(|t| t == text)
+            .unwrap_or_else(|| panic!("{input} 应召回「{text}」：{all:?}"));
+        assert!(pos > 0, "召回候选不占首选：{all:?}");
+        let shown = show_with(c.clone(), input);
+        let item = shown
+            .items
+            .iter()
+            .find(|i| i.text == text)
+            .unwrap_or_else(|| panic!("「{text}」应在首页：{:?}", texts(&shown.items)));
+        assert_eq!(item.text_styled.as_str(), styled);
+    }
 }
