@@ -5305,8 +5305,8 @@ outside: rare
             false
         );
         assert_eq!(
-            at(json!({"path": "pinyin_misread.txt"})).unwrap()["path"],
-            root.join("pinyin_misread.txt").to_string_lossy().as_ref(),
+            at(json!({"path": "pinyin_misread.yaml"})).unwrap()["path"],
+            root.join("pinyin_misread.yaml").to_string_lossy().as_ref(),
             "设置端「误读表 → 打开文件」"
         );
     }

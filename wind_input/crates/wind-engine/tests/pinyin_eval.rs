@@ -27,8 +27,9 @@
 //!   （`gn_ng,on_ong`，`all` = 八条全开）
 //! - `WIND_PINYIN_EVAL_PER_RULE` F/G 类每条规则抽样数（默认 300）
 //! - `WIND_PINYIN_EVAL_LATENCY=1` 额外跑一遍逐键耗时（每条样本按前缀逐键 convert）
-//! - `WIND_PINYIN_EVAL_MISREAD=1` 开正文提示与误读来源、建好读音索引，另统计界面首页上的误读提示
-//!   （打对的输入上出现的都算误标候选，逐条列出供人工判）；`=table` 只用误读表、不建索引，两档相减即自动推断那部分
+//! - `WIND_PINYIN_EVAL_MISREAD=1` 开正文提示与误读来源，另统计界面首页上的误读提示（打对的输入上
+//!   出现的都算误标候选，逐条列出供人工判）；`=0` 关掉「误读」来源（召回与提示都没有），与 `=1` 对比
+//!   即误读表对排序的影响
 //!
 //! 除 JSON 外还写 `<out>.ranks.tsv`：每条样本的引擎序 / 界面序位次与界面首页。两档之间逐位比对
 //! 用它；与协调器对拍见 `wind-coordinator/tests/pinyin_eval_ui_parity.rs`（读同一份 TSV）。
@@ -150,21 +151,19 @@ fn manager(dir: &Path) -> EngineManager {
         }
     }
     apply_correction_env(&mut cfg.input.correction);
-    if misread_eval() {
-        cfg.input.correction.hint.enabled = true;
-        cfg.input.correction.hint.misread = true;
+    match std::env::var("WIND_PINYIN_EVAL_MISREAD").as_deref() {
+        Ok("1") => {
+            cfg.input.correction.hint.enabled = true;
+            cfg.input.correction.hint.misread = true;
+        }
+        Ok("0") => cfg.input.correction.hint.misread = false,
+        _ => {}
     }
-    let mgr = EngineManager::new(&cfg, Some(dir));
-    // `=table`：只用误读表、不建读音索引（与 `=1` 对比即得自动推断那部分）。
-    if misread_eval() && std::env::var("WIND_PINYIN_EVAL_MISREAD").is_ok_and(|v| v == "1") {
-        let _ = mgr.convert_with("pinyin", "nihao", UI_LIMIT);
-        assert!(mgr.prewarm_misread_readings("pinyin"), "读音索引应建成");
-    }
-    mgr
+    EngineManager::new(&cfg, Some(dir))
 }
 
 fn misread_eval() -> bool {
-    std::env::var("WIND_PINYIN_EVAL_MISREAD").is_ok_and(|v| v == "1" || v == "table")
+    std::env::var("WIND_PINYIN_EVAL_MISREAD").is_ok_and(|v| v == "1")
 }
 
 fn misread_styled(c: &wind_candidate::Candidate) -> Option<String> {
@@ -1346,7 +1345,7 @@ fn pinyin_eval_report() {
     }
     let run_ms = t_run.elapsed().as_millis();
     if misread_eval() {
-        println!("\n=== 误读推断：打对的输入上首页（{PAGE} 条）的误读提示 ===");
+        println!("\n=== 误读表：打对的输入上首页（{PAGE} 条）的误读提示 ===");
         println!("类\t样本\t有提示的样本\t提示候选\t期望词被标");
         let mut tot = [0usize; 4];
         for (class, m) in misread_stats.iter().filter(|(c, _)| *c != Class::G) {
