@@ -5304,6 +5304,11 @@ outside: rare
             at(json!({"path": "wubi86/user.dict.yaml"})).unwrap()["exists"],
             false
         );
+        assert_eq!(
+            at(json!({"path": "pinyin_misread.txt"})).unwrap()["path"],
+            root.join("pinyin_misread.txt").to_string_lossy().as_ref(),
+            "设置端「误读表 → 打开文件」"
+        );
     }
 
     /// `correction.conflictExample`：设置页自定义纠错规则行的冲突示例。

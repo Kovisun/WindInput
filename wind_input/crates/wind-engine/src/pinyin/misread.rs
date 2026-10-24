@@ -17,7 +17,7 @@ use wind_dict::cached::ReverseIndex;
 use super::fuzzy::{FuzzyConfig, FuzzyMatcher};
 
 /// 内置表在 `schemas/` 下的相对路径，也是用户追加表在用户数据目录下的文件名。
-pub const MISREAD_FILE: &str = "pinyin_misread.txt";
+pub const MISREAD_FILE: &str = wind_store::MISREAD_FILE;
 
 /// 一条误读：`wrong` / `correct` 一字一音节、与 `text` 字数相同。`correct = None` 为白名单。
 #[derive(Debug, Clone, PartialEq, Eq)]
