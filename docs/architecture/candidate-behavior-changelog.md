@@ -29,7 +29,7 @@
 
 ## 2026-10-24 · 拼音误读表：召回读错的词并提示正确拼音（0.128）
 
-- 合入：（待合入）；范围：全拼、双拼、混输的拼音侧、临时拼音
+- 合入：feat/pinyin-correction；范围：全拼、双拼、混输的拼音侧、临时拼音
 - 变化：
   - 整串打成表里的错误读音时，词库读不出的词也进候选：`xinxin` 前：无「莘莘」→ 后：「莘莘」排在
     完整候选末尾（真实词库第 7 位）；`zhire` → 炽热、`yuchi` → 龋齿。开「显示正确拼音」时内嵌
@@ -42,7 +42,7 @@
     不按用户打的 `xinxin` 造词，故它不会因为选过就变成 `xinxin` 下的普通候选。
   - `[input.correction]` 任一项与两份误读表改动后，配置热重载即生效，不必重启。
 - 触发条件：出厂即生效（`input.correction.hint.misread = true`）；内置表 `schemas/pinyin_misread.txt`
-  119 条，用户可在用户数据目录 `data/pinyin_misread.txt` 追加或覆盖。
+  120 条，用户可在用户数据目录 `data/pinyin_misread.txt` 追加或覆盖。
 - 回退旧行为：`input.correction.hint.misread = false`。
 - 钉住的测试：`wind-coordinator/tests/pinyin_misread.rs`、`wind-engine/src/pinyin/misread.rs`、
   `wind-candidate/src/candidate.rs::corrected_tests::misread_recall_does_not_take_top`
@@ -50,11 +50,12 @@
 
 ## 2026-10-23 · 拼音字母换位纠错：新增纠错候选、带标记、不占首选（0.128）
 
-- 合入：（待合入）；范围：全拼方案、混输的拼音侧、临时拼音；双拼不启用
+- 合入：feat/pinyin-correction；范围：全拼方案、混输的拼音侧、临时拼音；双拼不启用
 - 变化：
-  - 打错字母顺序的输入出候选（`gn` 类需开 `gn_ng`）：`gogn` 前：干呕功能、干呕… → 后：*共、*供…*工；`gognping` → *公平。
-    前缀 `*` 是纠错标记，上屏文字不带。
-  - `zhonguo` → *中国、`dagnshi` → *当时、`xign` → *型（「习惯」仍在）。
+  - 打错字母顺序或漏打 `g` 的输入出候选：`kiashi` → *开始、`yuoshi` → *优势、*有时…；
+    `zhonguo` → *中国、`gonping` → *公平。前缀 `*` 是纠错标记，上屏文字不带。
+  - 开 `gn_ng` 后另有：`gogn` 前：干呕功能、干呕… → 后：*共、*供…*工；`gognping` → *公平、
+    `dagnshi` → *当时、`xign` → *型（「习惯」仍在）。
   - 纠错不删候选、不改其余候选的相对次序（切分、整句、简拼不走纠错边）：纠错候选按罚过的
     权重（与模糊同量纲）穿插其间，窗口内保底至多 4 条（取数上限的 1/10，不足 10 条的窗口不留）；原有候选可能因此被挤到窗口尾部之后
     （`yuo` 下「与」等 `yu` 子短语排到数百个 *有、*又… 之后）。
