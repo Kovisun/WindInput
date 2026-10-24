@@ -44,7 +44,7 @@
     打常用词时首页不混进召回项。评测集 A–F 类开 / 关误读逐位一致，打对的输入首页误读提示 0 条。
   - `[input.correction]` 任一项与两份误读表改动后，配置热重载即生效，不必重启。
 - 触发条件：出厂即生效（`input.correction.hint.misread = true`）；内置表 `schemas/pinyin_misread.yaml`
-  585 词（590 个错误读音），用户可在用户数据目录 `data/pinyin_misread.yaml` 追加或覆盖。
+  611 词（619 个错误读音），用户可在用户数据目录 `data/pinyin_misread.yaml` 追加或覆盖。
 - 回退旧行为：`input.correction.hint.misread = false`。
 - 钉住的测试：`wind-coordinator/tests/pinyin_misread.rs`、`wind-coordinator/tests/pinyin_correction.rs::builtin_misread_table_recalls_tiaoyan`、
   `wind-engine/src/pinyin/misread.rs`、
