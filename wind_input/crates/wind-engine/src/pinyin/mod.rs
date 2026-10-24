@@ -19,6 +19,7 @@ pub mod grammar;
 pub(crate) mod hint_align;
 pub mod interp;
 pub mod lattice;
+pub mod misread;
 pub mod mixed_abbrev;
 pub mod octagram;
 pub mod parser;
@@ -2534,8 +2535,8 @@ impl PinyinEngine {
         out
     }
 
-    /// 给候选填正确拼音提示（`meta.pinyin_hints`，模糊与纠错来源）并判 `is_corrected`；`hint` 关且无纠错规则时
-    /// 调用方不进来。
+    /// 给候选填正确拼音提示（`meta.pinyin_hints`，模糊与纠错来源，再按误读表覆盖）并判 `is_corrected`；
+    /// `hint` 关且无纠错规则时调用方不进来。
     ///
     /// `is_corrected` 判在最终候选上：同文合并后留下的那条若有非纠错来源（精确命中无
     /// `learn_code`、或读音对齐得上），就不算经纠错。
@@ -2562,50 +2563,96 @@ impl PinyinEngine {
         sp: Option<&shuangpin::SpConvertResult>,
     ) {
         for c in cands.iter_mut() {
-            let sp_main = sp.filter(|_| !c.is_fullpinyin_fallback);
-            if let Some(sp) = sp_main {
-                if c.code.is_empty() || !query.starts_with(c.code.as_str()) {
-                    continue;
-                }
-                // 没有 `learn_code` 的（精确命中）只有换过本义读音才可能带提示：先零分配地判掉。
-                if c.meta.learn_code.is_none()
-                    && !sp
-                        .syllables
-                        .iter()
-                        .any(|s| s.literal.is_some() && s.fp_end <= c.code.len())
-                {
-                    continue;
-                }
-            } else if c.meta.learn_code.is_none() {
-                continue;
-            }
-            let (typed, ends_here) = match sp_main {
-                Some(sp) => (literal_typed(sp, query, c.code.len()), false),
-                None if c.is_fullpinyin_fallback => {
-                    (normalized_typed(&c.code), c.code.len() == raw_input.len())
-                }
-                None => (normalized_typed(&c.code), c.code.len() == query.len()),
-            };
-            let (dict_code, dict_boundary) = match &c.meta.learn_code {
-                Some((code, b)) => (code.as_str(), *b),
-                None => (c.code.as_str(), c.boundary),
-            };
-            let mask = effective_boundary(dict_code, dict_boundary, &self.trie);
-            let Some(syllables) = mixed_abbrev::syllables_from_boundary(dict_code, mask) else {
-                continue;
-            };
-            // 一字一音节；对不上（儿化、含英文的词条）整条不标——宁漏不错。
-            if syllables.len() != c.text.chars().count() {
-                continue;
-            }
-            let a = hint_align::align(&typed, &syllables, &self.fuzzy_config, ends_here);
-            c.is_corrected = a.corrected;
-            if a.hints.is_empty() {
-                continue;
-            }
-            c.meta.pinyin_hints = a.hints;
-            c.meta.hint_syllables = syllables.iter().map(|s| s.to_string()).collect();
+            self.fill_inferred_hint(c, query, raw_input, sp);
+            self.apply_misread_hint(c, query, sp);
         }
+    }
+
+    /// 自动推断的提示（模糊 / 纠错来源）与 `is_corrected`，见 [`Self::fill_pinyin_hints`]。
+    fn fill_inferred_hint(
+        &self,
+        c: &mut Candidate,
+        query: &str,
+        raw_input: &str,
+        sp: Option<&shuangpin::SpConvertResult>,
+    ) {
+        let sp_main = sp.filter(|_| !c.is_fullpinyin_fallback);
+        if let Some(sp) = sp_main {
+            if c.code.is_empty() || !query.starts_with(c.code.as_str()) {
+                return;
+            }
+            // 没有 `learn_code` 的（精确命中）只有换过本义读音才可能带提示：先零分配地判掉。
+            if c.meta.learn_code.is_none()
+                && !sp
+                    .syllables
+                    .iter()
+                    .any(|s| s.literal.is_some() && s.fp_end <= c.code.len())
+            {
+                return;
+            }
+        } else if c.meta.learn_code.is_none() {
+            return;
+        }
+        let (typed, ends_here) = match sp_main {
+            Some(sp) => (literal_typed(sp, query, c.code.len()), false),
+            None if c.is_fullpinyin_fallback => {
+                (normalized_typed(&c.code), c.code.len() == raw_input.len())
+            }
+            None => (normalized_typed(&c.code), c.code.len() == query.len()),
+        };
+        let (dict_code, dict_boundary) = match &c.meta.learn_code {
+            Some((code, b)) => (code.as_str(), *b),
+            None => (c.code.as_str(), c.boundary),
+        };
+        let mask = effective_boundary(dict_code, dict_boundary, &self.trie);
+        let Some(syllables) = mixed_abbrev::syllables_from_boundary(dict_code, mask) else {
+            return;
+        };
+        // 一字一音节；对不上（儿化、含英文的词条）整条不标——宁漏不错。
+        if syllables.len() != c.text.chars().count() {
+            return;
+        }
+        let a = hint_align::align(&typed, &syllables, &self.fuzzy_config, ends_here);
+        c.is_corrected = a.corrected;
+        if a.hints.is_empty() {
+            return;
+        }
+        c.meta.pinyin_hints = a.hints;
+        c.meta.hint_syllables = syllables.iter().map(|s| s.to_string()).collect();
+    }
+
+    /// 误读表优先（设计 §6.2）：文字 + 用户所打读音命中表项时，提示换成表里的（只标读错的字，
+    /// `HintKind::Misread`）；白名单条目清掉自动推断的提示。误读召回的候选按表重标、不算纠错。
+    fn apply_misread_hint(
+        &self,
+        c: &mut Candidate,
+        query: &str,
+        sp: Option<&shuangpin::SpConvertResult>,
+    ) {
+        let Some(table) = self.fuzzy_config.misread.as_deref() else {
+            return;
+        };
+        if !table.has_text(&c.text) {
+            return;
+        }
+        let typed = match sp.filter(|_| !c.is_fullpinyin_fallback) {
+            Some(sp) if query.starts_with(c.code.as_str()) => {
+                literal_typed(sp, query, c.code.len())
+            }
+            Some(_) => return,
+            None => normalized_typed(&c.code),
+        };
+        let Some(e) = table.lookup(&c.text, &[typed.as_str()]) else {
+            return;
+        };
+        if c.is_misread_recall {
+            c.is_corrected = false;
+        }
+        c.meta.pinyin_hints = misread_hints(e);
+        c.meta.hint_syllables = match &e.correct {
+            Some(correct) if !c.meta.pinyin_hints.is_empty() => correct.clone(),
+            _ => Vec::new(),
+        };
     }
 }
 
@@ -2624,6 +2671,38 @@ fn literal_typed(sp: &shuangpin::SpConvertResult, query: &str, len: usize) -> St
     }
     out.push_str(&query[cursor..len]);
     out
+}
+
+/// 音节序列的边界掩码（bit i = 第 i 字节起一个音节，同 `Candidate::boundary`）。
+fn misread_boundary(syllables: &[String]) -> u64 {
+    let mut mask = 0u64;
+    let mut at = 0usize;
+    for s in syllables {
+        if at >= 64 {
+            return 0;
+        }
+        mask |= 1 << at;
+        at += s.len();
+    }
+    mask
+}
+
+/// 误读条目的逐字提示：只标错误读音与正确读音不同的字。白名单（无正确读音）为空。
+fn misread_hints(e: &misread::MisreadEntry) -> Vec<wind_candidate::PinyinHint> {
+    let Some(correct) = &e.correct else {
+        return Vec::new();
+    };
+    e.wrong
+        .iter()
+        .zip(correct)
+        .enumerate()
+        .filter(|(_, (w, c))| w != c)
+        .map(|(i, (_, c))| wind_candidate::PinyinHint {
+            char_index: i as u16,
+            correct: c.clone(),
+            kind: wind_candidate::HintKind::Misread,
+        })
+        .collect()
 }
 
 /// 全拼域的候选码规范成 [`hint_align::align`] 要的形态：去 `'`、ü 归一化。
@@ -4767,6 +4846,44 @@ impl Engine for PinyinEngine {
             }
         }
 
+        // 误读召回（设计 §6.2）：整串恰为表里某条的错误读音（`xinxin` → 「莘莘」）⇒ 词库读不出
+        // 也放进候选。权重取同页最低再低一档，标 `is_misread_recall`（不占首选、不计自动上屏，
+        // 截断时与纠错共用保底）。词库已有同文字候选时不召回，那条由收尾的提示照标。
+        if let Some(table) = self.fuzzy_config.misread.clone() {
+            let floor = candidates
+                .iter()
+                .map(|c| c.weight)
+                .min()
+                .unwrap_or(1)
+                .saturating_sub(1)
+                .max(0);
+            for e in table.recall(query) {
+                if candidates.iter().any(|c| c.text == e.text)
+                    || opts.admit.as_deref().is_some_and(|f| !f(&e.text))
+                {
+                    continue;
+                }
+                let correct = e.correct.as_deref().unwrap_or_default();
+                let order = candidates.len() as i32;
+                candidates.push(Candidate {
+                    text: e.text.clone(),
+                    code: query.to_string(),
+                    weight: floor,
+                    natural_order: order,
+                    source: CandidateSource::Pinyin,
+                    boundary: misread_boundary(&e.wrong),
+                    is_misread_recall: true,
+                    meta: wind_candidate::CandidateMeta {
+                        learn_code: Some((correct.concat(), misread_boundary(correct))),
+                        pinyin_hints: misread_hints(e),
+                        hint_syllables: correct.to_vec(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                });
+            }
+        }
+
         // 分段上屏所需：标注每个候选实际消费的输入字节数。
         //
         // 本块原在 `sort_by` + `truncate` **之后**，现提到其前。当前排序并不消费它（理由见
@@ -4868,8 +4985,11 @@ impl Engine for PinyinEngine {
         }
         candidates.sort_by(engine_order);
         // 纠错召回步新增的也算：末尾半截（`zhon`）对齐判作前缀、不标纠错。
-        let is_corr =
-            |c: &Candidate| correction_on && (c.is_corrected || correction_added.contains(&c.text));
+        // 误读召回同样只占保底名额（`is_misread_recall`）。
+        let is_corr = |c: &Candidate| {
+            c.is_misread_recall
+                || (correction_on && (c.is_corrected || correction_added.contains(&c.text)))
+        };
         // `abbrev_quota = false`：调用方声明了不重排（见 `ConvertOptions::no_abbrev_quota`），
         // 简拼补位在那边是净损失；纠错保底保持有序，照做。
         truncate_with_quotas(&mut candidates, max_candidates, abbrev_quota, &is_corr);

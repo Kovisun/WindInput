@@ -426,10 +426,10 @@ fn resolve_auto_commit_min_len(configured: usize, max_code_length: usize) -> usi
 /// （`len`）**照常把 emoji 计入**——用户要能翻到并选中它；而且没有宿主候选就不会有
 /// emoji，故 `is_empty` 的语义天然不受影响。
 fn sole_non_emoji(candidates: &[Candidate]) -> Option<&Candidate> {
-    // 换位纠错候选同样不计：满码唯一的短语不该被打错才凑出来的拼音候选拦下。
+    // 低置信候选（换位纠错、误读召回）同样不计：满码唯一的短语不该被它们拦下。
     let mut it = candidates
         .iter()
-        .filter(|c| !c.is_emoji_suggestion && !c.is_corrected);
+        .filter(|c| !c.is_emoji_suggestion && !c.is_low_confidence());
     let first = it.next()?;
     it.next().is_none().then_some(first)
 }

@@ -277,6 +277,16 @@ pub struct Candidate {
     /// 纠错命中照旧带 `is_fuzzy`（它决定召回与罚分），本字段与之并列。
     #[serde(default)]
     pub is_corrected: bool,
+    /// 该候选**只因误读表召回**（用户打了表里的错误读音，词库读不出这个词，如 `xinxin` →
+    /// 「莘莘」）。词库已有同文字候选时不召回，那条不带本标记。
+    ///
+    /// 与 [`Self::is_corrected`] 同为低置信候选，消费者按同一口径对待，语义只是这个事实：
+    /// - 排序：引擎给同页最低权重再低一档；存在完整的普通候选时不占首选
+    ///   （[`protect_top_from_corrected`]）；
+    /// - 自动上屏：计数时跳过；
+    /// - UI：不加纠错标记，正确拼音由提示（`HintKind::Misread`）给出。
+    #[serde(default)]
+    pub is_misread_recall: bool,
     /// 是否为**简拼**（声母缩写）候选，如 `nh`→「你好」。排序时整体降到全拼候选之后。
     ///
     /// **为何不复用 `is_fuzzy`**：用户词简拼路径此前正是借它沉底（`mod.rs` step6 硬置
@@ -656,6 +666,7 @@ impl Default for Candidate {
             is_command: false,
             is_fuzzy: false,
             is_corrected: false,
+            is_misread_recall: false,
             is_abbrev: false,
             is_fullpinyin_fallback: false,
             is_zero_weight_reading: false,
@@ -698,6 +709,12 @@ impl Default for Candidate {
 }
 
 impl Candidate {
+    /// 低置信候选：经纠错（[`Self::is_corrected`]）或只因误读表召回（[`Self::is_misread_recall`]）。
+    /// 不占首选、不计自动上屏、不否决上屏。
+    pub fn is_low_confidence(&self) -> bool {
+        self.is_corrected || self.is_misread_recall
+    }
+
     /// 词频 / 候选调整记账用的文本：模板展开前、大小写投影前的词库原文（都没发生时即 `text`）。
     ///
     /// 存在理由见 [`Candidate::case_source`] 与 [`Candidate::template_source`]——两端不同源，
@@ -767,17 +784,17 @@ pub fn drop_corrected_duplicates(cands: &mut Vec<Candidate>) {
     cands.retain(|c| !c.is_corrected || !plain.contains(&c.text));
 }
 
-/// 纠错候选不占首选（设计 D6）：首条经纠错、且列表里有**完整**的非纠错候选时，把第一条
-/// 这样的候选提到首位，其余相对顺序不变。
+/// 纠错候选不占首选（设计 D6）：首条经纠错（或误读召回，见 [`Candidate::is_low_confidence`]）、
+/// 且列表里有**完整**的普通候选时，把第一条这样的候选提到首位，其余相对顺序不变。
 ///
 /// 「完整」= 消费整串、不是简拼 / 前缀补全 / 子短语。简拼不算：否则 `gogn` 切成 g+o+g+n
 /// 出的简拼整句会让「工」永远拿不到首选。
 pub fn protect_top_from_corrected(cands: &mut [Candidate], input_len: usize) {
-    if !cands.first().is_some_and(|c| c.is_corrected) {
+    if !cands.first().is_some_and(Candidate::is_low_confidence) {
         return;
     }
     let complete = |c: &Candidate| {
-        !c.is_corrected
+        !c.is_low_confidence()
             && effective_consumed(c, input_len) >= input_len
             && !c.is_abbrev
             && !c.is_prefix
@@ -1786,6 +1803,19 @@ mod corrected_tests {
         ];
         protect_top_from_corrected(&mut cs, 3);
         assert_eq!(texts(&cs), ["与哦", "有", "干呕", "与", "又"]);
+    }
+
+    /// 误读召回同为低置信：首条是它时让给完整普通候选；完整候选里也不算它。
+    #[test]
+    fn misread_recall_does_not_take_top() {
+        let recall = |t: &str| Candidate {
+            text: t.into(),
+            is_misread_recall: true,
+            ..Default::default()
+        };
+        let mut cs = vec![recall("莘莘"), recall("堤防"), c("欣欣", false)];
+        protect_top_from_corrected(&mut cs, 6);
+        assert_eq!(texts(&cs), ["欣欣", "莘莘", "堤防"]);
     }
 
     #[test]

@@ -1053,8 +1053,8 @@ impl Engine for MixedEngine {
         // ⚠️ 拼接顺序即**组内次序**：`sort_dedup_truncate` 只按档位稳定排序，同档保持原有
         // 相对位置，故各段内部子引擎排好的序原样保留。改动此处的顺序会改变同档内的去留。
         let has_pinyin = !pinyin.is_empty();
-        // 上屏否决只数非纠错的拼音候选：满码唯一的五笔字不该被一条打错才凑出来的拼音候选拦下。
-        let pinyin_vetoes = pinyin.iter().any(|c| !c.is_corrected);
+        // 上屏否决只数非低置信的拼音候选：满码唯一的五笔字不该被一条打错才凑出来的拼音候选拦下。
+        let pinyin_vetoes = pinyin.iter().any(|c| !c.is_low_confidence());
         let english = self.english_for_display(input, codetable.is_empty() && !has_pinyin);
         let mut merged = codetable;
         merged.extend(pinyin);
@@ -1161,7 +1161,7 @@ impl Engine for MixedEngine {
     fn recheck_auto_commit(&self, input: &str, candidates: &[Candidate]) -> Option<String> {
         let has_pinyin = candidates
             .iter()
-            .any(|c| c.source == CandidateSource::Pinyin && !c.is_corrected);
+            .any(|c| c.source == CandidateSource::Pinyin && !c.is_low_confidence());
         if self.english_blocks_commit(input, candidates)
             || self.pinyin_vetoes_commit(input, has_pinyin)
         {

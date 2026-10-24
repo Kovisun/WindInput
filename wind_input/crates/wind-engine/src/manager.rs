@@ -625,6 +625,9 @@ pub struct EngineManager {
     /// 换位纠错规则（`[input.correction]` 生成），注入全拼引擎的 `FuzzyConfig::correction`；
     /// 配置载入时生成一次，各引擎共享。
     correction: Mutex<Arc<crate::pinyin::correction::CorrectionRules>>,
+    /// 误读表（内置 ⊕ 用户追加，见 [`crate::pinyin::misread`]）：构造与 `reload_from_config` 时读盘，
+    /// 「误读」来源勾选时才注入拼音引擎（[`Self::misread_for_engines`]）。
+    misread: Mutex<Arc<crate::pinyin::misread::MisreadTable>>,
     /// 有模板引用 `${correct_pinyin}`（协调器按全部模板位判定后告知，见
     /// [`Self::set_correct_pinyin_in_templates`]）：`hint` 关着也要让拼音引擎算正确拼音提示。
     correct_pinyin_in_templates: std::sync::atomic::AtomicBool,
@@ -951,6 +954,7 @@ impl EngineManager {
         let ov = override_dir.as_deref();
         let cfg_active = config.active_schema().to_string();
         let active_id = Self::resolve_active_schema_id(config, data_dir, ov);
+        let misread = Self::load_misread(data_dir, store.as_ref().map(|s| s.user_text_dir()));
         let mut available = config.schema.available.clone();
         if available.is_empty() {
             available.push(active_id.clone());
@@ -1020,6 +1024,7 @@ impl EngineManager {
             correction: Mutex::new(Arc::new(
                 crate::pinyin::correction::CorrectionRules::from_config(&config.input.correction),
             )),
+            misread: Mutex::new(Arc::new(misread)),
             correct_pinyin_in_templates: std::sync::atomic::AtomicBool::new(false),
             pinyin_hint: crate::pinyin::fuzzy::HintSwitch::new(pinyin_hint_on(
                 &config.schema.pinyin.fuzzy,
@@ -3201,6 +3206,7 @@ impl EngineManager {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .clone();
+            let misread = self.misread_for_engines();
             // 词组分词（t42）：英文方案读 `schema.english.phrase_seg`，临英与快捷输入英文共读
             // `input.temp_english.phrase_seg`（A2-3b），两份开关相或。引擎只需知道「要不要具备
             // 这个能力」——按作用域把关是协调器的事，见 `build_engine` 的参数说明。
@@ -3250,6 +3256,7 @@ impl EngineManager {
                 &pinyin_cfg,
                 &self.pinyin_hint,
                 &correction,
+                misread.as_ref(),
                 phrase_seg_anywhere,
                 lookup_disabled_dicts,
                 // 顶层入口：方案自身是拼音时不加约束（简拼开）。混输在其内部为 secondary 注入。
@@ -4547,6 +4554,10 @@ impl EngineManager {
         *self.correction.lock().unwrap_or_else(|e| e.into_inner()) = Arc::new(
             crate::pinyin::correction::CorrectionRules::from_config(&config.input.correction),
         );
+        *self.misread.lock().unwrap_or_else(|e| e.into_inner()) = Arc::new(Self::load_misread(
+            self.data_dir.as_deref(),
+            self.user_text_dir(),
+        ));
         self.refresh_pinyin_hint();
         // 丢弃缓存：引擎按新上屏策略/词典重建，名称/词频按新方案重读。
         {
@@ -5148,6 +5159,44 @@ impl EngineManager {
         self.correct_pinyin_in_templates
             .store(on, std::sync::atomic::Ordering::Relaxed);
         self.refresh_pinyin_hint();
+    }
+
+    /// 读误读表：内置（`schemas/pinyin_misread.txt`，经资源层 `user > custom > data` 取一份）
+    /// ⊕ 用户追加（用户数据目录 `data/pinyin_misread.txt`，同键覆盖内置）。文件缺失按空表。
+    fn load_misread(
+        data_dir: Option<&Path>,
+        user_data_dir: Option<&Path>,
+    ) -> crate::pinyin::misread::MisreadTable {
+        use crate::pinyin::misread::{MISREAD_FILE, MisreadTable};
+        let read = |path: Option<std::path::PathBuf>, origin: &str| {
+            path.and_then(|p| std::fs::read_to_string(p).ok())
+                .map(|src| MisreadTable::parse(&src, origin))
+                .unwrap_or_default()
+        };
+        let builtin = read(
+            Config::resolve_schema_resource(data_dir, MISREAD_FILE),
+            "builtin",
+        );
+        let user = read(user_data_dir.map(|d| d.join(MISREAD_FILE)), "user");
+        let table = MisreadTable::merge(builtin, user);
+        info!("误读表 {} 条", table.len());
+        table
+    }
+
+    /// 注入拼音引擎的误读表：「误读」来源（`input.correction.hint.misread`）勾选且表非空时才给。
+    fn misread_for_engines(&self) -> Option<Arc<crate::pinyin::misread::MisreadTable>> {
+        let on = self
+            .correction_cfg
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .hint
+            .misread;
+        let table = self
+            .misread
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        (on && !table.is_empty()).then_some(table)
     }
 
     /// 按当前拼音配置与模板引用重算 [`Self::pinyin_hint`]。
@@ -6712,6 +6761,8 @@ impl EngineManager {
         pinyin_hint: &crate::pinyin::fuzzy::HintSwitch,
         // `correction`：换位纠错规则（管理器生成一份共享）；双拼方案不用。
         correction: &Arc<crate::pinyin::correction::CorrectionRules>,
+        // `misread`：误读表，`None` = 不召回不标（见 `EngineManager::misread_for_engines`）。
+        misread: Option<&Arc<crate::pinyin::misread::MisreadTable>>,
         // `phrase_seg_anywhere`：三个作用域（英文方案 / 临英 / 快捷输入英文）里是否
         // **有任何一个**开着词组分词。不按作用域分别开关，是因为英文引擎实例是三者
         // **共用**的（进程里只有 `engines["english"]` 这一个实例，见 [`EnglishProvider`]）
@@ -6769,6 +6820,7 @@ impl EngineManager {
                 pinyin_cfg,
                 pinyin_hint,
                 correction,
+                misread,
                 phrase_seg_anywhere,
                 lookup_disabled_dicts,
                 Some(MixedRole::Primary {
@@ -6817,6 +6869,7 @@ impl EngineManager {
                     pinyin_cfg,
                     pinyin_hint,
                     correction,
+                    misread,
                     phrase_seg_anywhere,
                     lookup_disabled_dicts,
                     Some(MixedRole::Secondary(MixPinyinOpts {
@@ -6982,6 +7035,7 @@ impl EngineManager {
                 } else {
                     correction
                 },
+                misread,
             );
             let pcfg = PinyinConfig {
                 use_smart_compose: pg.use_smart_compose,
@@ -8769,6 +8823,7 @@ fn fuzzy_config_from_global(
     f: &wind_config::PinyinFuzzy,
     hint: &crate::pinyin::fuzzy::HintSwitch,
     correction: &Arc<crate::pinyin::correction::CorrectionRules>,
+    misread: Option<&Arc<crate::pinyin::misread::MisreadTable>>,
 ) -> crate::pinyin::fuzzy::FuzzyConfig {
     let on = f.enabled;
     crate::pinyin::fuzzy::FuzzyConfig {
@@ -8787,6 +8842,7 @@ fn fuzzy_config_from_global(
         eng_ong: on && f.eng_ong,
         hint: hint.clone(),
         correction: correction.clone(),
+        misread: misread.cloned(),
         ..Default::default()
     }
 }

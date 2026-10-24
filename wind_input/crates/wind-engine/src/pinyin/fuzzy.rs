@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock};
 
 use super::correction::{CORRECTION_EDITS, CorrectionRules};
+use super::misread::MisreadTable;
 
 /// 「算不算正确拼音提示」的运行时开关：克隆共享同一份值，`EngineManager` 持有一份并注入各引擎，
 /// 翻转即时生效、无需重建引擎。提示只是 `convert` 收尾的后处理，不影响候选集合与排序。
@@ -63,6 +64,9 @@ pub struct FuzzyConfig {
     /// [`FuzzyMatcher::fuzzy_variants_scored`] 对其追加正确音节、计 [`CORRECTION_EDITS`] 处。
     /// 双拼方案恒空。
     pub correction: Arc<CorrectionRules>,
+    /// 误读表（[`MisreadTable`]）：`None` = 「误读」来源未勾选或表空，不召回不标。
+    /// 不影响展开/匹配，由 `PinyinEngine::convert` 收尾召回与标提示。
+    pub misread: Option<Arc<MisreadTable>>,
 }
 
 impl FuzzyConfig {

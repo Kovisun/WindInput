@@ -27,6 +27,24 @@
 
 ---
 
+## 2026-10-24 · 拼音误读表：召回读错的词并提示正确拼音（0.128）
+
+- 合入：（待合入）；范围：全拼、双拼、混输的拼音侧、临时拼音
+- 变化：
+  - 整串打成表里的错误读音时，词库读不出的词也进候选：`xinxin` 前：无「莘莘」→ 后：「莘莘」排在
+    完整候选末尾（真实词库第 7 位）；`zhire` → 炽热、`yuchi` → 龋齿。开「显示正确拼音」时内嵌
+    `莘(shen)莘(shen)`，只标读错的字。
+  - 召回候选权重取同页最低再低一档，存在完整的普通候选时不占首选，不计满码 / 短语自动上屏、
+    不否决混输上屏；截断时与纠错候选共用保底名额。
+  - 词库已收了错误读音的词（`hundun` 的「馄饨」）不另召回，那一条按表标 `馄饨(tun)`。
+  - 白名单（表第三列空）压掉模糊 / 纠错推断出的提示。
+- 触发条件：出厂即生效（`input.correction.hint.misread = true`）；内置表 `schemas/pinyin_misread.txt`
+  120 条，用户可在用户数据目录 `data/pinyin_misread.txt` 追加或覆盖。
+- 回退旧行为：`input.correction.hint.misread = false`。
+- 钉住的测试：`wind-coordinator/tests/pinyin_misread.rs`、`wind-engine/src/pinyin/misread.rs`、
+  `wind-candidate/src/candidate.rs::corrected_tests::misread_recall_does_not_take_top`
+- 来源：内部（设计 `docs/design/pinyin-correction-and-hints.md` §6.2）
+
 ## 2026-10-23 · 拼音字母换位纠错：新增纠错候选、带标记、不占首选（0.128）
 
 - 合入：（待合入）；范围：全拼方案、混输的拼音侧、临时拼音；双拼不启用
