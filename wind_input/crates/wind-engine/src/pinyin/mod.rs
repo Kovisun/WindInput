@@ -4850,13 +4850,9 @@ impl Engine for PinyinEngine {
         // 也放进候选。权重取同页最低再低一档，标 `is_misread_recall`（不占首选、不计自动上屏，
         // 截断时与纠错共用保底）。词库已有同文字候选时不召回，那条由收尾的提示照标。
         if let Some(table) = self.fuzzy_config.misread.clone() {
-            let floor = candidates
-                .iter()
-                .map(|c| c.weight)
-                .min()
-                .unwrap_or(1)
-                .saturating_sub(1)
-                .max(0);
+            // 拼音 weight 恒非负（负 weight 在 `better_natural` 里另有「非精确」含义），故夹到 0。
+            let lowest = candidates.iter().map(|c| c.weight).min().unwrap_or(1);
+            let floor = (lowest - 1).max(0);
             for e in table.recall(query) {
                 if candidates.iter().any(|c| c.text == e.text)
                     || opts.admit.as_deref().is_some_and(|f| !f(&e.text))

@@ -5183,6 +5183,26 @@ impl EngineManager {
         table
     }
 
+    /// 配置重载时同步 `[input.correction]` 与误读表（每次重载都重读两份表文件）。返回是否要
+    /// 重建引擎（[`correction_rebuild_needed`]，或「误读」开着时表内容变了）——要就由调用方走
+    /// `reload_from_config`；只改提示开关的，这里换掉镜像、翻 [`Self::pinyin_hint`] 即生效。
+    pub fn sync_correction(&self, config: &Config) -> bool {
+        let table = Self::load_misread(self.data_dir.as_deref(), self.user_text_dir());
+        let new = &config.input.correction;
+        let mut cfg = self
+            .correction_cfg
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut cur = self.misread.lock().unwrap_or_else(|e| e.into_inner());
+        let table_changed = (cfg.hint.misread || new.hint.misread) && **cur != table;
+        let rebuild = correction_rebuild_needed(&cfg, new) || table_changed;
+        *cfg = new.clone();
+        *cur = Arc::new(table);
+        drop((cfg, cur));
+        self.refresh_pinyin_hint();
+        rebuild
+    }
+
     /// 注入拼音引擎的误读表：「误读」来源（`input.correction.hint.misread`）勾选且表非空时才给。
     fn misread_for_engines(&self) -> Option<Arc<crate::pinyin::misread::MisreadTable>> {
         let on = self
@@ -8847,6 +8867,19 @@ fn fuzzy_config_from_global(
     }
 }
 
+/// `[input.correction]` 的变化要不要重建拼音引擎：纠错规则（`enabled` / `rules` / `custom`）
+/// 在建引擎时并进音节表，「误读」勾选决定建引擎时挂不挂误读表。其余（标记、提示的显示与
+/// 来源）运行时读，不用重建。
+fn correction_rebuild_needed(
+    old: &wind_config::CorrectionConfig,
+    new: &wind_config::CorrectionConfig,
+) -> bool {
+    old.enabled != new.enabled
+        || old.rules != new.rules
+        || old.custom != new.custom
+        || old.hint.misread != new.hint.misread
+}
+
 /// 引擎算不算正确拼音提示：正文内嵌（`hint.enabled`）或模板引用 `${correct_pinyin}`（`correct_pinyin_tpl`）
 /// 任一要它，且至少一个勾选的来源能产出（模糊来源要模糊音开、纠错来源要纠错开）。引擎各来源
 /// 一并算，按来源取舍由协调器做。
@@ -8880,6 +8913,86 @@ mod tests {
             "本次请求的不淘汰"
         );
         assert!(!reverse_index_keeps("old", "stroke", "wubi86", &pins));
+    }
+
+    /// 只有改纠错规则或「误读」勾选才重建引擎；标记、提示显示与其余来源不重建。
+    #[test]
+    fn correction_rebuild_needed_only_for_engine_side_fields() {
+        let base = wind_config::CorrectionConfig::default();
+        let with = |f: fn(&mut wind_config::CorrectionConfig)| {
+            let mut c = base.clone();
+            f(&mut c);
+            c
+        };
+        assert!(!correction_rebuild_needed(&base, &base));
+        assert!(correction_rebuild_needed(
+            &base,
+            &with(|c| c.enabled = !c.enabled)
+        ));
+        assert!(correction_rebuild_needed(
+            &base,
+            &with(|c| c.rules.gn_ng = !c.rules.gn_ng)
+        ));
+        assert!(correction_rebuild_needed(
+            &base,
+            &with(|c| c.custom = vec!["ab=ba".into()])
+        ));
+        assert!(correction_rebuild_needed(
+            &base,
+            &with(|c| c.hint.misread = !c.hint.misread)
+        ));
+        assert!(!correction_rebuild_needed(
+            &base,
+            &with(|c| c.marker = String::new())
+        ));
+        assert!(!correction_rebuild_needed(
+            &base,
+            &with(|c| c.hint.enabled = !c.hint.enabled)
+        ));
+        assert!(!correction_rebuild_needed(
+            &base,
+            &with(|c| c.hint.fuzzy = !c.hint.fuzzy)
+        ));
+        assert!(!correction_rebuild_needed(
+            &base,
+            &with(|c| c.hint.correction = !c.hint.correction)
+        ));
+    }
+
+    /// 只改提示开关：不重建，但共享开关立刻跟上；「误读」勾选变了要重建。
+    #[test]
+    fn sync_correction_refreshes_hint_switch_and_flags_rebuild() {
+        let mut cfg = Config::default();
+        cfg.schema.pinyin.fuzzy.enabled = true;
+        let m = EngineManager::new(&cfg, None);
+        assert!(!m.pinyin_hint_active(), "出厂不显示提示");
+        let mut on = cfg.clone();
+        on.input.correction.hint.enabled = true;
+        assert!(!m.sync_correction(&on), "只改提示显示不重建");
+        assert!(m.pinyin_hint_active(), "开关即时跟上");
+        let mut off = on.clone();
+        off.input.correction.hint.misread = false;
+        assert!(m.sync_correction(&off), "误读勾选变了要重建");
+        assert!(!m.sync_correction(&off), "同一份配置再同步不重建");
+    }
+
+    /// 每次同步都重读误读表：表文件改了 ⇒ 要重建（「误读」开着时）。
+    #[test]
+    fn sync_correction_rereads_misread_table() {
+        let dir = std::env::temp_dir().join(format!("wind_misread_sync_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("schemas")).unwrap();
+        let file = dir
+            .join("schemas")
+            .join(crate::pinyin::misread::MISREAD_FILE);
+        std::fs::write(&file, "莘莘\txin xin\tshen shen\n").unwrap();
+        let cfg = Config::default();
+        let m = EngineManager::new(&cfg, Some(&dir));
+        assert!(!m.sync_correction(&cfg), "表没变不重建");
+        std::fs::write(&file, "莘莘\txin xin\tshen shen\n炽热\tzhi re\tchi re\n").unwrap();
+        assert!(m.sync_correction(&cfg), "表变了要重建");
+        assert_eq!(m.misread.lock().unwrap().len(), 2, "已换成新表");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// 引擎算提示的条件：`(hint.enabled || 模板引用) && (模糊来源有效 || misread || 纠错来源有效)`；

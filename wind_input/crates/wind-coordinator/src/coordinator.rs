@@ -923,6 +923,8 @@ thread_local! {
 /// 判据是「这个键有没有第二个消费者在引擎侧」，不是「它在不在 schema 段」。
 /// # 不收什么
 ///
+/// - `input.correction`：引擎侧 `EngineManager::sync_correction` 自己判要不要重建（只改提示开关的
+///   不重建），结果在 `reload_user_config` 里并进 `schema_dirty`。
 /// - `schema.keep_all_loaded`：方案常驻策略由 `apply_residency_change` 就地对齐（摘除 /
 ///   后台预热），引擎侧没有它的镜像；收进来会让「切换常驻开关」把全部引擎丢掉重建。
 pub(crate) fn engine_reload_needed(old: &Config, new: &Config) -> bool {
@@ -5043,7 +5045,10 @@ impl Coordinator {
                 // 方案相关项（活跃/可用方案、全局上屏策略）是否变化：变了才热重建引擎，
                 // 避免每次保存都丢词典缓存（拼音合并/unigram 重建开销大）。
                 let old = self.rt();
-                let schema_dirty = engine_reload_needed(&old.config, &cfg);
+                // `[input.correction]` 与误读表由引擎侧同步（每次都重读表文件）：只改提示开关的
+                // 就地生效，改纠错规则 / 「误读」勾选 / 表内容的并入重建。`|` 不短路：同步必须跑。
+                let schema_dirty =
+                    engine_reload_needed(&old.config, &cfg) | self.engine_mgr.sync_correction(&cfg);
                 // 候选窗定位方式切换的边沿检测（见下方 ReportCandidatePos）。
                 let cand_was_fixed = old.config.ui.candidate.is_fixed_position();
                 let was_keep_all = old.config.schema.keep_all_loaded;

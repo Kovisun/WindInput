@@ -29,12 +29,18 @@ impl MisreadEntry {
     }
 }
 
-/// 误读表：条目 + 两张索引（文字 → 条目、错误读音连写 → 条目）。
+/// 误读表：条目 + 两张索引（文字 → 条目、错误读音连写 → 条目）。相等 = 条目逐条相同。
 #[derive(Debug, Default)]
 pub struct MisreadTable {
     entries: Vec<MisreadEntry>,
     by_text: HashMap<String, Vec<usize>>,
     by_wrong: HashMap<String, Vec<usize>>,
+}
+
+impl PartialEq for MisreadTable {
+    fn eq(&self, other: &Self) -> bool {
+        self.entries == other.entries
+    }
 }
 
 impl MisreadTable {
@@ -237,6 +243,53 @@ mod tests {
     fn umlaut_is_written_as_v() {
         let t = MisreadTable::parse("戏谑\txi nüe\txi xue\n", "t");
         assert!(t.lookup("戏谑", &["xinve"]).is_some());
+    }
+
+    /// 内置表每条的正确读音都是随包词库登记的读音（`build_dev/data` 的 cn_dicts，不含错音表
+    /// `corrections`）。读大词库较慢且依赖本地数据，故 `#[ignore]`；改表后手动跑：
+    /// `cargo test -p wind-engine --lib builtin_table_matches_dict_readings -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn builtin_table_matches_dict_readings() {
+        let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../../../");
+        let src = std::fs::read_to_string(format!("{root}data/schemas/pinyin_misread.txt"))
+            .expect("内置误读表应存在");
+        let table = MisreadTable::parse(&src, "builtin");
+        let dicts = format!("{root}build_dev/data/schemas/pinyin/cn_dicts");
+        let mut readings: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
+        for entry in std::fs::read_dir(&dicts).expect("需要 build_dev/data 词库") {
+            let path = entry.unwrap().path();
+            let name = path.file_name().unwrap().to_string_lossy().to_string();
+            if !name.ends_with(".dict.yaml") || name.starts_with("corrections") {
+                continue;
+            }
+            for line in std::fs::read_to_string(&path).unwrap().lines() {
+                let mut cols = line.split('\t');
+                if let (Some(t), Some(code)) = (cols.next(), cols.next())
+                    && table.has_text(t)
+                {
+                    readings
+                        .entry(t.to_string())
+                        .or_default()
+                        .insert(code.to_string());
+                }
+            }
+        }
+        let checked: Vec<&MisreadEntry> = table
+            .entries
+            .iter()
+            .filter(|e| e.correct.is_some())
+            .collect();
+        let missing: Vec<String> = checked
+            .iter()
+            .filter(|e| {
+                let want = e.correct.as_ref().unwrap().join(" ");
+                !readings.get(&e.text).is_some_and(|r| r.contains(&want))
+            })
+            .map(|e| format!("{} {}", e.text, e.correct.as_ref().unwrap().join(" ")))
+            .collect();
+        println!("核对 {} 条，词库缺读音 {} 条", checked.len(), missing.len());
+        assert!(missing.is_empty(), "词库里没有这些正确读音：{missing:?}");
     }
 
     /// 内置表每行都收得进来（坏行会被静默跳过，条数对不上就是有坏行）。

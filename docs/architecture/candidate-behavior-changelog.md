@@ -38,8 +38,11 @@
     不否决混输上屏；截断时与纠错候选共用保底名额。
   - 词库已收了错误读音的词（`hundun` 的「馄饨」）不另召回，那一条按表标 `馄饨(tun)`。
   - 白名单（表第三列空）压掉模糊 / 纠错推断出的提示。
+  - 选中召回候选后按**正确读音**学习（「莘莘」记在 `shen shen` 下，`learn_code` = 正确读音），
+    不按用户打的 `xinxin` 造词，故它不会因为选过就变成 `xinxin` 下的普通候选。
+  - `[input.correction]` 任一项与两份误读表改动后，配置热重载即生效，不必重启。
 - 触发条件：出厂即生效（`input.correction.hint.misread = true`）；内置表 `schemas/pinyin_misread.txt`
-  120 条，用户可在用户数据目录 `data/pinyin_misread.txt` 追加或覆盖。
+  119 条，用户可在用户数据目录 `data/pinyin_misread.txt` 追加或覆盖。
 - 回退旧行为：`input.correction.hint.misread = false`。
 - 钉住的测试：`wind-coordinator/tests/pinyin_misread.rs`、`wind-engine/src/pinyin/misread.rs`、
   `wind-candidate/src/candidate.rs::corrected_tests::misread_recall_does_not_take_top`
