@@ -27,7 +27,7 @@ use wind_engine::EngineManager;
 ///
 /// `code_rev` 也算用户层：它取的 `hint_code` 在系统层该长度没有码时会回落用户码。
 const CODE_REV_VARS: &[&str] = &["code_rev", "code", "code_rev_all", "code_all"];
-/// 模糊音整词正确拼音的变量名。
+/// 正确拼音提示的变量名。
 const CORRECT_PINYIN_VAR: &str = "correct_pinyin";
 /// 拆字表的变量名。
 const CHAIZI_VARS: &[&str] = &["chaizi", "chaizi_code", "chaizi_all", "chaizi_code_all"];

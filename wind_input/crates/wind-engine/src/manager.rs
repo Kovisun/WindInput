@@ -5373,22 +5373,27 @@ impl EngineManager {
         let gen0 = self
             .misread_readings_gen
             .load(std::sync::atomic::Ordering::Acquire);
-        let idx = {
-            let _guard = self.misread_warming_guard(schema_id);
-            if self.misread_infer_wanted() {
-                self.reverse_index_for(schema_id)
-            } else {
-                None
-            }
+        let guard = self.misread_warming_guard(schema_id);
+        let idx = if self.misread_infer_wanted() {
+            self.reverse_index_for(schema_id)
+        } else {
+            None
         };
         let Some(idx) = idx else {
             return false;
         };
-        self.finish_misread_warm(schema_id, idx, gen0)
+        self.finish_misread_warm(schema_id, idx, gen0, guard)
     }
 
-    /// 构建完成后的收尾：代次未变且仍要就放进槽；否则丢弃，仍要的话重派。
-    fn finish_misread_warm(&self, schema_id: &str, idx: Arc<ReverseIndex>, gen0: u64) -> bool {
+    /// 构建完成后的收尾：代次未变且仍要就放进槽；否则丢弃，仍要的话重派。`warming` 是本次的
+    /// 在建标记守卫，收尾里按时机放掉。
+    fn finish_misread_warm(
+        &self,
+        schema_id: &str,
+        idx: Arc<ReverseIndex>,
+        gen0: u64,
+        warming: impl Drop,
+    ) -> bool {
         if self.install_misread_readings(schema_id, Arc::clone(&idx), gen0) {
             return true;
         }
@@ -5400,6 +5405,8 @@ impl EngineManager {
                 g.remove(schema_id);
             }
         }
+        // 摘完才清在建标记：早清的话，并发刷新派的构建可能赶在摘之前复用旧索引。
+        drop(warming);
         // 仍要的话按新词库再来一次（已在建的会被去重挡掉）。
         if self.misread_infer_wanted() {
             self.request_misread_warm(schema_id);
@@ -9256,7 +9263,7 @@ mod tests {
         // 在建的那次（开工于失效前）此刻才建完，插回表里。
         let stale = m.reverse_index_for("py").expect("无数据目录时建空索引");
         assert!(
-            !m.finish_misread_warm("py", stale.clone(), g0),
+            !m.finish_misread_warm("py", stale.clone(), g0, m.misread_warming_guard("py")),
             "代次变了：丢弃"
         );
         assert!(
