@@ -25,6 +25,9 @@
 //!
 //! 峰值只在首建 / 词库变化后出现，故读音索引放后台线程建，未就绪时不标误读。
 
+// 读 `/proc`、调 glibc 的 `malloc_trim`：只在 Linux glibc 上编。
+#![cfg(all(target_os = "linux", target_env = "gnu"))]
+
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicIsize, Ordering::Relaxed};
@@ -159,7 +162,8 @@ fn pinyin_reverse_index_memory() {
         child(&phase, &dir);
         return;
     }
-    let root = std::env::temp_dir().join("wind_misread_mem_probe");
+    let root = std::env::temp_dir().join(format!("wind_misread_mem_probe_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).unwrap();
     let exe = std::env::current_exe().unwrap();
     let run = |phase: &str| {
@@ -199,4 +203,5 @@ fn pinyin_reverse_index_memory() {
         run("build");
         run("reuse");
     }
+    let _ = std::fs::remove_dir_all(&root);
 }

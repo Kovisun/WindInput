@@ -744,7 +744,8 @@ pub struct ActiveDataFacts {
 }
 
 /// 误读读音索引的后台构建回调，参数是方案 id（见 [`EngineManager::set_misread_warm_hook`]）。
-pub type MisreadWarmHook = Arc<dyn Fn(String) + Send + Sync>;
+/// 返回是否真的派出去了（线程起不来时 `false`，管理器清掉在建标记）。
+pub type MisreadWarmHook = Arc<dyn Fn(String) -> bool + Send + Sync>;
 
 /// 进程级缓存根目录（%LOCALAPPDATA%\WindInput\cache），EngineManager::new 设置一次。
 static CACHE_DIR: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
@@ -5281,10 +5282,19 @@ impl EngineManager {
             }
             return;
         }
-        for id in self.misread_readings.ids() {
-            if self.misread_readings.slot(&id).get().is_none() {
-                self.request_misread_warm(&id);
-            }
+        // 槽没有引擎持有了（引擎被摘 / 重建前的旧槽）就丢掉、不派——不为没在用的方案建索引。
+        // 混输里的拼音子引擎同样持有自己方案的槽，故不必按方案表判「已加载」。
+        let pending: Vec<String> = {
+            let mut slots = self.misread_readings.lock();
+            slots.retain(|_, s| s.in_use());
+            slots
+                .iter()
+                .filter(|(_, s)| s.get().is_none())
+                .map(|(id, _)| id.clone())
+                .collect()
+        };
+        for id in pending {
+            self.request_misread_warm(&id);
         }
     }
 
@@ -5324,7 +5334,27 @@ impl EngineManager {
         {
             return;
         }
-        hook(schema_id.to_string());
+        if !hook(schema_id.to_string()) {
+            self.clear_misread_warming(schema_id);
+        }
+    }
+
+    fn clear_misread_warming(&self, schema_id: &str) {
+        self.misread_warming
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(schema_id);
+    }
+
+    /// 在建标记的守卫：构建结束（含 panic）时清掉 `schema_id` 的标记。
+    fn misread_warming_guard<'a>(&'a self, schema_id: &'a str) -> impl Drop + 'a {
+        struct Guard<'a>(&'a EngineManager, &'a str);
+        impl Drop for Guard<'_> {
+            fn drop(&mut self) {
+                self.0.clear_misread_warming(self.1);
+            }
+        }
+        Guard(self, schema_id)
     }
 
     /// 注册后台构建回调（一次性，重复注册忽略），注册后立即按当前配置补派一次。
@@ -5339,22 +5369,34 @@ impl EngineManager {
         let gen0 = self
             .misread_readings_gen
             .load(std::sync::atomic::Ordering::Acquire);
-        let idx = if self.misread_infer_wanted() {
-            self.reverse_index_for(schema_id)
-        } else {
-            None
+        let idx = {
+            let _guard = self.misread_warming_guard(schema_id);
+            if self.misread_infer_wanted() {
+                self.reverse_index_for(schema_id)
+            } else {
+                None
+            }
         };
-        self.misread_warming
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(schema_id);
         let Some(idx) = idx else {
             return false;
         };
-        if self.install_misread_readings(schema_id, idx, gen0) {
+        self.finish_misread_warm(schema_id, idx, gen0)
+    }
+
+    /// 构建完成后的收尾：代次未变且仍要就放进槽；否则丢弃，仍要的话重派。
+    fn finish_misread_warm(&self, schema_id: &str, idx: Arc<ReverseIndex>, gen0: u64) -> bool {
+        if self.install_misread_readings(schema_id, Arc::clone(&idx), gen0) {
             return true;
         }
-        // 作废了：可能是词库失效后仍要，按新词库再来一次（已在建的会被去重挡掉）。
+        // 作废了。失效点先清表、本次构建随后才把索引插回表里——它可能出自失效前的词库，
+        // 摘掉（只摘这一份），否则重派的那次走快路径直接复用它。
+        {
+            let mut g = self.reverse_index.lock().unwrap_or_else(|e| e.into_inner());
+            if g.get(schema_id).is_some_and(|cur| Arc::ptr_eq(cur, &idx)) {
+                g.remove(schema_id);
+            }
+        }
+        // 仍要的话按新词库再来一次（已在建的会被去重挡掉）。
         if self.misread_infer_wanted() {
             self.request_misread_warm(schema_id);
         }
@@ -9190,16 +9232,103 @@ mod tests {
         assert!(slot.get().is_none());
     }
 
+    /// 在建期间词库失效：失效点先清了反查索引表，在建的那次随后把**旧**索引插回表里。结果被代次
+    /// 丢弃后，表里那份也得摘掉，否则重派的构建走快路径直接复用旧索引。
+    #[test]
+    fn discarded_misread_build_is_not_reused() {
+        let mut cfg = Config::default();
+        cfg.input.correction.hint.enabled = true;
+        let m = EngineManager::new(&cfg, None);
+        let _engine_slot = m.misread_readings.slot("py"); // 代替引擎持有
+        let g0 = m
+            .misread_readings_gen
+            .load(std::sync::atomic::Ordering::Acquire);
+        // 失效点：清表、作废读音索引。
+        m.reverse_index
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        m.invalidate_misread_readings();
+        // 在建的那次（开工于失效前）此刻才建完，插回表里。
+        let stale = m.reverse_index_for("py").expect("无数据目录时建空索引");
+        assert!(
+            !m.finish_misread_warm("py", stale.clone(), g0),
+            "代次变了：丢弃"
+        );
+        assert!(
+            m.reverse_index_if_ready("py").is_none(),
+            "丢弃的旧索引不得留在反查索引表里"
+        );
+        assert!(m.prewarm_misread_readings("py"), "重派的那次建成");
+        let fresh = m.misread_readings.slot("py").get().unwrap();
+        assert!(!Arc::ptr_eq(&fresh, &stale), "重派的不复用旧索引");
+    }
+
+    /// 后台线程 panic 或起不来时，在建标记也得清掉，否则该方案本进程再不派。
+    #[test]
+    fn misread_warming_mark_cleared_on_failure() {
+        let mut cfg = Config::default();
+        cfg.input.correction.hint.enabled = true;
+        let m = EngineManager::new(&cfg, None);
+        let _engine_slot = m.misread_readings.slot("py"); // 代替引擎持有
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let c = calls.clone();
+        // 起不来：回调报失败。
+        m.set_misread_warm_hook(Arc::new(move |_| {
+            c.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            false
+        }));
+        m.refresh_misread_readings();
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::Relaxed),
+            2,
+            "失败后标记已清，下次照样派"
+        );
+        // 构建线程中途 panic：守卫照样清标记。
+        m.misread_warming.lock().unwrap().insert("py".to_string());
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = m.misread_warming_guard("py");
+            panic!("构建中途失败");
+        }));
+        assert!(r.is_err());
+        assert!(!m.misread_warming.lock().unwrap().contains("py"));
+    }
+
+    /// 没有引擎持有的槽（引擎被摘）不再派读音索引构建，并从槽表里丢掉。
+    #[test]
+    fn unloaded_schema_is_not_warmed() {
+        let mut cfg = Config::default();
+        cfg.input.correction.hint.enabled = true;
+        let m = EngineManager::new(&cfg, None);
+        // 引擎被摘后没人持有这个槽。
+        drop(m.misread_readings.slot("py"));
+        let asked = Arc::new(Mutex::new(Vec::<String>::new()));
+        let a = asked.clone();
+        m.set_misread_warm_hook(Arc::new(move |id| {
+            a.lock().unwrap().push(id);
+            true
+        }));
+        assert!(
+            asked.lock().unwrap().is_empty(),
+            "{:?}",
+            asked.lock().unwrap()
+        );
+        assert!(m.misread_readings.ids().is_empty());
+    }
+
     /// 要读音索引时给已登记、槽还空的方案派后台构建，同一方案在建期间不重复派。
     #[test]
     fn misread_warm_requests_are_deduplicated() {
         let mut cfg = Config::default();
         cfg.input.correction.hint.enabled = true;
         let m = EngineManager::new(&cfg, None);
-        let _ = m.misread_readings.slot("py");
+        let _engine_slot = m.misread_readings.slot("py"); // 代替引擎持有
         let asked = Arc::new(Mutex::new(Vec::<String>::new()));
         let a = asked.clone();
-        m.set_misread_warm_hook(Arc::new(move |id| a.lock().unwrap().push(id)));
+        m.set_misread_warm_hook(Arc::new(move |id| {
+            a.lock().unwrap().push(id);
+            true
+        }));
         m.refresh_misread_readings();
         assert_eq!(
             *asked.lock().unwrap(),

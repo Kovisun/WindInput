@@ -161,7 +161,8 @@ pub fn infer(
     if same_len().any(|(r, _)| explained_by_fuzzy(r)) {
         return Vec::new();
     }
-    // 同权取先登记的那条（`max_by_key` 取最后一个最大值，故反向找）。
+    // 同权取 `readings` 里靠前的那条（`max_by_key` 取最后一个最大值，故反向找）；读音来自反查索引时
+    // 即码长短、字典序小的在前，与词库登记次序无关。
     let Some((best, _)) = same_len().rev().max_by_key(|(_, w)| *w) else {
         return Vec::new();
     };
@@ -195,6 +196,11 @@ impl ReadingSlot {
 
     pub fn set(&self, idx: Option<Arc<ReverseIndex>>) {
         *self.0.write().unwrap_or_else(|e| e.into_inner()) = idx;
+    }
+
+    /// 槽表之外还有人（引擎）持有这个槽。
+    pub fn in_use(&self) -> bool {
+        Arc::strong_count(&self.0) > 1
     }
 }
 

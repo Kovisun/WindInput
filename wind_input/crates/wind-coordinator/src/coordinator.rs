@@ -3307,15 +3307,16 @@ impl Coordinator {
                     }
                 }));
         }
-        // 误读推断要的读音索引：引擎侧按配置决定建 / 放，这里只提供后台线程；建好后重刷当前这屏
-        // 候选把提示补上。秒级构建，绝不进按键线程；只持 Weak。
+        // 误读推断要的读音索引：引擎侧按配置决定建 / 放，这里只提供后台线程。秒级构建，绝不进
+        // 按键线程；只持 Weak。建好后不重刷当前这屏（重刷不重新 convert，补不上提示），从下一次
+        // 按键起生效——未就绪不标。
         {
             let weak = Arc::downgrade(&coordinator);
             coordinator
                 .engine_mgr
                 .set_misread_warm_hook(Arc::new(move |schema_id: String| {
                     let Some(c) = weak.upgrade() else {
-                        return;
+                        return false;
                     };
                     let w = Arc::downgrade(&c);
                     let spawned = std::thread::Builder::new()
@@ -3327,10 +3328,6 @@ impl Coordinator {
                             let t0 = std::time::Instant::now();
                             if c.engine_mgr.prewarm_misread_readings(&schema_id) {
                                 debug!("误读推断读音索引 {} 用时 {:?}", schema_id, t0.elapsed());
-                                let s = c.state.lock().unwrap_or_else(|e| e.into_inner());
-                                if !s.input_buffer.is_empty() {
-                                    c.notify_ui_update(&s);
-                                }
                             }
                         });
                     match spawned {
@@ -3341,8 +3338,12 @@ impl Coordinator {
                                 .unwrap_or_else(|e| e.into_inner());
                             v.retain(|t| !t.is_finished());
                             v.push(h);
+                            true
                         }
-                        Err(e) => warn!("无法启动误读读音索引线程: {e}（本次不推断误读）"),
+                        Err(e) => {
+                            warn!("无法启动误读读音索引线程: {e}（本次不推断误读）");
+                            false
+                        }
                     }
                 }));
         }

@@ -28,6 +28,25 @@ impl Drop for Fixture {
 }
 
 fn fixture(tag: &str) -> Fixture {
+    fixture_with(tag, "")
+}
+
+/// 双拼夹具：小鹤布局（拷 `build_dev/data` 那份）。
+fn shuangpin_fixture(tag: &str) -> Option<Fixture> {
+    let layout = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../build_dev/data/schemas/shuangpin/xiaohe.toml");
+    let src = std::fs::read_to_string(layout).ok()?;
+    let f = fixture_with(
+        tag,
+        "[engine.pinyin]\nscheme = \"shuangpin\"\n[engine.pinyin.shuangpin]\nlayout = \"xiaohe\"\n",
+    );
+    let dir = f.dir.join("schemas/shuangpin");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("xiaohe.toml"), src).unwrap();
+    Some(f)
+}
+
+fn fixture_with(tag: &str, engine_extra: &str) -> Fixture {
     let schema = format!("mrinfer{tag}");
     let dir = std::env::temp_dir().join(format!("wind_mrinfer_{tag}_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -42,7 +61,7 @@ fn fixture(tag: &str) -> Fixture {
         schemas.join(format!("{schema}.schema.toml")),
         format!(
             "[schema]\nid = \"{schema}\"\nname = \"{schema}\"\n[engine]\ntype = \"pinyin\"\n\
-             [[dictionaries]]\nid = \"mini\"\npath = \"{schema}/mini.dict.yaml\"\n\
+             {engine_extra}[[dictionaries]]\nid = \"mini\"\npath = \"{schema}/mini.dict.yaml\"\n\
              type = \"rime_pinyin\"\ndefault = true\n"
         ),
     )
@@ -186,4 +205,18 @@ fn readings_follow_reload() {
     coord.reload_user_config();
     let items = typed(&coord, &rx, "tiaoyan");
     assert_eq!(styled(&items, "调研"), "调(diao)研", "重新打开后重建");
+}
+
+/// 双拼：击键 `tnyj`（小鹤 tiao yan）同样推断出「调(diao)研」，打对的 `dnyj` 不标。
+#[test]
+fn shuangpin_tiaoyan_shows_diao_hint() {
+    let Some(f) = shuangpin_fixture("sp") else {
+        eprintln!("跳过：无 build_dev/data 小鹤布局");
+        return;
+    };
+    let (coord, rx) = open(&f, true, true);
+    let items = typed(&coord, &rx, "tnyj");
+    assert_eq!(styled(&items, "调研"), "调(diao)研");
+    let items = typed(&coord, &rx, "dnyj");
+    assert_eq!(styled(&items, "调研"), "");
 }
