@@ -370,7 +370,7 @@ fn grammar_sentence_report() {
 /// ```
 ///
 /// 只设文件时只量基线（`weight = 0`，不需要模型）；设了 `WIND_GRAM_MODEL` 就并排量接模型的。
-/// 按类别出：首选整句命中、宽松命中（他/她/它不分——光看拼音本就分不出）、前三含整句、
+/// 位次按**界面序**（见 [`ui_candidates`]）。按类别出：首选整句命中、宽松命中（他/她/它不分——光看拼音本就分不出）、前三含整句、
 /// 首选的字准确率（1 − 编辑距离 / 期望字数）、单次转换的平均与 p99 耗时。`DUMP` 写出任一边首选不对的条目，供逐条看错在哪。
 #[test]
 #[ignore = "整句评测：依赖 build_dev 真实词库与评测文件。用 --ignored 显式运行"]
@@ -415,7 +415,7 @@ fn sentence_eval_file() {
             let mut times = Vec::new();
             for &(_, input, expect) in cases.iter().filter(|c| c.0 == *class) {
                 let t = std::time::Instant::now();
-                let cands = mgr.convert_with("pinyin", input, TOP_N).candidates;
+                let cands = ui_candidates(mgr, input);
                 times.push(t.elapsed().as_secs_f64() * 1000.0);
                 let first = cands.first().map(|c| c.text.clone()).unwrap_or_default();
                 n += 1;
@@ -482,6 +482,19 @@ fn loosen(s: &str) -> String {
         .collect()
 }
 
+/// 界面序候选：与协调器同一个比较器排序、按文本去重（同 `pinyin_eval.rs::ui_candidates`）。
+///
+/// 引擎序**不是**用户看到的顺序：协调器以消费长度为首键整体重排，只吃掉前缀的整句在引擎序里
+/// 能压住覆盖整串的混合整句（`tayizhizaixx` 下「他一直在学习」引擎序第 10、界面第 1）。
+fn ui_candidates(mgr: &EngineManager, input: &str) -> Vec<wind_candidate::Candidate> {
+    const UI_LIMIT: usize = 300;
+    let mut c = mgr.convert_with("pinyin", input, UI_LIMIT).candidates;
+    c.sort_by(|a, b| wind_candidate::candidate_display_order(a, b, false, false, input));
+    let mut seen = std::collections::HashSet::new();
+    c.retain(|x| seen.insert(x.text.clone()));
+    c
+}
+
 /// 按字的编辑距离（插入、删除、替换各算 1）。
 fn edit_distance(a: &str, b: &str) -> usize {
     let a: Vec<char> = a.chars().collect();
@@ -497,4 +510,34 @@ fn edit_distance(a: &str, b: &str) -> usize {
         prev = cur;
     }
     prev[b.len()]
+}
+
+/// 逐条看候选：`WIND_PROBE=tayizhizaixx,wxqhuabingchang` 打印每条的前 `TOP_N` 名
+/// （文本、编码、消费长度）。设了 `WIND_GRAM_MODEL` 就带模型（权重取 `WIND_GRAM_WEIGHT`，默认 0.5）。
+#[test]
+#[ignore = "诊断工具：依赖 build_dev 真实词库。用 --ignored 显式运行"]
+fn sentence_probe() {
+    let Ok(inputs) = std::env::var("WIND_PROBE") else {
+        eprintln!("!!! 跳过：未设 WIND_PROBE");
+        return;
+    };
+    let Some(dir) = data_dir() else {
+        eprintln!("!!! 跳过：build_dev 拼音词库不存在");
+        return;
+    };
+    let weight = if std::env::var("WIND_GRAM_MODEL").is_ok() {
+        std::env::var("WIND_GRAM_WEIGHT")
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(0.5)
+    } else {
+        0.0
+    };
+    let mgr = manager(&dir, weight);
+    for input in inputs.split(',').filter(|s| !s.is_empty()) {
+        println!("== {input}");
+        for c in ui_candidates(&mgr, input).into_iter().take(TOP_N) {
+            println!("  {}\t{}\t消费 {}", c.text, c.code, c.consumed_length);
+        }
+    }
 }

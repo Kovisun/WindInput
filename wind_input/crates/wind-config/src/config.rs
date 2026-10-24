@@ -1411,7 +1411,8 @@ pub struct PinyinGrammar {
     /// 模型文件名，相对 `data/schemas/pinyin/grammar/`。**默认空串 = 不启用**。
     ///
     /// 格式是 librime-octagram 的 `.gram`（darts-clone double-array）。
-    /// 模型数据**不随安装包分发**（许可与体积，见设计文档 §5），需用户自行获取。
+    /// 随包带 `wanxiang-mini.gram`（万象的 5.3 MB 子集，见设计文档 §11）：桌面默认不启用，
+    /// 移动端经 [`MobileGrammarConfig`] 默认启用。
     ///
     /// ## ★ 为什么默认是空串而不是某个具体模型名
     ///
@@ -3887,6 +3888,41 @@ impl Default for AssociationConfig {
 pub struct MobileConfig {
     #[serde(default)]
     pub association: MobileAssociationConfig,
+    #[serde(default)]
+    pub grammar: MobileGrammarConfig,
+}
+
+/// `[mobile.grammar]`：拼音整句语法模型的移动端取值。字段语义见 [`PinyinGrammar`]。
+///
+/// 移动端默认**开**随包的 `wanxiang-mini.gram`（5.3 MB，万象的子集，挑法见设计文档
+/// `language-model-integration.md` §10–§11）：软键盘上整句打错要逐字改，代价比桌面高。
+/// 桌面基线仍关（[`PinyinGrammar`] 默认），等移动端真机跑稳再议。
+///
+/// 覆盖同样不在 `Config::load` 里合并，由引擎在取拼音配置时按平台挑
+/// （[`Config::pinyin_effective`]）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MobileGrammarConfig {
+    #[serde(default = "default_mobile_grammar_weight")]
+    pub weight: f64,
+    #[serde(default = "default_mobile_grammar_model")]
+    pub model: String,
+}
+
+impl Default for MobileGrammarConfig {
+    fn default() -> Self {
+        Self {
+            weight: default_mobile_grammar_weight(),
+            model: default_mobile_grammar_model(),
+        }
+    }
+}
+
+fn default_mobile_grammar_weight() -> f64 {
+    0.5
+}
+
+fn default_mobile_grammar_model() -> String {
+    "wanxiang-mini.gram".to_string()
 }
 
 /// `[mobile.association]`：联想的移动端取值。字段语义见 [`AssociationConfig`] 同名字段。
@@ -5007,6 +5043,21 @@ impl Config {
 }
 
 impl Config {
+    /// 拼音全局配置的生效取值：`mobile` 时语法模型换成 `[mobile.grammar]`，其余照基线。
+    ///
+    /// 由引擎在取拼音配置的那一刻按平台调用（Android 构建传 `true`），不进 `Config::load`
+    /// ——理由见 [`MobileConfig`]：合并后移动端设置页一保存，就把移动端的值写进了桌面基线。
+    pub fn pinyin_effective(&self, mobile: bool) -> PinyinGlobalConfig {
+        let mut p = self.schema.pinyin.clone();
+        if mobile {
+            p.grammar = PinyinGrammar {
+                weight: self.mobile.grammar.weight,
+                model: self.mobile.grammar.model.clone(),
+            };
+        }
+        p
+    }
+
     /// 全部 emoji 附加模块：内置在前（注册表序），其后是 `emoji/` 目录里用户放置的
     /// OpenCC 表（`*.txt`，按文件名序；id = 文件名去掉 `.txt`，出厂关）。
     ///
@@ -10570,6 +10621,24 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 语法模型的平台覆盖只在取用时挑：桌面看基线（出厂关），移动端看 [mobile.grammar]
+    /// （出厂开随包小模型），且挑的时候不改动 Config 本身。
+    #[test]
+    fn pinyin_grammar_follows_platform_override() {
+        let mut cfg = Config::default();
+        let desktop = cfg.pinyin_effective(false).grammar;
+        assert_eq!((desktop.weight, desktop.model.as_str()), (0.0, ""));
+        let mobile = cfg.pinyin_effective(true).grammar;
+        assert_eq!(
+            (mobile.weight, mobile.model.as_str()),
+            (0.5, "wanxiang-mini.gram")
+        );
+
+        cfg.mobile.grammar.weight = 0.0;
+        assert_eq!(cfg.pinyin_effective(true).grammar.weight, 0.0, "移动端可关");
+        assert_eq!(cfg.schema.pinyin.grammar.weight, 0.0, "基线不被覆盖值写穿");
+    }
 
     #[test]
     fn codetable_wildcard_folds_from_schema_and_validates_key() {

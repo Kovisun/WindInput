@@ -53,6 +53,10 @@ const ENGLISH_FREQ_RANKS: &str = "english/en_freq.txt";
 /// 加载哪份布局必须同源，否则会出现「设置页显示自然码、打起来是小鹤」。
 pub const DEFAULT_SHUANGPIN_LAYOUT: &str = "xiaohe";
 
+/// 取拼音配置时是否套 `[mobile.*]` 覆盖（当前只有语法模型，见 `Config::pinyin_effective`）。
+/// 与协调器 `use_mobile_overrides` 同一判据：Android 构建即移动端。
+const MOBILE: bool = cfg!(target_os = "android");
+
 /// 码表词频应用策略（见 docs/redesign/frequency.md §3）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FreqStrategy {
@@ -1032,7 +1036,7 @@ impl EngineManager {
             user_text_built: std::sync::OnceLock::new(),
             single_char_codes: Mutex::new(None),
             single_char_used: std::sync::atomic::AtomicU64::new(0),
-            pinyin: Mutex::new(config.schema.pinyin.clone()),
+            pinyin: Mutex::new(config.pinyin_effective(MOBILE)),
             correction_cfg: Mutex::new(config.input.correction.clone()),
             correction: Mutex::new(Arc::new(
                 crate::pinyin::correction::CorrectionRules::from_config(&config.input.correction),
@@ -4572,7 +4576,7 @@ impl EngineManager {
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = config.schema.primary_pinyin.clone();
         // 全局拼音配置变更：更新缓存，引擎缓存随下方 clear() 一起失效，下次按新配置重建。
-        *self.pinyin.lock().unwrap_or_else(|e| e.into_inner()) = config.schema.pinyin.clone();
+        *self.pinyin.lock().unwrap_or_else(|e| e.into_inner()) = config.pinyin_effective(MOBILE);
         *self
             .correction_cfg
             .lock()
