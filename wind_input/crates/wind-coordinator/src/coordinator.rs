@@ -5037,6 +5037,12 @@ impl Coordinator {
     }
 
     pub fn reload_user_config(&self) -> bool {
+        self.reload_user_config_quiet(false)
+    }
+
+    /// `quiet = true` 只压热重载**成功**的「设置已更新」（`config.set(…, toast="off")` 用）；
+    /// 失败 / 语法错误的提示不受它影响，照常弹。
+    pub fn reload_user_config_quiet(&self, quiet: bool) -> bool {
         match Config::load(Config::data_dir().as_deref()) {
             Ok(mut cfg) => {
                 if let Some(overlay) = self.config_overlay.get() {
@@ -5240,6 +5246,7 @@ impl Coordinator {
                 // 用户以为是两件事，而这里只有一件——他刚存的设置里有一部分没生效。
                 // 此时 `self.rt()` 已是上面换进去的新 bundle，读到的就是本次加载的降级记录。
                 if !self.notify_config_syntax_error()
+                    && !quiet
                     && !self
                         .quiet_reload_toast
                         .load(std::sync::atomic::Ordering::Relaxed)

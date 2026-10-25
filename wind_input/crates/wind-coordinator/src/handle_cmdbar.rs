@@ -677,6 +677,20 @@ pub(crate) fn set_comment_dict(
 struct CoordConfig(Weak<Coordinator>);
 
 impl CoordConfig {
+    /// `set` 的共同实现。`quiet` 只压热重载**成功**的「设置已更新」；写回 / 重载失败
+    /// 的提示两档都照常弹（`config.set` 词条里写错键该当场看见，静默只会变成「没生效」）。
+    fn set_inner(this: &CoordConfig, key: &str, value: &str, quiet: bool) -> anyhow::Result<()> {
+        use wind_config::config_schema::{parse_str_value, validate};
+        let v = parse_str_value(key, value).map_err(|e| anyhow::anyhow!("{e}"))?;
+        validate(key, &v).map_err(|e| anyhow::anyhow!("{e}"))?;
+        let parts: Vec<&str> = key.split('.').collect();
+        wind_config::Config::set_user_value(&parts, v)?;
+        if let Some(c) = this.0.upgrade() {
+            c.reload_user_config_quiet(quiet);
+        }
+        Ok(())
+    }
+
     /// 读某键当前值（四层合并后），字符串裸值、其余紧凑 JSON。
     ///
     /// `require_trustworthy` = 调用方要拿这个值**当种子写回**（`toggle`）。此时本次加载
@@ -715,15 +729,11 @@ impl ConfigService for CoordConfig {
     }
 
     fn set(&self, key: &str, value: &str) -> anyhow::Result<()> {
-        use wind_config::config_schema::{parse_str_value, validate};
-        let v = parse_str_value(key, value).map_err(|e| anyhow::anyhow!("{e}"))?;
-        validate(key, &v).map_err(|e| anyhow::anyhow!("{e}"))?;
-        let parts: Vec<&str> = key.split('.').collect();
-        wind_config::Config::set_user_value(&parts, v)?;
-        if let Some(c) = self.0.upgrade() {
-            c.reload_user_config();
-        }
-        Ok(())
+        Self::set_inner(self, key, value, false)
+    }
+
+    fn set_quiet(&self, key: &str, value: &str, quiet: bool) -> anyhow::Result<()> {
+        Self::set_inner(self, key, value, quiet)
     }
 
     fn toggle(&self, key: &str) -> anyhow::Result<String> {

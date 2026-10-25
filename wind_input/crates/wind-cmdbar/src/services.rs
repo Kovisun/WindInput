@@ -198,6 +198,16 @@ pub trait ImeController: Send + Sync {
 pub trait ConfigService: Send + Sync {
     fn get(&self, key: &str) -> anyhow::Result<String>;
     fn set(&self, key: &str, value: &str) -> anyhow::Result<()>;
+    /// [`Self::set`] 的静默变体：写回成功后**不弹**宿主的「设置已更新」类确认提示，
+    /// 失败照常报。给 `$CC` 一条命令串多个动作、后面还有自己的自定义提示
+    /// （如 `wind.cli(…, ok="已关闭")`）的词条用，避免双提示。
+    ///
+    /// 默认实现忽略 `quiet` 直接转发 [`Self::set`]：宿主不区分时语义退化为
+    /// 「永远弹」，与改动前一致。
+    fn set_quiet(&self, key: &str, value: &str, quiet: bool) -> anyhow::Result<()> {
+        let _ = quiet;
+        self.set(key, value)
+    }
     /// 循环切换枚举或翻转 bool，返回新值。
     fn toggle(&self, key: &str) -> anyhow::Result<String>;
 }
