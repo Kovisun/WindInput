@@ -210,6 +210,7 @@ impl Coordinator {
             SessionAction::Cancel => Some("取消键"),
             SessionAction::CommitHighlighted => Some("上屏键"),
             SessionAction::CommitCode => Some("上屏编码键"),
+            SessionAction::CaretLeft | SessionAction::CaretRight => Some("光标移动键"),
             SessionAction::Command(_) => Some("命令键"),
             SessionAction::SingleChar(_) => Some("单字键"),
             SessionAction::None => None,
@@ -339,6 +340,7 @@ impl Coordinator {
             Some(SessionAction::Cancel) => Some("取消键"),
             Some(SessionAction::CommitHighlighted) => Some("上屏键"),
             Some(SessionAction::CommitCode) => Some("上屏编码键"),
+            Some(SessionAction::CaretLeft | SessionAction::CaretRight) => Some("光标移动键"),
             Some(SessionAction::Command(_)) => Some("命令键"),
             Some(SessionAction::SingleChar(_)) => Some("单字键"),
             Some(

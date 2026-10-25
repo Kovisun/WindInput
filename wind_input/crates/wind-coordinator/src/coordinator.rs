@@ -5906,6 +5906,39 @@ impl Coordinator {
             wind_config::SessionAction::CommitHighlighted => {
                 return self.commit_highlighted(state);
             }
+            // 编码区光标移动（macOS 式方向键，见 design/macos-style-arrow-keys.md）。
+            //
+            // 只在主路生效：overlay（临拼 / 快捷输入 / Url / Email / Special）各有自己的
+            // 缓冲光标与 ←→ 臂，`state.active` 非 `None` 时放行让位——绑了本动词不能把
+            // overlay 的编辑键抢走。展开态（网格）的 ←→ 在本函数最前已被 `grid_key_action`
+            // 截走，轮不到这里。无会话放行：空闲方向键是宿主的。
+            //
+            // `caret_right` 在**末尾**改为上屏高亮候选（macOS「→ 进选词」）；无候选时没有
+            // 可上屏的东西，纯吞键——组合进行中把 → 交给宿主会移动宿主光标，与组合区错位。
+            // 移动成功只刷新组合区（caret 位置变了，缓冲与候选都没变，无需重查）。
+            wind_config::SessionAction::CaretLeft | wind_config::SessionAction::CaretRight => {
+                if state.active.is_some() || !Self::has_input_session(state) {
+                    return None;
+                }
+                let right = matches!(action, wind_config::SessionAction::CaretRight);
+                let moved = {
+                    let mut ed = preedit_cursor::BufEdit::new_cased(
+                        &mut state.input_buffer,
+                        &mut state.input_cursor_pos,
+                        &mut state.input_buffer_cased,
+                    );
+                    if right {
+                        ed.move_right()
+                    } else {
+                        ed.move_left()
+                    }
+                };
+                if right && !moved && !state.candidates.is_empty() {
+                    return self.commit_highlighted(state);
+                }
+                self.notify_ui_update(state);
+                return Some(KeyAction::Consumed);
+            }
             // 上屏编码：这里只登记、吞键，持锁的这一层没法重入分派；由出口
             // `redispatch_commit_code` 把这个键当回车再走一遍。
             //

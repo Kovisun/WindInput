@@ -1994,6 +1994,23 @@ pub enum SessionAction {
     /// 只在有候选时生效（[`Self::requires_candidates`]）：没有高亮可上屏时按键回落原语义，
     /// 空码空格的那套处置（`space_on_empty_behavior`）不属于本动词。
     CommitHighlighted,
+    /// 编码区光标左移一字符（`input_buffer` 内，已转换前缀进不去）。
+    ///
+    /// 服务的交互形态（GH#234，C2-97）：「← 从编码末尾进入编辑编码」。底层是
+    /// `preedit_cursor::BufEdit::move_left`——光标是**编辑位置**，不参与引擎查询，
+    /// 中间改码后按整串重算候选，与末尾输入无差别。
+    ///
+    /// 边界：已在开头 = 吞键（方向键有宿主原义，但组合进行中把 ← 交给宿主会让宿主光标
+    /// 与组合区错位，macOS 同款行为也是吞）；**无会话 = 放行**（空闲 ← 是宿主的 ←）。
+    /// **overlay 让位**：临拼 / 快捷输入等各有自己的缓冲光标（`state.active` 非 `None`），
+    /// 本动词不接管，消费点据此放行。
+    CaretLeft,
+    /// 编码区光标右移一字符；**已在末尾 = 上屏高亮候选**（macOS「→ 进入选词」）。
+    ///
+    /// 边沿语义必须内建在动词里：「光标到末尾那一下改为选词」用静态绑定表达不出来——
+    /// 绑 `commit_highlighted` 就永远移动不了光标，绑移动就永远选不了词。无候选时末尾
+    /// 那一下纯吞键（没有可上屏的东西，也不该把 → 交给宿主）。其余边界同 [`Self::CaretLeft`]。
+    CaretRight,
     /// 上屏编码——回车在「有编码」时做的那件事，换一个键来按（极点 / 小鸭用 Ctrl）。
     ///
     /// 恒为上屏编码，**不看 `input.enter_behavior`**：「回车清空编码」是回车这个键的配置，
@@ -2112,6 +2129,8 @@ impl SessionAction {
             // （`key_actions` 那张表没有共键形态：它只认符号键与字母 z，翻页键压根解析不出来。）
             "aux_code" => Self::AuxCode(AuxCodeShare::Solo),
             "commit_highlighted" => Self::CommitHighlighted,
+            "caret_left" => Self::CaretLeft,
+            "caret_right" => Self::CaretRight,
             "commit_code" => Self::CommitCode,
             // `clear` 是 `cancel` 的别名（同一个动作，两种心智），见 `Cancel` 的文档。
             "cancel" | "clear" => Self::Cancel,
@@ -2133,9 +2152,17 @@ impl SessionAction {
         // 用户就再也关不掉它了。
         // `Command` 同侧：命令与候选无关，打了码没出候选时照样要能执行。
         // `CommitCode` 同侧：空码上屏原码正是它的用处。
+        // `CaretLeft` / `CaretRight` 同侧：光标移动改的是**编码本身**，「打了码还没出候选」
+        // 时恰恰是最想改码的时刻（候选因无匹配而空）。
         !matches!(
             self,
-            Self::None | Self::Cancel | Self::SingleChar(_) | Self::Command(_) | Self::CommitCode
+            Self::None
+                | Self::Cancel
+                | Self::SingleChar(_)
+                | Self::Command(_)
+                | Self::CommitCode
+                | Self::CaretLeft
+                | Self::CaretRight
         )
     }
 
@@ -2200,6 +2227,8 @@ impl std::fmt::Display for SessionAction {
             Self::AuxCode(AuxCodeShare::PageNext) => f.write_str("aux_code:page_next"),
             Self::SingleChar(a) => write!(f, "single_char:{}", a.as_payload()),
             Self::CommitHighlighted => f.write_str("commit_highlighted"),
+            Self::CaretLeft => f.write_str("caret_left"),
+            Self::CaretRight => f.write_str("caret_right"),
             Self::CommitCode => f.write_str("commit_code"),
             Self::Command(expr) => write!(f, "{COMMAND_VERB_PREFIX}{expr}"),
         }
