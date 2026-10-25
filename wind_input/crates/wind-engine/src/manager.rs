@@ -7107,8 +7107,8 @@ impl EngineManager {
                 allow_full_pinyin: pg.shuangpin.allow_full_pinyin && mix_secondary.is_none(),
             };
             let mut engine = PinyinEngine::new(pcfg, dict).with_fuzzy(fuzzy.clone());
-            // 上下文语言模型：**两个开关都得显式打开才启用**——
-            // `weight != 0` 且 `model` 非空。任一为默认值都**根本不读文件**，
+            // 上下文语言模型：开关（`enabled`）开着，且 **weight 与 model 都得显式配置**才启用——
+            // `weight != 0` 且 `model` 非空（见 `PinyinGrammar::active`）。开关关、weight 为 0、model 为空，任一成立都**根本不读文件**，
             // 既省内存，也让「没配就等于没这功能」在字节层面成立。
             //
             // ★ 为什么模型名也要参与判据：默认模型名一度是 `zh-hans-bgw.gram`，
@@ -7117,7 +7117,7 @@ impl EngineManager {
             // 都写过一遍才会生效，不存在「不知道自己开了什么」。
             //
             // 模型数据不随安装包分发，缺失时降级为关闭而非报错（见设计文档 §5）。
-            if pinyin_cfg.grammar.weight != 0.0 && !pinyin_cfg.grammar.model.trim().is_empty() {
+            if pinyin_cfg.grammar.active() {
                 let gram_path = schemas
                     .join("pinyin")
                     .join("grammar")

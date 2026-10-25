@@ -1400,6 +1400,14 @@ impl AuxCodeGlobal {
 /// 设计与实测见 `docs/design/language-model-integration.md`。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PinyinGrammar {
+    /// 总开关，设置页的那个勾。**结构体缺省 true 且只做否决**：真正生效仍要 `weight` 与
+    /// `model` 都配了（见 [`PinyinGrammar::active`]）。出厂配置里桌面把它写成 false、同时
+    /// 备好 weight / model，设置页一勾即用。
+    ///
+    /// ⚠️ 缺省 true 只在**单层**成立：分层合并后桌面出厂的 false 会盖住用户层没写的这一项，
+    /// 手写过 weight + model 的老配置靠 [`Config::migrate_grammar_enabled_value`] 补 true。
+    #[serde(default = "default_grammar_enabled")]
+    pub enabled: bool,
     /// 影响力权重。**0 = 关闭**：不加载模型文件、不占内存，且整句结果与没有这个
     /// 功能时**逐位相同**。
     ///
@@ -1435,9 +1443,21 @@ fn default_grammar_weight() -> f64 {
     0.0
 }
 
+fn default_grammar_enabled() -> bool {
+    true
+}
+
+impl PinyinGrammar {
+    /// 引擎该不该加载模型：开关开着，且 `weight` 与 `model` 都显式配了。
+    pub fn active(&self) -> bool {
+        self.enabled && self.weight != 0.0 && !self.model.trim().is_empty()
+    }
+}
+
 impl Default for PinyinGrammar {
     fn default() -> Self {
         Self {
+            enabled: default_grammar_enabled(),
             weight: default_grammar_weight(),
             model: String::new(),
         }
@@ -3931,6 +3951,9 @@ pub struct MobileConfig {
 /// （[`Config::pinyin_effective`]）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MobileGrammarConfig {
+    /// 总开关，语义见 [`PinyinGrammar::enabled`]。
+    #[serde(default = "default_grammar_enabled")]
+    pub enabled: bool,
     #[serde(default = "default_mobile_grammar_weight")]
     pub weight: f64,
     #[serde(default = "default_mobile_grammar_model")]
@@ -3940,6 +3963,7 @@ pub struct MobileGrammarConfig {
 impl Default for MobileGrammarConfig {
     fn default() -> Self {
         Self {
+            enabled: default_grammar_enabled(),
             weight: default_mobile_grammar_weight(),
             model: default_mobile_grammar_model(),
         }
@@ -5080,6 +5104,7 @@ impl Config {
         let mut p = self.schema.pinyin.clone();
         if mobile {
             p.grammar = PinyinGrammar {
+                enabled: self.mobile.grammar.enabled,
                 weight: self.mobile.grammar.weight,
                 model: self.mobile.grammar.model.clone(),
             };
@@ -8952,6 +8977,44 @@ impl Config {
         Self::migrate_langbar_badge_colors_value(layer);
         Self::migrate_tooltip_sections_value(layer);
         Self::migrate_stale_factory_tooltip_sections_value(layer);
+        Self::migrate_grammar_enabled_value(layer);
+    }
+
+    /// 存量迁移（**层内**）：本层已手写 `[schema.pinyin.grammar]` 的 `weight`（非 0）与 `model`
+    /// （非空）、却没写 `enabled` → 补 `enabled = true`。
+    ///
+    /// 为什么需要：`enabled` 在单层反序列化时缺省 true，但**分层合并后**不成立——桌面出厂层
+    /// （L2 `data/config.toml`）显式写了 `enabled = false`，用户层没写的键保留下层的值，
+    /// 于是只手写过 weight + model 的老用户升级后被出厂的 false 盖住、模型悄悄关掉。
+    /// 手写过这两项就是明确想开，补一个 true 才是「老配置照旧生效」。
+    ///
+    /// 已知边界：这样的用户在设置页把开关关掉，`enabled = false` 等于出厂值会被剪枝删掉，
+    /// 下次加载又被本迁移补回 true。要关只能删掉 weight / model 两行——他们本就是手改配置的人。
+    fn migrate_grammar_enabled_value(layer: &mut toml::Value) {
+        let Some(g) = layer
+            .get_mut("schema")
+            .and_then(|s| s.get_mut("pinyin"))
+            .and_then(|p| p.get_mut("grammar"))
+            .and_then(toml::Value::as_table_mut)
+        else {
+            return;
+        };
+        if g.contains_key("enabled") {
+            return;
+        }
+        let weight_set = g.get("weight").is_some_and(|v| {
+            v.as_float()
+                .or_else(|| v.as_integer().map(|i| i as f64))
+                .is_some_and(|w| w != 0.0)
+        });
+        let model_set = g
+            .get("model")
+            .and_then(toml::Value::as_str)
+            .is_some_and(|m| !m.trim().is_empty());
+        if weight_set && model_set {
+            g.insert("enabled".to_string(), toml::Value::Boolean(true));
+            info!("schema.pinyin.grammar has weight+model but no enabled → enabled = true");
+        }
     }
 
     /// 存量迁移（**层内**）：本层的 `ui.tooltip.sections` 与「释义」段加入之前的旧出厂 6 段
@@ -9347,6 +9410,7 @@ impl Config {
         Self::migrate_tooltip_sections_value(&mut root);
         Self::migrate_stale_factory_tooltip_sections_value(&mut root);
         Self::migrate_comment_max_chars_value(&mut root);
+        Self::migrate_grammar_enabled_value(&mut root);
         let migrated = usize::from(root != before);
         // 退役键（[`RETIRED_KEYS`]）先清：它们与出厂默认无关，**不能**被 preset 取不到时的
         // 提前返回挡住——否则没装 data/config.toml 的环境永远清不掉。
@@ -10418,6 +10482,9 @@ impl Config {
         Self::migrate_tooltip_sections_value(&mut root);
         // 注释字数旧键同理：竖排改回 0（出厂值 ⇒ 被剪掉）后，残留的旧键会在下次 load 补回原值。
         Self::migrate_comment_max_chars_value(&mut root);
+        // 语法模型总开关：老用户只写了 weight + model 时，要在写新值**之前**补上 enabled = true，
+        // 否则别的键的保存会把与出厂相同的 weight / model 剪掉，补 true 的依据就丢了。
+        Self::migrate_grammar_enabled_value(&mut root);
         // 供落盘后通知钩子用：下方 set_nested 会 move 掉 value。
         let value_for_hook = value.clone();
         // 出厂默认取不到时 `is_default` 恒 false → 退化为「照常写入」的旧行为（安全降级）。
@@ -10680,6 +10747,82 @@ mod tests {
         assert_eq!(cfg.schema.pinyin.grammar.weight, 0.0, "基线不被覆盖值写穿");
     }
 
+    /// 总开关的平台归属：移动端读 `[mobile.grammar].enabled`，不被桌面基线的 enabled 牵着走。
+    #[test]
+    fn pinyin_grammar_enabled_follows_platform_override() {
+        let mut cfg = Config::default();
+        cfg.schema.pinyin.grammar.weight = 0.5;
+        cfg.schema.pinyin.grammar.model = "wanxiang-mini.gram".into();
+
+        cfg.schema.pinyin.grammar.enabled = false;
+        assert!(!cfg.pinyin_effective(false).grammar.active(), "桌面关");
+        assert!(
+            cfg.pinyin_effective(true).grammar.active(),
+            "桌面关不波及手机"
+        );
+
+        cfg.schema.pinyin.grammar.enabled = true;
+        cfg.mobile.grammar.enabled = false;
+        assert!(!cfg.pinyin_effective(true).grammar.active(), "手机关");
+        assert!(
+            cfg.pinyin_effective(false).grammar.active(),
+            "手机关不波及桌面"
+        );
+        assert!(cfg.schema.pinyin.grammar.enabled, "基线不被覆盖值写穿");
+    }
+
+    /// 真实分层：L1 默认 ⊕ L2 出厂 `data/config.toml` ⊕ 用户层，返回桌面生效的语法模型配置。
+    fn desktop_grammar_with_user_layer(user_toml: &str) -> PinyinGrammar {
+        let data = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../data/config.toml");
+        let factory: toml::Value =
+            toml::from_str(&std::fs::read_to_string(data).expect("读出厂 config.toml")).unwrap();
+        let mut user: toml::Value = toml::from_str(user_toml).unwrap();
+        Config::migrate_user_layer_value(&mut user);
+        let mut merged = toml::Value::try_from(Config::default()).unwrap();
+        merge_value(&mut merged, factory);
+        merge_value(&mut merged, user);
+        let cfg: Config = merged.try_into().expect("反序列化");
+        cfg.pinyin_effective(false).grammar
+    }
+
+    /// 桌面出厂：开关关，模型不加载，但 weight / model 已备好。
+    #[test]
+    fn desktop_factory_grammar_is_off_but_ready() {
+        let g = desktop_grammar_with_user_layer("");
+        assert!(!g.enabled && !g.active());
+        assert_eq!((g.weight, g.model.as_str()), (0.5, "wanxiang-mini.gram"));
+    }
+
+    /// 设置页勾上只写一个 enabled，就该生效。
+    #[test]
+    fn desktop_toggle_alone_activates_factory_model() {
+        let g = desktop_grammar_with_user_layer("[schema.pinyin.grammar]\nenabled = true");
+        assert!(g.active());
+    }
+
+    /// ★ 老配置：只手写了 weight + model（没有 enabled）的桌面用户，叠在出厂 enabled=false 上
+    /// 也必须照旧生效——否则升级后模型被悄悄关掉。
+    #[test]
+    fn desktop_legacy_weight_and_model_stay_active_over_factory_false() {
+        let g = desktop_grammar_with_user_layer(
+            "[schema.pinyin.grammar]\nweight = 0.4\nmodel = \"wanxiang-lts-zh-hans.gram\"",
+        );
+        assert!(g.active(), "老配置被出厂 enabled=false 盖住了");
+        assert_eq!(g.model, "wanxiang-lts-zh-hans.gram");
+    }
+
+    /// 迁移只认「两项都手写」：只写 weight 不算想开（与「不静默启用默认模型」同一原则），
+    /// 显式写了 enabled = false 的更不能被改回去。
+    #[test]
+    fn grammar_migration_is_conservative() {
+        let only_weight = desktop_grammar_with_user_layer("[schema.pinyin.grammar]\nweight = 0.4");
+        assert!(!only_weight.active());
+        let explicit_off = desktop_grammar_with_user_layer(
+            "[schema.pinyin.grammar]\nenabled = false\nweight = 0.4\nmodel = \"x.gram\"",
+        );
+        assert!(!explicit_off.active(), "显式 enabled=false 不能被迁移改回");
+    }
+
     #[test]
     fn codetable_wildcard_folds_from_schema_and_validates_key() {
         let g = CodetableGlobal::default();
@@ -10822,6 +10965,27 @@ mod tests {
         // 从空配置反序列化（用户没写这一段）也要落到同一处
         let from_empty: PinyinGrammar = toml::from_str("").expect("空表可反序列化");
         assert_eq!(from_empty, g, "缺省反序列化须与 Default 一致");
+        assert!(!g.active(), "默认不加载模型");
+    }
+
+    /// 开关只做否决：老配置只写 weight + model（没有 enabled）照旧生效；
+    /// 开关关掉则不论 weight / model 写了什么都不加载；开着但少一项仍不加载。
+    #[test]
+    fn grammar_enabled_only_vetoes() {
+        let legacy: PinyinGrammar =
+            toml::from_str("weight = 0.5\nmodel = \"wanxiang-mini.gram\"").unwrap();
+        assert!(
+            legacy.enabled && legacy.active(),
+            "老配置不写 enabled 须照旧生效"
+        );
+
+        let off: PinyinGrammar =
+            toml::from_str("enabled = false\nweight = 0.5\nmodel = \"wanxiang-mini.gram\"")
+                .unwrap();
+        assert!(!off.active(), "enabled=false 必须否决");
+
+        let no_model: PinyinGrammar = toml::from_str("enabled = true\nweight = 0.5").unwrap();
+        assert!(!no_model.active(), "只开开关不配模型仍不加载");
     }
 
     /// 注释库的方案限定：`schemas` 留空适用于全部方案，非空则只在列出的方案下加载。

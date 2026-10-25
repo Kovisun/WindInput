@@ -357,7 +357,8 @@ static REGISTRY: &[ConfigField] = &[
     f("schema.pinyin.completion.min_syllables", Int),
     f("schema.pinyin.completion.max_extra_syllables", Int),
     f("schema.pinyin.abbrev.enabled", Bool),
-    // 上下文语言模型（n-gram）。weight=0 时不加载模型文件，整句结果与没有该功能时逐位相同。
+    // 上下文语言模型（n-gram）。enabled=false 或 weight=0 时都不加载模型文件，整句结果与没有该功能时逐位相同。
+    f("schema.pinyin.grammar.enabled", Bool),
     f("schema.pinyin.grammar.weight", Float),
     f("schema.pinyin.grammar.model", Str),
     // 双拼下的全拼降级输入（多人共用机器）。非双拼方案无效，混输次引擎强制关闭。
@@ -800,6 +801,7 @@ static REGISTRY: &[ConfigField] = &[
     f("mobile.association.mode", Enum(&["one_shot", "continuous"])),
     f("mobile.association.punct", Bool),
     f("mobile.association.space_commits", Bool),
+    f("mobile.grammar.enabled", Bool),
     f("mobile.grammar.weight", Float),
     f("mobile.grammar.model", Str),
 ];
