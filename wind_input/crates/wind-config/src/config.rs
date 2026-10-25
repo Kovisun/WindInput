@@ -1400,6 +1400,11 @@ impl AuxCodeGlobal {
 /// 设计与实测见 `docs/design/language-model-integration.md`。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PinyinGrammar {
+    /// 总开关，设置页的那个勾。**默认 true 且只做否决**：真正生效仍要 `weight` 与 `model`
+    /// 都配了（见 [`PinyinGrammar::active`]），所以手写过这两项的老配置不受影响；
+    /// 出厂配置里桌面把它写成 false、同时备好 weight / model，设置页一勾即用。
+    #[serde(default = "default_grammar_enabled")]
+    pub enabled: bool,
     /// 影响力权重。**0 = 关闭**：不加载模型文件、不占内存，且整句结果与没有这个
     /// 功能时**逐位相同**。
     ///
@@ -1435,9 +1440,21 @@ fn default_grammar_weight() -> f64 {
     0.0
 }
 
+fn default_grammar_enabled() -> bool {
+    true
+}
+
+impl PinyinGrammar {
+    /// 引擎该不该加载模型：开关开着，且 `weight` 与 `model` 都显式配了。
+    pub fn active(&self) -> bool {
+        self.enabled && self.weight != 0.0 && !self.model.trim().is_empty()
+    }
+}
+
 impl Default for PinyinGrammar {
     fn default() -> Self {
         Self {
+            enabled: default_grammar_enabled(),
             weight: default_grammar_weight(),
             model: String::new(),
         }
@@ -3931,6 +3948,9 @@ pub struct MobileConfig {
 /// （[`Config::pinyin_effective`]）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MobileGrammarConfig {
+    /// 总开关，语义见 [`PinyinGrammar::enabled`]。
+    #[serde(default = "default_grammar_enabled")]
+    pub enabled: bool,
     #[serde(default = "default_mobile_grammar_weight")]
     pub weight: f64,
     #[serde(default = "default_mobile_grammar_model")]
@@ -3940,6 +3960,7 @@ pub struct MobileGrammarConfig {
 impl Default for MobileGrammarConfig {
     fn default() -> Self {
         Self {
+            enabled: default_grammar_enabled(),
             weight: default_mobile_grammar_weight(),
             model: default_mobile_grammar_model(),
         }
@@ -5080,6 +5101,7 @@ impl Config {
         let mut p = self.schema.pinyin.clone();
         if mobile {
             p.grammar = PinyinGrammar {
+                enabled: self.mobile.grammar.enabled,
                 weight: self.mobile.grammar.weight,
                 model: self.mobile.grammar.model.clone(),
             };
@@ -10822,6 +10844,27 @@ mod tests {
         // 从空配置反序列化（用户没写这一段）也要落到同一处
         let from_empty: PinyinGrammar = toml::from_str("").expect("空表可反序列化");
         assert_eq!(from_empty, g, "缺省反序列化须与 Default 一致");
+        assert!(!g.active(), "默认不加载模型");
+    }
+
+    /// 开关只做否决：老配置只写 weight + model（没有 enabled）照旧生效；
+    /// 开关关掉则不论 weight / model 写了什么都不加载；开着但少一项仍不加载。
+    #[test]
+    fn grammar_enabled_only_vetoes() {
+        let legacy: PinyinGrammar =
+            toml::from_str("weight = 0.5\nmodel = \"wanxiang-mini.gram\"").unwrap();
+        assert!(
+            legacy.enabled && legacy.active(),
+            "老配置不写 enabled 须照旧生效"
+        );
+
+        let off: PinyinGrammar =
+            toml::from_str("enabled = false\nweight = 0.5\nmodel = \"wanxiang-mini.gram\"")
+                .unwrap();
+        assert!(!off.active(), "enabled=false 必须否决");
+
+        let no_model: PinyinGrammar = toml::from_str("enabled = true\nweight = 0.5").unwrap();
+        assert!(!no_model.active(), "只开开关不配模型仍不加载");
     }
 
     /// 注释库的方案限定：`schemas` 留空适用于全部方案，非空则只在列出的方案下加载。

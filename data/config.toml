@@ -437,14 +437,17 @@ enabled = true
 # 实测：独立口语评测首选整句 +5～+6.5 个点，单次转换多约 2 ms。设计与评测见
 # docs/design/language-model-integration.md §10–§11，重建见 scripts/lm/build_grammar.sh。
 #
-# 桌面要开：weight = 0.5、model = "wanxiang-mini.gram"。
+# 桌面要开：设置页「拼音 → 候选行为」勾上「整句语法模型」，或把 enabled 改成 true。
 
 [schema.pinyin.grammar]
-# 0 = 关闭（桌面默认）。关闭时不读模型文件、不占内存，整句结果与没有该功能时逐位相同。
-weight = 0.0
-# 模型文件名，相对 data/schemas/pinyin/grammar/。**空串（默认）= 不启用**。
-# weight 与 model 两个都要显式配置才生效——只调 weight 不会静默启用某个默认模型。
-model = ""
+# 总开关。桌面出厂关；关着时不读模型文件、不占内存，整句结果与没有该功能时逐位相同。
+enabled = false
+# 影响力权重，0 = 关闭。下面两项出厂就备好，所以勾上开关即用。
+# 老配置只写 weight + model、没有 enabled 的，照旧生效（enabled 缺省为 true，只做否决）。
+weight = 0.5
+# 模型文件名，相对 data/schemas/pinyin/grammar/。空串 = 不启用。
+# weight 与 model 两个都要配置才生效——只调 weight 不会静默启用某个默认模型。
+model = "wanxiang-mini.gram"
 
 # 拼音自动造词：分步选词 / 整句上屏后按已上屏的词写入**临时词库**（立即可选），
 # 累计用满 promote_count 次才晋升进用户词库——出厂 promote_count = 0，即只进临时词库。
@@ -1920,6 +1923,8 @@ punct = true
 space_commits = false
 
 [mobile.grammar]
+# 总开关，手机端设置页「输入 → 拼音」里的那个勾。
+enabled = true
 # 移动端默认开整句语法模型：软键盘上整句打错要逐字改，代价比桌面高。
 # 桌面相反（[schema.pinyin.grammar] 里 weight = 0）——等移动端真机跑稳再议。
 weight = 0.5
