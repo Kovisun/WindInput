@@ -1923,9 +1923,9 @@ punct = true
 space_commits = false
 
 [mobile.grammar]
-# 总开关，手机端设置页「输入 → 拼音」里的那个勾。
+# 总开关，手机端设置页「方案 → 拼音」里的那个勾。
 enabled = true
 # 移动端默认开整句语法模型：软键盘上整句打错要逐字改，代价比桌面高。
-# 桌面相反（[schema.pinyin.grammar] 里 weight = 0）——等移动端真机跑稳再议。
+# 桌面相反（[schema.pinyin.grammar] 出厂 enabled = false，设置页可勾）——等移动端真机跑稳再议。
 weight = 0.5
 model = "wanxiang-mini.gram"

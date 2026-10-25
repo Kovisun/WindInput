@@ -7108,7 +7108,7 @@ impl EngineManager {
             };
             let mut engine = PinyinEngine::new(pcfg, dict).with_fuzzy(fuzzy.clone());
             // 上下文语言模型：开关（`enabled`）开着，且 **weight 与 model 都得显式配置**才启用——
-            // `weight != 0` 且 `model` 非空（见 `PinyinGrammar::active`）。任一为默认值都**根本不读文件**，
+            // `weight != 0` 且 `model` 非空（见 `PinyinGrammar::active`）。开关关、weight 为 0、model 为空，任一成立都**根本不读文件**，
             // 既省内存，也让「没配就等于没这功能」在字节层面成立。
             //
             // ★ 为什么模型名也要参与判据：默认模型名一度是 `zh-hans-bgw.gram`，
