@@ -6048,9 +6048,24 @@ impl Coordinator {
     fn page_key_overflow_to_punct(&self, state: &State, data: &KeyEventData) -> bool {
         state.active.is_none()
             && !state.paged
-            && self.rt().config.keys.overflow.page_key == "commit_and_input"
+            && self.page_key_overflow_commits(data.key_code)
             && punct_char(data.key_code, data.modifiers & MOD_SHIFT != 0)
                 .is_some_and(|c| !c.is_ascii_digit())
+    }
+
+    /// 该翻页键「翻不动时是否顶屏出符号」：按键级覆盖（`keys.overflow.page_key_overrides`）
+    /// 优先，未列出的键回落全局档 `page_key`。键名经 KEY_TABLE 反查 VK 比对；只有翻不动的
+    /// 那一下走到这里，覆盖表至多六条、`key_name_to_vk` 是常量表扫描，开销可忽略。
+    /// 键名写错 / 值非法在加载期已 WARN（`config_bundle::warn_unknown_page_key_overrides`）。
+    fn page_key_overflow_commits(&self, key_code: u32) -> bool {
+        let ov = &self.rt().config.keys.overflow;
+        let behavior = ov
+            .page_key_overrides
+            .iter()
+            .find(|(name, _)| keymap::key_name_to_vk(name) == Some(key_code))
+            .map(|(_, b)| b.as_str())
+            .unwrap_or(&ov.page_key);
+        behavior == "commit_and_input"
     }
 
     /// 当前是否有输入会话：正在 overlay 模式里，或普通输入有编码 / 候选 / 已上屏段。

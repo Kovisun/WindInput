@@ -6005,6 +6005,16 @@ pub struct OverflowConfig {
     /// 只有这两档——「只顶不出字」没有诉求。
     #[serde(default = "default_overflow_behavior")]
     pub page_key: String,
+    /// **按键级覆盖**（`page_key` 的默认档之上）：键名（wind-keys KEY_TABLE names，如
+    /// `comma` / `period` / `minus` / `equal` / `lbracket` / `rbracket`）→ 策略，值域与
+    /// [`Self::page_key`] 相同。未列出的键回落 `page_key`。
+    ///
+    /// 为什么要有这张表：全局档把 `- = , . [ ]` 一把抓，而有人只要「逗号翻不动时上屏」、
+    /// 其余翻页键**无效就是无效**——行为策略必须能落到单个按键上（GH#249）。键名写错 /
+    /// 值非法由加载期告警（`config_bundle` 的 `warn_unknown_page_key_overrides`）并忽略，
+    /// 不静默吃掉。
+    #[serde(default)]
+    pub page_key_overrides: BTreeMap<String, String>,
 }
 
 fn default_overflow_behavior() -> String {
@@ -6018,6 +6028,7 @@ impl Default for OverflowConfig {
             select_key: default_overflow_behavior(),
             select_char_key: default_overflow_behavior(),
             page_key: default_overflow_behavior(),
+            page_key_overrides: BTreeMap::new(),
         }
     }
 }
